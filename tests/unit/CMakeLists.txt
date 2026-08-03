@@ -4,5 +4,7 @@ engine_add_tests(TREE unit SOURCES
   smoke_test.cpp)
 
 engine_add_tests(TREE unit SOURCES
+  check_test.cpp
   logging_test.cpp
+  status_test.cpp
   DEPS engine::core)

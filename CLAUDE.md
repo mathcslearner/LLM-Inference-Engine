@@ -125,4 +125,10 @@ macros over spdlog, per-module named loggers with per-module level overrides,
 `ENGINE_LOG_LEVEL` env var + programmatic API, compile-time floor
 `ENGINE_MIN_LOG_LEVEL` strips `LOG_DEBUG` in Release; spdlog is private to
 `logging.cpp` — no raw spdlog usage outside the wrapper).
-Next up: **M0-T07**.
+M0-T07 done (error-handling primitives: `src/core/status.h` — `StatusCode`
+taxonomy, `Status`, `StatusOr<T>` (variant-backed, move-only-friendly),
+fmt-composing per-code factories + `Is<Code>` predicates, `RETURN_IF_ERROR`,
+`ASSIGN_OR_RETURN`, `CHECK_OK`/`DCHECK_OK`; `src/core/check.h` — fatal
+`CHECK`/`DCHECK` with optional fmt message, `DCHECK` compiles to nothing
+under NDEBUG; ADR-003 policy documented in both headers).
+Next up: **M0-T08**.

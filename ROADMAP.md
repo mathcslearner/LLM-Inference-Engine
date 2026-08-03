@@ -125,7 +125,7 @@ programmatic API. No raw spdlog usage outside the wrapper.
 - Log level switchable at runtime; messages include timestamp, level, module, source location.
 - Unit tests verify level filtering and formatting; hot-path macro compiles to nothing above the configured level in Release.
 
-### M0-T07 · Error-handling primitives
+### M0-T07 · Error-handling primitives — ✅ DONE (2026-08-03)
 Implement `Status` and `StatusOr<T>` (or `Result<T, Error>`) in `src/core/status.h`
 with an error-code taxonomy (`InvalidArgument`, `OutOfMemory`, `NotFound`,
 `Unimplemented`, `Internal`, `ResourceExhausted`, …), plus `RETURN_IF_ERROR`,

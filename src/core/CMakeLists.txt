@@ -1,4 +1,7 @@
-add_library(engine_core STATIC logging.cpp)
+add_library(engine_core STATIC
+  check.cpp
+  logging.cpp
+  status.cpp)
 add_library(engine::core ALIAS engine_core)
 target_include_directories(engine_core PUBLIC ${PROJECT_SOURCE_DIR}/src)
 # fmt is PUBLIC because logging.h formats messages at the call site; spdlog
