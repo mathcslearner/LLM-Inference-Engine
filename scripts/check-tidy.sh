@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Runs clang-tidy (config: .clang-tidy) over all tracked C++ translation
-# units. Any diagnostic fails the script (WarningsAsErrors: '*').
+# Runs clang-tidy (config: .clang-tidy) over all C++ translation units
+# (tracked or not, minus .gitignore'd). Any diagnostic fails the script
+# (WarningsAsErrors: '*').
 #
 # Needs a compile database; configures ${ENGINE_BUILD_DIR:-build} if missing
 # (CMAKE_EXPORT_COMPILE_COMMANDS is ON project-wide). Headers are analyzed
@@ -39,7 +40,9 @@ else
 fi
 
 # xargs exits non-zero if any clang-tidy invocation reports a diagnostic.
-if ! git ls-files -z -- '*.cc' '*.cpp' '*.cxx' |
+# --cached --others --exclude-standard: tracked plus untracked files, minus
+# anything .gitignore'd — new TUs are analyzed before they are staged.
+if ! git ls-files -z --cached --others --exclude-standard -- '*.cc' '*.cpp' '*.cxx' |
   xargs -0 -P "$jobs" -n 1 \
     "$clang_tidy" -p "$build_dir" --quiet ${extra_args[@]+"${extra_args[@]}"}; then
   echo "" >&2

@@ -58,9 +58,11 @@ resolve_clang_tool() {
 }
 
 # engine_cxx_sources
-# NUL-delimited list of all tracked C++/CUDA sources, for xargs -0.
+# NUL-delimited list of all C++/CUDA sources, for xargs -0: tracked files
+# plus untracked ones (--others), so new files are checked before they are
+# staged; --exclude-standard keeps .gitignore'd trees (build*/) out.
 # Runs from the repository root (the entry-point scripts cd there).
 engine_cxx_sources() {
-  git ls-files -z -- \
+  git ls-files -z --cached --others --exclude-standard -- \
     '*.h' '*.hpp' '*.cc' '*.cpp' '*.cxx' '*.cu' '*.cuh'
 }
