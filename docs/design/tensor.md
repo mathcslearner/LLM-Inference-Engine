@@ -547,6 +547,33 @@ unchanged, with these additions:
 - **`to_string`**: header line + nested NumPy-style rows, `edge_items`
   truncation (`[0, 1, 2, ..., 7, 8, 9]`). An undefined handle prints
   `"Tensor(undefined)"` rather than CHECKing — it is a debugging aid.
+- **`copy`** (M1-T09): `copy(dst, src)` requires identical shape *and*
+  dtype — dtype conversion is only ever the named `cast` (§1's
+  no-implicit-anything rule) — otherwise `InvalidArgument`. Elements are
+  copied by logical index, so either side may be a strided view and only
+  the view's elements are written; both-contiguous pairs take a memcpy
+  fast path. `dst` and `src` aliasing overlapping bytes of one buffer is
+  undefined behavior (the memcpy rule; detecting partial overlap through
+  arbitrary strides isn't worth it for a reference path) — except that a
+  `dst` identical to `src` is a well-defined no-op.
+- **`cast`** (M1-T09): `cast(src, dtype)` always allocates a fresh
+  contiguous row-major result — a same-dtype cast is a deep copy, never
+  the source handle, so ownership is predictable. Supported on both sides:
+  the floating and integer kinds; **kBool is excluded in both directions**
+  (`InvalidArgument`) — it is neither kind (§3), float→bool semantics are
+  ambiguous, and nothing needs it yet. A reserved target dtype is
+  `Unimplemented` via `empty`, checked first so it wins over the kBool
+  complaint (mirrors `full`'s ordering). Conversion policy: floating
+  targets widen the source to double (exact for every supported source;
+  int64 beyond 2^53 rounds to nearest) and narrow per M1-T07
+  (double → float → half) — the same path the factories and fills use,
+  which is what makes "fp32→fp16 matches the half.h constructors
+  bit-exactly" hold by construction; out-of-range values become ±inf and
+  NaN passes through. Integer targets truncate floating sources toward
+  zero (C semantics) and require the result representable: NaN, ±inf, or
+  out-of-range — including integer→integer narrowing — is
+  `InvalidArgument` naming the first offending value and its logical
+  index. Loud beats silent wrap in the correctness oracle.
 
 ---
 

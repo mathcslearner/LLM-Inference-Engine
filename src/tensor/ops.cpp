@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <numbers>
@@ -153,6 +154,45 @@ template <typename T>
     return false;  // ±inf or beyond int64; no smaller dtype can hold it.
   }
   return FitsIntegerDtype(dtype, static_cast<std::int64_t>(value));
+}
+
+// Whether `dtype` participates in cast: the floating and integer kinds,
+// excluding kBool (neither kind, and float→bool semantics are ambiguous).
+// Reserved dtypes slip through the predicate (kFP8E4M3 is floating, kInt4
+// integral) but can never reach a conversion loop: no Tensor can carry them
+// as a source, and as a target Tensor::empty returns Unimplemented first.
+[[nodiscard]] constexpr bool IsCastableDtype(DataType dtype) {
+  return is_floating_point(dtype) || is_integral(dtype);
+}
+
+// Converts one element Src → Dst per the cast policy in ops.h. Returns
+// false when the value is not representable in Dst (integer targets only;
+// floating targets absorb everything via ±inf/NaN).
+template <typename Dst, typename Src>
+[[nodiscard]] bool CastElement(Src value, Dst& out) {
+  if constexpr (is_floating_point(dtype_of<Dst>)) {
+    // Exact widen (int64 > 2^53 rounds to nearest), M1-T07 narrow.
+    out = NarrowDouble<Dst>(WidenToDouble(value));
+    return true;
+  } else if constexpr (is_floating_point(dtype_of<Src>)) {
+    // trunc keeps NaN and ±inf, which FitsIntegerDtype then rejects.
+    const double truncated = std::trunc(WidenToDouble(value));
+    if (!FitsIntegerDtype(dtype_of<Dst>, truncated)) {
+      return false;
+    }
+    out = static_cast<Dst>(truncated);
+    return true;
+  } else {
+    // int8 tensor elements are numbers, not text; this value-preserving
+    // widening is exactly the conversion the check exists to question.
+    // NOLINTNEXTLINE(bugprone-signed-char-misuse)
+    const auto widened = static_cast<std::int64_t>(value);
+    if (!FitsIntegerDtype(dtype_of<Dst>, widened)) {
+      return false;
+    }
+    out = static_cast<Dst>(widened);
+    return true;
+  }
 }
 
 // The seeded generator behind both fills. std::mt19937_64's output sequence
@@ -415,6 +455,92 @@ Status fill_normal(const Tensor& tensor, double mean, double stddev,
     return mean + (stddev * z);
   });
   return OkStatus();
+}
+
+Status copy(const Tensor& dst, const Tensor& src) {
+  CHECK(dst.defined() && src.defined(), "copy: undefined Tensor");
+  CHECK(dst.device().is_cpu() && src.device().is_cpu(),
+        "copy requires CPU tensors; devices are {} and {}",
+        dst.device().ToString(), src.device().ToString());
+  if (dst.dtype() != src.dtype()) {
+    return InvalidArgumentError(
+        "copy: dtype mismatch: {} vs {} (dtype conversion is cast)",
+        to_string(dst.dtype()), to_string(src.dtype()));
+  }
+  if (dst.shape() != src.shape()) {
+    return InvalidArgumentError("copy: shape mismatch: {} vs {}", dst.shape(),
+                                src.shape());
+  }
+  if (dst.numel() == 0) {
+    return OkStatus();
+  }
+  if (dst.is_contiguous() && src.is_contiguous()) {
+    // Equal pointers with matching shape/dtype means identical contiguous
+    // views: a no-op (and memcpy onto itself would be UB).
+    if (dst.data() != src.data()) {
+      std::memcpy(dst.data(), src.data(),
+                  static_cast<std::size_t>(dst.numel()) *
+                      static_cast<std::size_t>(itemsize(dst.dtype())));
+    }
+    return OkStatus();
+  }
+  DispatchDtype(dst.dtype(), [&](auto tag) {
+    using T = typename decltype(tag)::type;
+    const T* src_data = src.data_ptr<T>();
+    T* dst_data = dst.data_ptr<T>();
+    ForEachIndex(dst.shape(), [&](const DimVector& index) {
+      dst_data[ElementOffset(index, dst.strides())] =
+          src_data[ElementOffset(index, src.strides())];
+    });
+  });
+  return OkStatus();
+}
+
+StatusOr<Tensor> cast(const Tensor& src, DataType dtype,
+                      memory::Allocator* allocator) {
+  CHECK(src.defined(), "cast: undefined Tensor");
+  CHECK(src.device().is_cpu(), "cast requires a CPU tensor; device is {}",
+        src.device().ToString());
+  // Allocate first so a reserved target dtype reports Unimplemented (its
+  // real blocker), mirroring full's ordering.
+  ASSIGN_OR_RETURN(Tensor out,
+                   Tensor::empty(src.shape(), dtype, src.device(), allocator));
+  if (!IsCastableDtype(src.dtype()) || !IsCastableDtype(dtype)) {
+    return InvalidArgumentError("cast: unsupported dtype pair {} -> {}",
+                                to_string(src.dtype()), to_string(dtype));
+  }
+  if (src.numel() == 0) {
+    return out;
+  }
+  Status status = OkStatus();
+  DispatchDtype(src.dtype(), [&](auto src_tag) {
+    using Src = typename decltype(src_tag)::type;
+    DispatchDtype(dtype, [&](auto dst_tag) {
+      using Dst = typename decltype(dst_tag)::type;
+      const Src* src_data = src.data_ptr<Src>();
+      Dst* dst_data = out.data_ptr<Dst>();
+      const Strides& src_strides = src.strides();
+      // The output is freshly allocated contiguous row-major, so the
+      // logical row-major walk writes it linearly.
+      std::int64_t linear = 0;
+      ForEachIndex(src.shape(), [&](const DimVector& index) {
+        if (!status.ok()) {
+          return;
+        }
+        const Src value = src_data[ElementOffset(index, src_strides)];
+        Dst converted{};
+        if (!CastElement(value, converted)) {
+          status = InvalidArgumentError(
+              "cast: value {} at index {} is not representable in {}",
+              WidenToDouble(value), index, to_string(dtype));
+          return;
+        }
+        dst_data[linear++] = converted;
+      });
+    });
+  });
+  RETURN_IF_ERROR(status);
+  return out;
 }
 
 std::string AllCloseResult::Summary() const {

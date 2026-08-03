@@ -11,8 +11,10 @@
 
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace {
@@ -634,6 +636,276 @@ TEST(OpsToStringTest, UndefinedHandle) {
   EXPECT_EQ(ops::to_string(Tensor{}), "Tensor(undefined)");
 }
 
+// --- copy ---
+
+TEST(OpsCopyTest, ContiguousRoundTripEveryAllocatableDtype) {
+  for (const DataType dtype :
+       {DataType::kFloat32, DataType::kFloat16, DataType::kBFloat16,
+        DataType::kInt8, DataType::kUInt8, DataType::kInt32, DataType::kInt64,
+        DataType::kBool}) {
+    const std::int64_t n = dtype == DataType::kBool ? 2 : 6;
+    const Tensor src = Unwrap(ops::arange(0, n, 1, dtype));
+    const Tensor dst = Unwrap(ops::zeros(Shape{n}, dtype));
+    ASSERT_TRUE(ops::copy(dst, src).ok());
+    const AllCloseResult close = Unwrap(ops::allclose(dst, src, 0.0, 0.0));
+    EXPECT_TRUE(close.allclose)
+        << engine::tensor::to_string(dtype) << ": " << close.Summary();
+  }
+}
+
+TEST(OpsCopyTest, CopiesAreDeep) {
+  const Tensor src = Unwrap(ops::arange(0, 4, 1, DataType::kFloat32));
+  const Tensor dst = Unwrap(ops::zeros(Shape{4}, DataType::kFloat32));
+  ASSERT_TRUE(ops::copy(dst, src).ok());
+  src.data_ptr<float>()[0] = 42.0F;
+  EXPECT_EQ(dst.item<float>({0}), 0.0F);  // dst has its own bytes
+}
+
+TEST(OpsCopyTest, StridedDestinationWritesOnlyViewElements) {
+  const Tensor parent = Unwrap(ops::zeros(Shape{2, 4}, DataType::kFloat32));
+  const Tensor view = Unwrap(parent.slice(1, 1, 3));
+  ASSERT_FALSE(view.is_contiguous());
+  const Tensor src = Unwrap(
+      Unwrap(ops::arange(1, 5, 1, DataType::kFloat32)).reshape(Shape{2, 2}));
+  ASSERT_TRUE(ops::copy(view, src).ok());
+  // Columns 1..2 hold src's rows; columns 0 and 3 stay untouched.
+  EXPECT_EQ(parent.item<float>({0, 1}), 1.0F);
+  EXPECT_EQ(parent.item<float>({0, 2}), 2.0F);
+  EXPECT_EQ(parent.item<float>({1, 1}), 3.0F);
+  EXPECT_EQ(parent.item<float>({1, 2}), 4.0F);
+  for (std::int64_t row = 0; row < 2; ++row) {
+    EXPECT_EQ(parent.item<float>({row, 0}), 0.0F);
+    EXPECT_EQ(parent.item<float>({row, 3}), 0.0F);
+  }
+}
+
+TEST(OpsCopyTest, StridedSourceReadsLogicalValues) {
+  const Tensor parent = Unwrap(
+      Unwrap(ops::arange(0, 8, 1, DataType::kInt32)).reshape(Shape{2, 4}));
+  const Tensor view = Unwrap(parent.slice(1, 1, 3));  // [[1, 2], [5, 6]]
+  const Tensor dst = Unwrap(ops::zeros(Shape{2, 2}, DataType::kInt32));
+  ASSERT_TRUE(ops::copy(dst, view).ok());
+  EXPECT_EQ(dst.item<std::int32_t>({0, 0}), 1);
+  EXPECT_EQ(dst.item<std::int32_t>({0, 1}), 2);
+  EXPECT_EQ(dst.item<std::int32_t>({1, 0}), 5);
+  EXPECT_EQ(dst.item<std::int32_t>({1, 1}), 6);
+}
+
+TEST(OpsCopyTest, StridedBothSides) {
+  const Tensor src_parent = Unwrap(
+      Unwrap(ops::arange(0, 8, 1, DataType::kInt64)).reshape(Shape{2, 4}));
+  const Tensor src = Unwrap(src_parent.slice(1, 1, 3));  // [[1, 2], [5, 6]]
+  const Tensor dst_parent = Unwrap(ops::zeros(Shape{2, 4}, DataType::kInt64));
+  const Tensor dst = Unwrap(dst_parent.slice(1, 2, 4));
+  ASSERT_FALSE(src.is_contiguous());
+  ASSERT_FALSE(dst.is_contiguous());
+  ASSERT_TRUE(ops::copy(dst, src).ok());
+  EXPECT_EQ(dst_parent.item<std::int64_t>({0, 2}), 1);
+  EXPECT_EQ(dst_parent.item<std::int64_t>({0, 3}), 2);
+  EXPECT_EQ(dst_parent.item<std::int64_t>({1, 2}), 5);
+  EXPECT_EQ(dst_parent.item<std::int64_t>({1, 3}), 6);
+  EXPECT_EQ(dst_parent.item<std::int64_t>({0, 0}), 0);
+  EXPECT_EQ(dst_parent.item<std::int64_t>({1, 1}), 0);
+}
+
+TEST(OpsCopyTest, SelfCopyIsANoOp) {
+  const Tensor t = Unwrap(ops::arange(0, 4, 1, DataType::kFloat32));
+  ASSERT_TRUE(ops::copy(t, t).ok());
+  for (std::int64_t i = 0; i < 4; ++i) {
+    EXPECT_EQ(t.item<float>({i}), static_cast<float>(i));
+  }
+}
+
+TEST(OpsCopyTest, EmptyTensors) {
+  const Tensor a = Unwrap(ops::zeros(Shape{0, 3}, DataType::kFloat32));
+  const Tensor b = Unwrap(ops::zeros(Shape{0, 3}, DataType::kFloat32));
+  EXPECT_TRUE(ops::copy(a, b).ok());
+}
+
+TEST(OpsCopyTest, InvalidArguments) {
+  const Tensor f32 = Unwrap(ops::zeros(Shape{2}, DataType::kFloat32));
+  const Tensor i32 = Unwrap(ops::zeros(Shape{2}, DataType::kInt32));
+  const Tensor other = Unwrap(ops::zeros(Shape{3}, DataType::kFloat32));
+  EXPECT_TRUE(IsInvalidArgument(ops::copy(f32, i32)));  // no implicit cast
+  EXPECT_TRUE(IsInvalidArgument(ops::copy(f32, other)));
+}
+
+// --- cast ---
+
+TEST(OpsCastTest, AllSupportedPairs) {
+  // Values 0..3 are exactly representable in every supported dtype, so
+  // every pair must produce exactly arange of the target dtype.
+  constexpr DataType kCastable[] = {DataType::kFloat32,  DataType::kFloat16,
+                                    DataType::kBFloat16, DataType::kInt8,
+                                    DataType::kUInt8,    DataType::kInt32,
+                                    DataType::kInt64};
+  for (const DataType src_dtype : kCastable) {
+    for (const DataType dst_dtype : kCastable) {
+      const Tensor src = Unwrap(ops::arange(0, 4, 1, src_dtype));
+      const Tensor out = Unwrap(ops::cast(src, dst_dtype));
+      EXPECT_EQ(out.dtype(), dst_dtype);
+      EXPECT_EQ(out.shape(), (Shape{4}));
+      EXPECT_TRUE(out.is_contiguous());
+      const Tensor expected = Unwrap(ops::arange(0, 4, 1, dst_dtype));
+      const AllCloseResult close =
+          Unwrap(ops::allclose(out, expected, 0.0, 0.0));
+      EXPECT_TRUE(close.allclose)
+          << engine::tensor::to_string(src_dtype) << " -> "
+          << engine::tensor::to_string(dst_dtype) << ": " << close.Summary();
+    }
+  }
+}
+
+TEST(OpsCastTest, Fp32ToHalvesMatchesM1T07Exactly) {
+  // The acceptance criterion: cast narrows bit-identically to the half.h
+  // constructors. Rounding boundaries (ties round to even), overflow to
+  // inf, subnormals, signed zero, NaN, infinities, plus seeded random
+  // values.
+  constexpr float kInf = std::numeric_limits<float>::infinity();
+  const float kBoundary[] = {
+      1.0F + 0x1p-11F,    // fp16 tie at 1.0 -> rounds to even (1.0)
+      1.0F + 0x1.8p-10F,  // fp16 tie -> rounds up to even
+      65504.0F,           // fp16 max finite
+      65520.0F,           // fp16 overflow tie -> inf
+      65519.9F,           // just below the tie -> stays 65504
+      0x1p-25F,           // fp16 subnormal tie -> 0
+      0x1.8p-24F,         // fp16 subnormal, rounds up
+      1.0F + 0x1p-8F,     // bf16 tie at 1.0
+      0.1F,
+      -0.0F,
+      kInf,
+      -kInf,
+      std::numeric_limits<float>::quiet_NaN(),
+  };
+  constexpr std::int64_t kNumBoundary = std::size(kBoundary);
+  constexpr std::int64_t kNumRandom = 64;
+  const Tensor src =
+      Unwrap(ops::zeros(Shape{kNumBoundary + kNumRandom}, DataType::kFloat32));
+  ASSERT_TRUE(ops::fill_uniform(src, -70000.0, 70000.0, 424242).ok());
+  for (std::int64_t i = 0; i < kNumBoundary; ++i) {
+    src.data_ptr<float>()[i] = kBoundary[i];
+  }
+
+  const Tensor f16 = Unwrap(ops::cast(src, DataType::kFloat16));
+  const Tensor bf16 = Unwrap(ops::cast(src, DataType::kBFloat16));
+  for (std::int64_t i = 0; i < src.numel(); ++i) {
+    const auto value = src.item<float>({i});
+    EXPECT_EQ(f16.item<float16>({i}).to_bits(), float16(value).to_bits())
+        << "fp16 at [" << i << "], value " << value;
+    EXPECT_EQ(bf16.item<bfloat16>({i}).to_bits(), bfloat16(value).to_bits())
+        << "bf16 at [" << i << "], value " << value;
+  }
+}
+
+TEST(OpsCastTest, HalvesWidenExactly) {
+  const Tensor f16 = Unwrap(ops::zeros(Shape{3}, DataType::kFloat16));
+  f16.data_ptr<float16>()[0] = float16::from_bits(0x3555);  // ~0.3333
+  f16.data_ptr<float16>()[1] = float16::from_bits(0x0001);  // min subnormal
+  f16.data_ptr<float16>()[2] = float16::from_bits(0xFBFF);  // -max finite
+  const Tensor widened = Unwrap(ops::cast(f16, DataType::kFloat32));
+  for (std::int64_t i = 0; i < 3; ++i) {
+    EXPECT_EQ(widened.item<float>({i}),
+              static_cast<float>(f16.item<float16>({i})));
+  }
+}
+
+TEST(OpsCastTest, SameDtypeCastIsADeepCopy) {
+  const Tensor src = Unwrap(ops::arange(0, 4, 1, DataType::kFloat32));
+  const Tensor out = Unwrap(ops::cast(src, DataType::kFloat32));
+  EXPECT_NE(out.data(), src.data());
+  src.data_ptr<float>()[0] = 42.0F;
+  EXPECT_EQ(out.item<float>({0}), 0.0F);
+}
+
+TEST(OpsCastTest, StridedSource) {
+  const Tensor parent = Unwrap(
+      Unwrap(ops::arange(0, 8, 1, DataType::kInt32)).reshape(Shape{2, 4}));
+  const Tensor view = Unwrap(parent.slice(1, 1, 3));  // [[1, 2], [5, 6]]
+  ASSERT_FALSE(view.is_contiguous());
+  const Tensor out = Unwrap(ops::cast(view, DataType::kFloat32));
+  EXPECT_TRUE(out.is_contiguous());
+  EXPECT_EQ(out.item<float>({0, 0}), 1.0F);
+  EXPECT_EQ(out.item<float>({0, 1}), 2.0F);
+  EXPECT_EQ(out.item<float>({1, 0}), 5.0F);
+  EXPECT_EQ(out.item<float>({1, 1}), 6.0F);
+}
+
+TEST(OpsCastTest, FloatToIntTruncatesTowardZero) {
+  const Tensor src = Unwrap(ops::zeros(Shape{4}, DataType::kFloat32));
+  src.data_ptr<float>()[0] = 2.7F;
+  src.data_ptr<float>()[1] = -2.7F;
+  src.data_ptr<float>()[2] = 0.9F;
+  src.data_ptr<float>()[3] = -0.9F;
+  const Tensor out = Unwrap(ops::cast(src, DataType::kInt32));
+  EXPECT_EQ(out.item<std::int32_t>({0}), 2);
+  EXPECT_EQ(out.item<std::int32_t>({1}), -2);
+  EXPECT_EQ(out.item<std::int32_t>({2}), 0);
+  EXPECT_EQ(out.item<std::int32_t>({3}), 0);
+}
+
+TEST(OpsCastTest, IntToFloatRounds) {
+  // 2^24 + 1 is not representable in fp32; nearest-even gives 2^24.
+  const Tensor i32 = Unwrap(ops::full(Shape{1}, DataType::kInt32, 16777217.0));
+  EXPECT_EQ(Unwrap(ops::cast(i32, DataType::kFloat32)).item<float>({0}),
+            16777216.0F);
+  // Beyond the fp16 range: overflows to +inf (NumPy behavior), not an error.
+  const Tensor big = Unwrap(ops::full(Shape{1}, DataType::kInt32, 70000.0));
+  const float widened =
+      Unwrap(ops::cast(big, DataType::kFloat16)).item<float16>({0});
+  EXPECT_TRUE(std::isinf(widened));
+  EXPECT_GT(widened, 0.0F);
+}
+
+TEST(OpsCastTest, UnrepresentableIntegerTargetsAreInvalid) {
+  const Tensor nan = Unwrap(ops::full(
+      Shape{2}, DataType::kFloat32, std::numeric_limits<double>::quiet_NaN()));
+  EXPECT_TRUE(IsInvalidArgument(ops::cast(nan, DataType::kInt32).status()));
+  const Tensor inf = Unwrap(ops::full(Shape{2}, DataType::kFloat32,
+                                      std::numeric_limits<double>::infinity()));
+  EXPECT_TRUE(IsInvalidArgument(ops::cast(inf, DataType::kInt64).status()));
+  const Tensor big = Unwrap(ops::full(Shape{2}, DataType::kFloat32, 300.0));
+  EXPECT_TRUE(IsInvalidArgument(ops::cast(big, DataType::kInt8).status()));
+  const Tensor negative = Unwrap(ops::full(Shape{2}, DataType::kInt32, -1.0));
+  EXPECT_TRUE(
+      IsInvalidArgument(ops::cast(negative, DataType::kUInt8).status()));
+
+  // Integer->integer narrowing checks the range too; the error names the
+  // first offending value and its logical index.
+  const Tensor i32 = Unwrap(ops::arange(127, 129, 1, DataType::kInt32));
+  const auto narrowed = ops::cast(i32, DataType::kInt8);
+  EXPECT_TRUE(IsInvalidArgument(narrowed.status()));
+  EXPECT_NE(narrowed.status().message().find("value 128 at index [1]"),
+            std::string_view::npos)
+      << narrowed.status().ToString();
+  // In-range narrowing works.
+  const Tensor ok = Unwrap(ops::arange(-128, -126, 1, DataType::kInt32));
+  EXPECT_EQ(Unwrap(ops::cast(ok, DataType::kInt8)).item<std::int8_t>({0}),
+            -128);
+}
+
+TEST(OpsCastTest, BoolIsUnsupported) {
+  const Tensor b = Unwrap(ops::zeros(Shape{2}, DataType::kBool));
+  EXPECT_TRUE(IsInvalidArgument(ops::cast(b, DataType::kFloat32).status()));
+  const Tensor f32 = Unwrap(ops::zeros(Shape{2}, DataType::kFloat32));
+  EXPECT_TRUE(IsInvalidArgument(ops::cast(f32, DataType::kBool).status()));
+}
+
+TEST(OpsCastTest, ReservedTargetIsUnimplemented) {
+  const Tensor f32 = Unwrap(ops::zeros(Shape{2}, DataType::kFloat32));
+  EXPECT_TRUE(IsUnimplemented(ops::cast(f32, DataType::kInt4).status()));
+  // Unimplemented (the dtype's real blocker) wins over the kBool complaint.
+  const Tensor b = Unwrap(ops::zeros(Shape{2}, DataType::kBool));
+  EXPECT_TRUE(IsUnimplemented(ops::cast(b, DataType::kFP8E4M3).status()));
+}
+
+TEST(OpsCastTest, EmptyTensor) {
+  const Tensor empty = Unwrap(ops::zeros(Shape{0, 3}, DataType::kFloat32));
+  const Tensor out = Unwrap(ops::cast(empty, DataType::kInt32));
+  EXPECT_EQ(out.numel(), 0);
+  EXPECT_EQ(out.dtype(), DataType::kInt32);
+  EXPECT_EQ(out.shape(), (Shape{0, 3}));
+}
+
 // --- Death tests (programmer errors per the design §7 table) ---
 
 TEST(OpsDeathTest, FillOnUndefinedTensorAborts) {
@@ -641,6 +913,19 @@ TEST(OpsDeathTest, FillOnUndefinedTensorAborts) {
   EXPECT_DEATH((void)ops::fill_uniform(undefined, 0.0, 1.0, 0),
                "undefined Tensor");
   EXPECT_DEATH((void)ops::fill_normal(undefined, 0.0, 1.0, 0),
+               "undefined Tensor");
+}
+
+TEST(OpsDeathTest, CopyOnUndefinedTensorAborts) {
+  const Tensor undefined;
+  const Tensor defined = Unwrap(ops::zeros(Shape{1}, DataType::kFloat32));
+  EXPECT_DEATH((void)ops::copy(undefined, defined), "undefined Tensor");
+  EXPECT_DEATH((void)ops::copy(defined, undefined), "undefined Tensor");
+}
+
+TEST(OpsDeathTest, CastOnUndefinedTensorAborts) {
+  const Tensor undefined;
+  EXPECT_DEATH((void)ops::cast(undefined, DataType::kFloat32),
                "undefined Tensor");
 }
 

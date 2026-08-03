@@ -232,7 +232,7 @@ max-abs-diff report, and human-readable tensor printing for debugging.
 - Unit tests for each factory across dtypes; `allclose` failure message reports index and values of worst mismatch.
 - Random fills are deterministic given a seed (test asserts exact values).
 
-### M1-T09 · CPU copy & cast
+### M1-T09 · CPU copy & cast — ✅ DONE (2026-08-03)
 `src/tensor/ops.h`: `copy(dst, src)` (same shape, handles non-contiguous views) and
 `cast(src, dtype)` between all floating dtypes and int types on CPU.
 **Depends on:** M1-T08.

@@ -12,9 +12,9 @@
 #include <optional>
 #include <string>
 
-// CPU tensor ops (M1-T08; design: docs/design/tensor.md §2, §10): factories,
-// seeded random fills, element-wise comparison, and debug printing. M1-T09
-// adds copy/cast here.
+// CPU tensor ops (M1-T08/09; design: docs/design/tensor.md §2, §7.1, §10):
+// factories, seeded random fills, copy/cast, element-wise comparison, and
+// debug printing.
 //
 // Everything in this header runs on the host and dereferences tensor data, so
 // per design §8 the value-touching entry points CHECK `is_cpu()`. All ops are
@@ -104,6 +104,43 @@ namespace engine::tensor::ops {
 // golden tests are validated on both CI platforms and macOS).
 [[nodiscard]] core::Status fill_normal(const Tensor& tensor, double mean,
                                        double stddev, std::uint64_t seed);
+
+// --- Copy & cast ---
+
+// Deep element-wise copy of src's values into dst, by logical index. Shape
+// and dtype must match exactly — dtype conversion is only ever the named
+// `cast` below, never implicit (design §1) — otherwise InvalidArgument.
+// Either side may be a non-contiguous view; only dst's view elements are
+// written. dst is mutated through a `const Tensor&` because const-ness is
+// shallow (§8). Both-contiguous pairs take a memcpy fast path. dst and src
+// aliasing overlapping bytes of one buffer is undefined behavior (the
+// memcpy rule), except that a dst identical to src is a well-defined no-op.
+// Undefined handle or non-CPU tensor → CHECK.
+[[nodiscard]] core::Status copy(const Tensor& dst, const Tensor& src);
+
+// Fresh contiguous row-major tensor of `dtype` on src's device holding
+// src's values converted element-wise; src may be a strided view. Always
+// allocates — a same-dtype cast is a deep copy, never the source handle —
+// so ownership is predictable. Supported dtypes on both sides: the floating
+// (kFloat32/kFloat16/kBFloat16) and integer (kInt8/kUInt8/kInt32/kInt64)
+// kinds; kBool is unsupported in either direction → InvalidArgument. A
+// reserved target dtype → Unimplemented (via Tensor::empty, which also
+// supplies the OOM/overflow policies).
+//
+// Conversion policy (design §7.1, decided in M1-T09):
+//  - Floating targets: the source widens to double (exact for every
+//    supported source except int64 beyond 2^53, which rounds to nearest)
+//    and narrows per M1-T07 (double → float → half), the same path the
+//    factories and fills use — so fp32→fp16/bf16 matches the half.h
+//    constructors bit-exactly, out-of-range values become ±inf, and NaN
+//    passes through.
+//  - Integer targets: floating sources truncate toward zero (C semantics);
+//    a NaN, ±inf, or out-of-range result — including integer→integer
+//    narrowing — is InvalidArgument naming the first offending value and
+//    its logical index. Loud beats silent wrap in the correctness oracle.
+// Undefined handle or non-CPU tensor → CHECK.
+[[nodiscard]] core::StatusOr<Tensor> cast(
+    const Tensor& src, DataType dtype, memory::Allocator* allocator = nullptr);
 
 // --- allclose ---
 

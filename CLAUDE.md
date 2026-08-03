@@ -270,4 +270,18 @@ in double, NaN never close, ±inf sign-matched, ints/bool exact) returning
 `to_string` with edge_items truncation, undefined handle prints instead of
 CHECKing; golden seeded-fill values, exact Summary strings, strided-view
 fill/compare/print, and death tests in `tests/unit/ops_test.cpp`).
-Next up: **M1-T09** (CPU copy & cast).
+M1-T09 done (`src/tensor/ops.h` copy & cast per design §7.1: `copy(dst, src)`
+— identical shape+dtype required (conversion is only ever `cast`, §1),
+element-wise by logical index so either side may be a strided view,
+both-contiguous memcpy fast path, overlapping-alias UB documented (identical
+views are a no-op); `cast(src, dtype)` — always-fresh contiguous result
+(same-dtype cast = deep copy), floating+integer dtypes both sides, kBool
+excluded → InvalidArgument, reserved target → Unimplemented (checked first,
+mirroring `full`); floating targets widen-to-double then M1-T07 narrow
+(double→float→half, same path as factories/fills → bit-exact with half.h
+ctors, out-of-range → ±inf, NaN passes), integer targets truncate toward
+zero with NaN/±inf/out-of-range (incl. int→int narrowing) →
+InvalidArgument naming the first offending value and its logical index;
+strided/self-copy/all-49-pairs/fp32→half-bit-golden/truncation/range-error
+tests in `ops_test.cpp`). **Milestone 1 complete.**
+Next up: **M2-T01** (design doc: CUDA backend).
