@@ -172,8 +172,11 @@ class Shape {
   friend bool operator==(const Shape&, const Shape&) = default;
 };
 
-// Same inline-vector representation; strides are measured in ELEMENTS.
-using Strides = /* same fixed-capacity container, int64_t */;
+// The shared fixed-capacity inline container (int64_t, capacity kMaxRank,
+// append-only growth): Shape's dims and Strides both use it. Strides are
+// measured in ELEMENTS.
+class DimVector { /* size(), operator[], push_back(), ==, fmt-formattable */ };
+using Strides = DimVector;
 
 [[nodiscard]] Strides RowMajorStrides(const Shape& shape);
 [[nodiscard]] bool IsContiguous(const Shape& shape, const Strides& strides);
@@ -193,10 +196,17 @@ using Strides = /* same fixed-capacity container, int64_t */;
   for negative dims, rank > `kMaxRank`, or a dim product that overflows
   `int64_t` — this is the entry point for shapes derived from files or
   requests. `numel()` is computed once, at construction, under the same
-  overflow check, so it is a cheap cached read afterwards.
+  overflow check, so it is a cheap cached read afterwards. Refined in
+  M1-T03: overflow is judged on the product of the *non-zero* dims — that
+  is the true numel when no dim is 0 (a 0 dim makes numel 0, which cannot
+  overflow), and it bounds every row-major stride, so `RowMajorStrides`
+  cannot overflow on a valid shape.
 - **Contiguity** means: strides equal `RowMajorStrides(shape)` with the
   convention that dims of size 1 (and any dim, when `numel() == 0`) impose
   no constraint on their stride. Golden-case tests in M1-T03 pin this down.
+- **`RowMajorStrides` treats size-0 dims as size 1** (PyTorch's
+  convention, decided in M1-T03): strides stay positive, and the result is
+  contiguous under the definition above.
 - `Strides` deliberately reuses the same inline container; no negative
   strides are supported anywhere in the engine (no flip views — a non-goal
   that keeps every kernel's index math simple).

@@ -178,7 +178,7 @@ mapping C++ types ↔ enum values.
 - Unit tests cover every enum value's size, name round-trip, and trait mapping.
 - `kInt4` reports sub-byte handling explicitly (itemsize in bits API or documented packing rule).
 
-### M1-T03 · Shape & strides
+### M1-T03 · Shape & strides — ✅ DONE (2026-08-03)
 `src/tensor/shape.h`: `Shape` (small inline vector of dims), `numel()`, row-major
 stride computation, `is_contiguous()` check, dim validation, equality, formatting.
 **Depends on:** M1-T02.

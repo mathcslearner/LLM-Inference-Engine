@@ -11,4 +11,5 @@ engine_add_tests(TREE unit SOURCES
 
 engine_add_tests(TREE unit SOURCES
   dtype_test.cpp
+  shape_test.cpp
   DEPS engine::tensor_base)

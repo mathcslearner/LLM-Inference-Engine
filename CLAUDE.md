@@ -157,4 +157,16 @@ is_floating_point/is_integral/is_sub_byte (kBool is neither kind),
 the `engine::tensor_base` INTERFACE target per ADR-002 Amendment 1, linked
 by `engine::tensor`; exhaustive golden-table tests incl. death test and
 compile-time static_asserts in `tests/unit/dtype_test.cpp`).
-Next up: **M1-T03** (Shape & strides).
+M1-T03 done (`src/tensor/shape.h`, header-only: `kMaxRank = 8`, `DimVector`
+fixed-capacity inline vector of int64_t (append-only, zeroed unused slots so
+defaulted `==` is exact) shared by `Shape` and `using Strides = DimVector`;
+`Shape` with cached `numel()`, CHECKing initializer_list ctor vs
+Status-returning `FromDims` (negative dim / rank > 8 / numel overflow →
+InvalidArgument) funneled through one constexpr `detail::ValidateDims`;
+overflow judged on the product of non-zero dims, which also bounds all
+row-major strides; `RowMajorStrides` treats size-0 dims as size 1 (PyTorch
+convention); `IsContiguous` with size-1 dims unconstrained and numel==0
+always contiguous; fmt formatters ("[2, 3, 4]"); design-doc §4 updated with
+the two refinements; constexpr static_asserts + golden/death tests in
+`tests/unit/shape_test.cpp`).
+Next up: **M1-T04** (Device abstraction).
