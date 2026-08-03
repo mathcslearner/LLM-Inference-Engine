@@ -97,8 +97,22 @@ The full-tree `scripts/check-tidy.sh` sweep takes minutes; while iterating,
 scope it to the ticket's TUs instead (`scripts/check-tidy.sh
 tests/unit/foo_test.cpp`). Headers have no compile-database entry, so pass a
 TU that includes them — usually the ticket's test file — and
-`HeaderFilterRegex` analyzes them through it. Run the full no-arg sweep once
-before handing the ticket off; CI runs it regardless.
+`HeaderFilterRegex` analyzes them through it.
+
+Before handoff, tidy coverage follows from what changed (clang-tidy has no
+cross-TU analysis, so untouched TUs with untouched headers cannot change
+results — no blanket full sweep needed):
+- Only new files or edited `.cpp` files → the scoped run on the ticket's
+  TUs is provably sufficient.
+- Edited an existing header → scope to every TU that includes it
+  (`grep -rl 'tensor/tensor.h' src tests`), since a header change can
+  perturb diagnostics at other call sites.
+- Changed `.clang-tidy`, the toolchain pin, or a core header included
+  everywhere (`core/status.h`, `core/check.h`) → run the full no-arg sweep;
+  the includer set is the whole tree anyway.
+
+CI runs the full sweep regardless (same pinned LLVM 20), so a missed edge
+case surfaces as a red Actions run rather than slipping through.
 
 **On the macOS dev machine, always build with Homebrew LLVM 20, not Apple
 clang** — pass `-DENGINE_ENABLE_CUDA=OFF` (no CUDA on macOS) and:
