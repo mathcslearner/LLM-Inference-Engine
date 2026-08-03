@@ -116,7 +116,7 @@ manual/self-hosted).
 - CI runs build + ctest + format check; a red build blocks merging.
 - Cold-cache CI run < 15 min; warm-cache < 5 min.
 
-### M0-T06 · Logging subsystem
+### M0-T06 · Logging subsystem — ✅ DONE (2026-08-03)
 Thin wrapper over spdlog in `src/core/logging.h`: leveled macros (`LOG_DEBUG` …
 `LOG_ERROR`), per-module logger names, level configurable via environment variable and
 programmatic API. No raw spdlog usage outside the wrapper.

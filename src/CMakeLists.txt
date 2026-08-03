@@ -28,6 +28,7 @@ set_target_properties(engine_main PROPERTIES
   OUTPUT_NAME engine
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 target_compile_definitions(engine_main PRIVATE ENGINE_VERSION="${PROJECT_VERSION}")
-# fmt linked here as a smoke test that fetched dependencies compile and link
-# under the project toolchain; broader use starts with logging in M0-T06.
-target_link_libraries(engine_main PRIVATE engine_warnings engine::core fmt::fmt)
+# fmt comes transitively from engine::core, whose public interface exposes it
+# (logging.h formats at the call site); linking it again here makes the macOS
+# linker warn about duplicate archives.
+target_link_libraries(engine_main PRIVATE engine_warnings engine::core)

@@ -120,4 +120,9 @@ tooling pinned to upstream LLVM 20 via `scripts/clang-tools.sh`).
 M0-T05 done (CPU CI: `.github/workflows/ci.yml` — format check, GCC/Clang
 × Debug/Release build + ctest matrix, clang-tidy, all gated behind a single
 aggregate `ci` job for branch protection; ccache + FetchContent caching).
-Next up: **M0-T06**.
+M0-T06 done (logging subsystem: `src/core/logging.h` — `LOG_DEBUG`…`LOG_ERROR`
+macros over spdlog, per-module named loggers with per-module level overrides,
+`ENGINE_LOG_LEVEL` env var + programmatic API, compile-time floor
+`ENGINE_MIN_LOG_LEVEL` strips `LOG_DEBUG` in Release; spdlog is private to
+`logging.cpp` — no raw spdlog usage outside the wrapper).
+Next up: **M0-T07**.
