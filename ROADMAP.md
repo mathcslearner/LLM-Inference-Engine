@@ -158,7 +158,7 @@ bugs later.
 
 **Architecture documents:** `docs/design/tensor.md` (M1-T01).
 
-### M1-T01 · Design doc: tensor library & device model
+### M1-T01 · Design doc: tensor library & device model — ✅ DONE (2026-08-03)
 Write `docs/design/tensor.md`: supported dtypes (now + planned), shape/stride
 representation, ownership model (shared buffer + views), allocator interface, device
 abstraction, host/device data-access rules, and explicit non-goals (autograd, lazy

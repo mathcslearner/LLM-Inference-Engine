@@ -49,7 +49,7 @@ plus the intra-layer edges listed explicitly):
 | 4 · orchestration | `runtime` | — |
 | 3 · execution | `engine`, `scheduler` | — (`engine` and `scheduler` never depend on each other; `runtime` mediates) |
 | 2 · domain | `model`, `tokenizer`, `kvcache`, `sampling`, `quant`, `spec`, `distributed` | none today; any future edge (e.g. `spec → model`) requires amending this ADR |
-| 1 · compute substrate | `memory`, `tensor`, `cuda`, `kernels`, `cpu` | `tensor → memory`; `cuda → memory`; `kernels → cuda, tensor`; `cpu → tensor` |
+| 1 · compute substrate | `memory`, `tensor`, `cuda`, `kernels`, `cpu` | `tensor → memory`; `cuda → memory`; `kernels → cuda, tensor`; `cpu → tensor`; `memory → tensor_base` (Amendment 1) |
 | 0 · foundation | `core` | — (depends on nothing but pinned third-party libs) |
 
 Cross-cutting exception: **`metrics`** may depend only on `core`, and any module
@@ -107,3 +107,24 @@ skip it.
   diagram true instead of aspirational.
 - The diagram in `CLAUDE.md` mirrors this ADR for day-to-day reference; this
   ADR is the authority if they ever diverge.
+
+## Amendments
+
+### Amendment 1 (2026-08-03, with M1-T01): `memory → tensor_base`
+
+M1 surfaced a knot in layer 1: `Tensor` holds a `Buffer` (so `tensor` links
+`memory`, the listed edge), but `Buffer` records the `Device` it lives on,
+and `Device` — with the other plain value types `DataType` and `Shape` —
+lives in `src/tensor/` per the roadmap. To keep the graph acyclic without
+moving files, the tensor module builds two targets:
+
+- `engine::tensor_base` — INTERFACE (header-only): `dtype.h`, `shape.h`,
+  `device.h`, `half.h`. Depends only on `core`; these headers include
+  nothing from `memory` or the rest of `tensor`.
+- `engine::tensor` — the compiled library; links `engine::tensor_base`,
+  `engine::memory`, `engine::core`.
+
+New allowed edge: **`memory → tensor_base`** (and `tensor_base` may be
+linked by any module that today may link `tensor`). `memory` still must not
+include `tensor.h`/`ops.h` — only the base value-type headers. No link or
+include cycle exists. Rationale and details: `docs/design/tensor.md` §2.1.

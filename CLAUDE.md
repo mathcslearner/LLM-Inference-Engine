@@ -138,4 +138,13 @@ module dependency rules (layered diagram, no cycles, CMake-enforced),
 ADR-003 error-handling policy; `docs/design/README.md` explains
 design-doc-first workflow — ADRs immutable once accepted, design docs
 living documents). **Milestone 0 complete.**
-Next up: **M1-T01** (design doc: tensor library & device model).
+M1-T01 done (`docs/design/tensor.md` — tensor library & device model design:
+dtypes incl. reserved kInt4/kFP8E4M3 with sub-byte packing rule, Shape/Strides
+(element-denominated, kMaxRank 8), backend-agnostic `Device`, move-only
+`Buffer` with self-contained deleters + thread-safe `Allocator` interface,
+`Tensor` as cheap-copy shared handle (shared_ptr<Buffer> + offset + views:
+slice/reshape/view_as_dtype), explicit CHECK-vs-Status boundary table,
+host/device access rules, thread-safety contract, per-ticket test map;
+ADR-002 Amendment 1 adds the `memory → tensor_base` header-only edge via an
+INTERFACE target split so `Buffer` can hold `Device` without a cycle).
+Next up: **M1-T02** (DataType enum & traits).
