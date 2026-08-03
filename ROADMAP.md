@@ -223,7 +223,7 @@ into `DTypeTraits`.
 - Golden bit-pattern tests: known fp32↔fp16 and fp32↔bf16 pairs including rounding boundaries, ±inf, NaN preservation.
 - Conversion round-trip property test over random floats within representable range.
 
-### M1-T08 · Tensor factories & comparison utilities
+### M1-T08 · Tensor factories & comparison utilities — ✅ DONE (2026-08-03)
 `src/tensor/ops.h` (CPU): `zeros/ones/full/arange`, seeded uniform/normal fill,
 element-wise `allclose(a, b, rtol, atol)` with per-dtype default tolerances and a
 max-abs-diff report, and human-readable tensor printing for debugging.

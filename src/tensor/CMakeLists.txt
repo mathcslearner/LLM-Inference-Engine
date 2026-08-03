@@ -15,7 +15,7 @@ target_link_libraries(engine_tensor_base INTERFACE engine::core)
 # engine::memory is PUBLIC because tensor.h includes memory/allocator.h
 # (Tensor holds a shared_ptr<Buffer>) — the layer-1 tensor → memory edge from
 # ADR-002.
-add_library(engine_tensor STATIC tensor.cpp)
+add_library(engine_tensor STATIC ops.cpp tensor.cpp)
 add_library(engine::tensor ALIAS engine_tensor)
 target_include_directories(engine_tensor PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(engine_tensor

@@ -241,4 +241,19 @@ for both; design doc §3.1 records the policies; golden bit-pattern tests
 round-trip, and a sorted-finite-table nearest-even property test over
 random floats in `tests/unit/half_test.cpp`; typed fp16/bf16 tensor access
 smoke test added to `tensor_test.cpp`).
-Next up: **M1-T08** (tensor factories & comparison utilities).
+M1-T08 done (`src/tensor/ops.h`/`.cpp` — CPU ops in `engine::tensor::ops`,
+design §7.1: factories `zeros`/`ones`/`full`/`arange` via `Tensor::empty`
+(full/arange validate integer representability → InvalidArgument, reserved
+dtypes stay Unimplemented, arange defaults kInt64); seeded `fill_uniform`/
+`fill_normal` mutating existing floating-dtype tensors (incl. strided views)
+in logical row-major order — mt19937_64 + hand-rolled transforms (std
+distributions are stdlib-dependent; uniform bit-exact cross-platform, normal
+Box–Muller with documented sub-ulp libm caveat); `allclose` (NumPy criterion
+in double, NaN never close, ±inf sign-matched, ints/bool exact) returning
+`AllCloseResult` with mismatch count / max-abs-diff / worst index+values +
+`Summary()`, per-dtype defaults via constexpr `default_allclose_tolerance`
+(fp32 1e-5/1e-8, fp16 1e-3/1e-5, bf16 1.6e-2/1e-5, ints exact); NumPy-style
+`to_string` with edge_items truncation, undefined handle prints instead of
+CHECKing; golden seeded-fill values, exact Summary strings, strided-view
+fill/compare/print, and death tests in `tests/unit/ops_test.cpp`).
+Next up: **M1-T09** (CPU copy & cast).

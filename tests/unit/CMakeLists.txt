@@ -21,5 +21,6 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::memory)
 
 engine_add_tests(TREE unit SOURCES
+  ops_test.cpp
   tensor_test.cpp
   DEPS engine::tensor)

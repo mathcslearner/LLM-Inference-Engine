@@ -505,6 +505,49 @@ M1-T02 … M1-T09, so individual tickets don't decide ad hoc):
   same values? — ambiguous, so neither; value comparison is
   `ops::allclose`, M1-T08).
 
+### 7.1 CPU ops (`ops.h`, M1-T08) — refinements decided at implementation
+
+Free functions in `namespace engine::tensor::ops`, compiled into
+`engine::tensor`. Everything here is host-side and CPU-only (§8: the
+value-touching entry points CHECK `is_cpu()`); the §7 error table applies
+unchanged, with these additions:
+
+- **Factories** (`zeros`/`ones`/`full`/`arange`) funnel through
+  `Tensor::empty`, inheriting its Unimplemented/OOM policies. A `full`
+  value not representable in an integer dtype (non-integral, out of range,
+  NaN/inf; kBool accepts exactly 0/1) is `InvalidArgument`, checked *after*
+  allocation so reserved dtypes still report `Unimplemented`. `arange`
+  computes in int64 (`step == 0` and `end - start` overflow →
+  `InvalidArgument`), proves integer representability via the range's
+  extremes, and narrows per M1-T07 for floating dtypes (out-of-range fp16
+  values become ±inf, the NumPy behavior). Default `arange` dtype is
+  kInt64 (NumPy/PyTorch).
+- **Seeded fills** (`fill_uniform`/`fill_normal`) mutate an existing
+  floating-dtype tensor through a `const Tensor&` (const is shallow, §8),
+  writing elements in **logical row-major order** — part of the
+  determinism contract, and what makes fills on strided views
+  well-defined. The RNG is `std::mt19937_64` (sequence fixed by the C++
+  standard) with hand-rolled transforms, because
+  `std::uniform_real_distribution`/`std::normal_distribution` output is
+  implementation-defined and differs between libstdc++ and libc++ — which
+  would break exact-value golden tests across the CI matrix. Uniform:
+  `u = (engine() >> 11) * 2^-53`, `low + u * (high - low)` — pure
+  arithmetic, bit-identical everywhere. Normal: Box–Muller in a fixed
+  order (z₀ then z₁; odd counts discard the last z₁) — identical given a
+  seed per platform, cross-platform up to sub-ulp libm variation
+  (absorbed in practice by narrowing to ≤ 32-bit dtypes).
+- **`allclose`**: NumPy criterion `|a − b| ≤ atol + rtol·|b|` in double;
+  NaN never close, infinities close only to same-signed infinity, integer
+  dtypes and kBool compare exactly (explicit tolerances do not loosen
+  them). Returns `AllCloseResult` with mismatch count, max-abs-diff, and
+  the worst mismatch's index/values; `Summary()` is the human-readable
+  report. Per-dtype default tolerances (`default_allclose_tolerance`):
+  kFloat32 `{1e-5, 1e-8}`, kFloat16 `{1e-3, 1e-5}`, kBFloat16
+  `{1.6e-2, 1e-5}` (NumPy/PyTorch values), integers/kBool `{0, 0}`.
+- **`to_string`**: header line + nested NumPy-style rows, `edge_items`
+  truncation (`[0, 1, 2, ..., 7, 8, 9]`). An undefined handle prints
+  `"Tensor(undefined)"` rather than CHECKing — it is a debugging aid.
+
 ---
 
 ## 8. Host/device data-access rules
@@ -567,8 +610,8 @@ must pass on CPU-only CI. Mapping of guarantees → tests:
 | strided copies, all cast pairs, fp32→fp16 rounding matches M1-T07 exactly | (M1-T09) |
 
 Numerical tests state tolerances explicitly; `allclose` carries per-dtype
-defaults (defined in M1-T08) precisely so tests that accept the default are
-still stating one. CHECK-death tests use gtest's `EXPECT_DEATH` and follow
+defaults (defined in M1-T08, table in §7.1) precisely so tests that accept
+the default are still stating one. CHECK-death tests use gtest's `EXPECT_DEATH` and follow
 the harness conventions in `tests/README.md`.
 
 ---
