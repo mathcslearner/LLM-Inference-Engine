@@ -144,6 +144,57 @@ template <typename T> inline constexpr DataType dtype_of = DTypeTraits<T>::value
 - **`kFP8E4M3`** is 1 byte; no host arithmetic type is provided until M13
   needs one.
 
+### 3.1 Half-precision host types (`half.h`, M1-T07)
+
+```cpp
+namespace engine::tensor {
+
+// IEEE 754 binary16 (1/5/10, bias 15) and bfloat16 (1/8/7, bias 127).
+// Trivially copyable 2-byte value types — safe to place in Tensor storage.
+// Default constructor leaves the value uninitialized, like built-in float.
+class float16 {
+  explicit constexpr float16(float);        // narrow: round-to-nearest-even
+  constexpr operator float() const;         // widen: implicit, exact
+  static constexpr float16 from_bits(uint16_t);
+  constexpr uint16_t to_bits() const;
+};
+class bfloat16 { /* same shape */ };
+
+template <> struct DTypeTraits<float16>  { /* kFloat16 */ };
+template <> struct DTypeTraits<bfloat16> { /* kBFloat16 */ };
+
+}  // namespace engine::tensor
+
+template <> class std::numeric_limits<engine::tensor::float16>;   // + bfloat16
+template <> class fmt::formatter<engine::tensor::float16>;        // + bfloat16
+```
+
+**Decisions** (refined in M1-T07; M1-T09's `cast` must match these
+conversions bit-exactly).
+
+- **Pure integer bit manipulation** over `std::bit_cast`, fully `constexpr` —
+  no hardware fp16 intrinsics or compiler extensions, so results are
+  bit-identical across compilers, architectures, and constant/runtime
+  evaluation, and NaN payloads / subnormals never pass through the FPU.
+- **Narrowing is explicit, widening is implicit** (the C++ convention for
+  lossy vs lossless): `float16(f)` rounds to nearest, ties to even
+  (overflow → ±inf, underflow → ±0 with sign kept); `operator float()` is
+  exact and implicit, so halves drop into float expressions directly.
+- **No arithmetic or comparison operators of their own.** Operands widen to
+  float, so `h * 2.0f` and `a < b` compute in fp32 with IEEE semantics
+  (`NaN != NaN`, `-0 == +0`). CPU reference paths accumulate in float and
+  narrow once at the end.
+- **NaN policy:** NaNs stay NaNs. The payload is truncated to the bits that
+  fit; if the truncated payload would be zero (which would read as inf), the
+  quiet bit is forced instead. Consequence (tested exhaustively): half →
+  fp32 → half is bit-identical for **every** 16-bit pattern, quiet and
+  signaling NaNs included.
+- `std::numeric_limits` is specialized for both types (M1-T08's fills and
+  tolerances query ranges the standard way); fmt formatters print the exact
+  fp32 value. The `DTypeTraits` specializations live in `half.h`, not
+  `dtype.h`, because both are `tensor_base` leaf headers and `dtype.h` must
+  not include `half.h`.
+
 ---
 
 ## 4. Shape & strides (`shape.h`, M1-T03)

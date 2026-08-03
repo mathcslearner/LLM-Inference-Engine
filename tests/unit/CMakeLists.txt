@@ -12,6 +12,7 @@ engine_add_tests(TREE unit SOURCES
 engine_add_tests(TREE unit SOURCES
   device_test.cpp
   dtype_test.cpp
+  half_test.cpp
   shape_test.cpp
   DEPS engine::tensor_base)
 

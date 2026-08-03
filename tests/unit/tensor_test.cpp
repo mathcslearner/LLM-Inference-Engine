@@ -4,6 +4,7 @@
 #include "memory/allocator.h"
 #include "tensor/device.h"
 #include "tensor/dtype.h"
+#include "tensor/half.h"
 #include "tensor/shape.h"
 
 #include <gtest/gtest.h>
@@ -135,6 +136,21 @@ TEST(TensorTest, EmptyAllAllocatableDtypes) {
       EXPECT_NE(t->data(), nullptr);
     }
   }
+}
+
+TEST(TensorTest, TypedAccessWithHalfPrecisionDtypes) {
+  // The half.h DTypeTraits mapping (M1-T07) makes the typed accessors work
+  // for fp16/bf16 storage end to end.
+  using engine::tensor::bfloat16;
+  using engine::tensor::float16;
+  const Tensor f16 =
+      Unwrap(Tensor::empty(Shape{2, 2}, DataType::kFloat16, Device::Cpu()));
+  f16.data_ptr<float16>()[3] = float16(1.5F);
+  EXPECT_EQ(f16.item<float16>({1, 1}), 1.5F);
+  const Tensor bf16 =
+      Unwrap(Tensor::empty(Shape{2}, DataType::kBFloat16, Device::Cpu()));
+  bf16.data_ptr<bfloat16>()[0] = bfloat16(-2.0F);
+  EXPECT_EQ(bf16.item<bfloat16>({0}), -2.0F);
 }
 
 TEST(TensorTest, EmptyCudaIsUnimplemented) {

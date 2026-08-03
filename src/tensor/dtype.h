@@ -138,8 +138,8 @@ inline constexpr std::array<DataType, 10> kAllDataTypes = {
 
 // Compile-time C++ type ↔ enum mapping. The primary template is
 // intentionally undefined: using an unmapped type is a compile error.
-// float16/bfloat16 join in M1-T07; kFP8E4M3 and kInt4 deliberately have no
-// mapped C++ type until their milestones need one.
+// float16/bfloat16 are specialized in half.h (M1-T07); kFP8E4M3 and kInt4
+// deliberately have no mapped C++ type until their milestones need one.
 template <typename T>
 struct DTypeTraits;
 

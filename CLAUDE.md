@@ -225,4 +225,20 @@ tensor.cpp replaced; design doc §7 gained a "Refined in M1-T06" note
 CHECK); aliasing/write-through, slice/reshape/view goldens,
 deleter-exactly-once via counting allocator, move semantics, and death tests
 in `tests/unit/tensor_test.cpp`).
-Next up: **M1-T07** (half-precision host support).
+M1-T07 done (`src/tensor/half.h`, header-only tensor_base header: `float16`
+(IEEE binary16) and `bfloat16` — trivially-copyable 2-byte value types over
+a `uint16_t`; bit-accurate constexpr conversions via pure integer bit
+manipulation (no FPU/intrinsics): explicit narrowing ctor from float with
+round-to-nearest-even (overflow → ±inf, underflow → ±0 sign-kept), implicit
+exact `operator float()`, `from_bits`/`to_bits`; NaN policy: payload
+truncated, quiet bit forced only if payload would vanish — makes
+half→fp32→half bit-identical for all 65536 patterns incl. signaling NaNs
+(tested exhaustively); no own arithmetic/comparison operators — operands
+widen to float; `DTypeTraits<float16/bfloat16>` specializations (in half.h,
+not dtype.h — both are leaf headers), `std::numeric_limits` + fmt formatters
+for both; design doc §3.1 records the policies; golden bit-pattern tests
+(rounding boundaries/ties, overflow, subnormals, NaN payloads), exhaustive
+round-trip, and a sorted-finite-table nearest-even property test over
+random floats in `tests/unit/half_test.cpp`; typed fp16/bf16 tensor access
+smoke test added to `tensor_test.cpp`).
+Next up: **M1-T08** (tensor factories & comparison utilities).

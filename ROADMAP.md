@@ -214,7 +214,7 @@ for tests.
 - Unit tests: views share the buffer (write-through visible), slicing produces correct shapes/strides/offsets, reshape rejects non-contiguous, dtype-checked access fails loudly on mismatch.
 - `Tensor` is cheap to copy (shared buffer semantics documented and tested).
 
-### M1-T07 · Half-precision host support
+### M1-T07 · Half-precision host support — ✅ DONE (2026-08-03)
 `src/tensor/half.h`: `float16` and `bfloat16` value types for host code (bit-accurate
 conversion to/from `float`, including rounding, inf/nan, subnormals for fp16), wired
 into `DTypeTraits`.
