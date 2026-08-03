@@ -194,7 +194,7 @@ representable now but any attempt to allocate on them returns `Unimplemented` un
 - Unit tests for parsing, formatting, equality, invalid inputs.
 - No CUDA headers included — this header stays backend-agnostic.
 
-### M1-T05 · Allocator interface & CPU allocator
+### M1-T05 · Allocator interface & CPU allocator — ✅ DONE (2026-08-03)
 `src/memory/allocator.h`: abstract `Allocator` (`allocate(bytes, alignment) →
 StatusOr<Buffer>`), `Buffer` as a move-only owning handle (pointer, size, device,
 deleter). Implement `CpuAllocator` with configurable alignment (default 64B).

@@ -189,4 +189,21 @@ overflow → InvalidArgument; "cpu:0"/casing/whitespace rejected);
 headers — device registry/validation deferred to M2 where allocation can
 return real Statuses; constexpr static_asserts + golden round-trip +
 invalid-spec table tests in `tests/unit/device_test.cpp`).
-Next up: **M1-T05** (Allocator interface & CPU allocator).
+M1-T05 done (`src/memory/allocator.h`/`.cpp` — Buffer & Allocator per design
+§6: move-only `Buffer` (data, size, `tensor::Device`, `std::function`
+deleter; engagement tracked by non-empty deleter so engaged zero-size
+(null data) and moved-from are distinct; deleter runs exactly once, move
+assignment destroys the current allocation first, no `release()`); abstract
+`Allocator` (`Allocate(bytes, alignment) → StatusOr<Buffer>` + `device()`,
+thread-safe contract, deleters self-contained — no back-pointer, Buffers may
+outlive the allocator); `CpuAllocator` over `std::aligned_alloc` (alignment
+CHECKed power-of-two, over-aligned to `max_align_t` and size rounded up to
+satisfy aligned_alloc, requested size reported; bytes==0 → engaged null
+buffer; OOM/overflow → kOutOfMemory Status) with configurable default
+alignment (64) used by a one-arg `Allocate(bytes)` convenience overload;
+immortal `DefaultCpuAllocator()`; `engine_memory` now links
+`engine::tensor_base` (the ADR-002 Amendment 1 edge), placeholder
+`memory.cpp` deleted; alignment/zero-size/move/deleter-exactly-once (via
+counting test allocator)/OOM-Status/death/concurrency tests in
+`tests/unit/allocator_test.cpp`).
+Next up: **M1-T06** (Tensor core type).
