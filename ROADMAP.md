@@ -135,7 +135,7 @@ with an error-code taxonomy (`InvalidArgument`, `OutOfMemory`, `NotFound`,
 - Policy: recoverable errors return `Status`; programmer errors use `CHECK`; exceptions are not used across module boundaries. Documented in the header.
 - Unit tests cover propagation macros, error message composition, and `StatusOr` move semantics.
 
-### M0-T08 · Documentation scaffolding & founding ADRs
+### M0-T08 · Documentation scaffolding & founding ADRs — ✅ DONE (2026-08-03)
 Create `docs/` structure: `docs/adr/` with a template, `docs/design/` for subsystem
 designs. Write ADR-001 (C++20/CUDA choice, alternatives considered incl. Rust),
 ADR-002 (repo layout & module dependency rules — which modules may depend on which),

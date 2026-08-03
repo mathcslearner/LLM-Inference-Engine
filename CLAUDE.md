@@ -131,4 +131,11 @@ fmt-composing per-code factories + `Is<Code>` predicates, `RETURN_IF_ERROR`,
 `ASSIGN_OR_RETURN`, `CHECK_OK`/`DCHECK_OK`; `src/core/check.h` — fatal
 `CHECK`/`DCHECK` with optional fmt message, `DCHECK` compiles to nothing
 under NDEBUG; ADR-003 policy documented in both headers).
-Next up: **M0-T08**.
+M0-T08 done (documentation scaffolding & founding ADRs: `docs/adr/` with
+process README, template (Status/Context/Decision/Consequences +
+alternatives), ADR-001 language & toolchain, ADR-002 repository layout &
+module dependency rules (layered diagram, no cycles, CMake-enforced),
+ADR-003 error-handling policy; `docs/design/README.md` explains
+design-doc-first workflow — ADRs immutable once accepted, design docs
+living documents). **Milestone 0 complete.**
+Next up: **M1-T01** (design doc: tensor library & device model).
