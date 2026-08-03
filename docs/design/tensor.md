@@ -413,6 +413,23 @@ class Tensor {
   dies. There is no distinction between "owning" and "view" tensors — every
   Tensor is a shared handle, uniformly.
 
+**Refined in M1-T06** (points the design left open, decided at
+implementation):
+
+- `empty` allocates at a fixed 64-byte alignment (same value and rationale
+  as `CpuAllocator`'s default) — the abstract `Allocator` interface takes an
+  explicit alignment, so the factory must pick one.
+- A non-null `allocator` whose `device()` differs from the requested
+  `device` is a CHECK: both arguments are call-site-authored.
+- The byte size `numel * itemsize` overflowing `int64_t` is
+  `InvalidArgument` in `empty` (mirrors the `Shape::FromDims` overflow
+  policy).
+- `view_as_dtype` into a *reserved* dtype (`kInt4`, `kFP8E4M3`) is
+  `Unimplemented`, consistent with `empty` — width comparison alone would
+  let `kInt8 → kFP8E4M3` through.
+- Calling a view op (or `data()`) on an undefined handle is a CHECK,
+  following the moved-from contract below.
+
 **Error-handling boundary** (per ADR-003; this table is the contract for
 M1-T02 … M1-T09, so individual tickets don't decide ad hoc):
 

@@ -206,4 +206,23 @@ immortal `DefaultCpuAllocator()`; `engine_memory` now links
 `memory.cpp` deleted; alignment/zero-size/move/deleter-exactly-once (via
 counting test allocator)/OOM-Status/death/concurrency tests in
 `tests/unit/allocator_test.cpp`).
-Next up: **M1-T06** (Tensor core type).
+M1-T06 done (`src/tensor/tensor.h`/`.cpp` — Tensor per design §7: cheap-copy
+shared handle (`shared_ptr<memory::Buffer>` + byte offset + Shape + Strides +
+DataType + denormalized Device); `Tensor::empty(shape, dtype, device,
+allocator=nullptr)` allocates contiguous row-major storage at fixed 64-byte
+alignment (null allocator → DefaultCpuAllocator; reserved dtypes / CUDA →
+Unimplemented, byte-size overflow → InvalidArgument, OOM propagates,
+allocator/device mismatch → CHECK); views sharing the buffer —
+`slice(dim, start, end)` (half-open, strides unchanged, offset advances;
+inner-dim slices legitimately non-contiguous), `reshape` (contiguous only,
+never copies), `view_as_dtype` (equal `itemsize_bits` only; reserved →
+Unimplemented) — all InvalidArgument on data-dependent misuse, CHECK on an
+undefined handle; `data()`/`data_ptr<T>()` (CHECK on dtype mismatch) and
+CPU-only strided `item<T>(indices)` accessor for tests; `engine_tensor` now
+links `engine::memory` PUBLIC (the ADR-002 layer-1 edge), placeholder
+tensor.cpp replaced; design doc §7 gained a "Refined in M1-T06" note
+(alignment constant, overflow/reserved-dtype policies, undefined-handle
+CHECK); aliasing/write-through, slice/reshape/view goldens,
+deleter-exactly-once via counting allocator, move semantics, and death tests
+in `tests/unit/tensor_test.cpp`).
+Next up: **M1-T07** (half-precision host support).

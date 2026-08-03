@@ -12,9 +12,12 @@ target_include_directories(engine_tensor_base INTERFACE ${PROJECT_SOURCE_DIR}/sr
 target_link_libraries(engine_tensor_base INTERFACE engine::core)
 
 # engine::tensor — the compiled library (tensor.h, ops.h and their .cpp).
+# engine::memory is PUBLIC because tensor.h includes memory/allocator.h
+# (Tensor holds a shared_ptr<Buffer>) — the layer-1 tensor → memory edge from
+# ADR-002.
 add_library(engine_tensor STATIC tensor.cpp)
 add_library(engine::tensor ALIAS engine_tensor)
 target_include_directories(engine_tensor PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(engine_tensor
-  PUBLIC engine::tensor_base
+  PUBLIC engine::tensor_base engine::memory
   PRIVATE engine_warnings)

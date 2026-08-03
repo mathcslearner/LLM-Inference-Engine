@@ -18,3 +18,7 @@ engine_add_tests(TREE unit SOURCES
 engine_add_tests(TREE unit SOURCES
   allocator_test.cpp
   DEPS engine::memory)
+
+engine_add_tests(TREE unit SOURCES
+  tensor_test.cpp
+  DEPS engine::tensor)

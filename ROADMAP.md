@@ -203,7 +203,7 @@ deleter). Implement `CpuAllocator` with configurable alignment (default 64B).
 - Unit tests: alignment honored, zero-size allocation defined behavior, Buffer move semantics, deleter invoked exactly once (tracked via test allocator).
 - Allocation failures return `Status`, never throw.
 
-### M1-T06 · Tensor core type
+### M1-T06 · Tensor core type — ✅ DONE (2026-08-03)
 `src/tensor/tensor.h`: `Tensor` = shared `Buffer` + `Shape` + strides + `DataType` +
 `Device` + byte offset. Factory `Tensor::empty(shape, dtype, device, allocator)`.
 Views: `slice(dim, start, end)`, `reshape` (contiguous only), `view_as_dtype`
