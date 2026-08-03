@@ -1,0 +1,9 @@
+# Build trees
+build*/
+
+# Tooling caches
+.cache/
+compile_commands.json
+
+# macOS
+.DS_Store

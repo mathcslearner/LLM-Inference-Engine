@@ -72,7 +72,7 @@ enforced mechanically, and decisions recorded as ADRs.
 **Architecture documents:** ADR-001 (language & toolchain), ADR-002 (repository
 layout & module boundaries), ADR-003 (error-handling policy) — written in M0-T08.
 
-### M0-T01 · Repository skeleton & CMake build system
+### M0-T01 · Repository skeleton & CMake build system — ✅ DONE (2026-08-03)
 Create the top-level `CMakeLists.txt` (C++20, CMake ≥ 3.26), the directory layout from
 the module map (empty module subdirectories with stub `CMakeLists.txt`), a project-wide
 warning set (`-Wall -Wextra -Werror` baseline), and a placeholder `main` executable.

@@ -92,4 +92,5 @@ scripts/check-format.sh
 
 ## Current status
 
-Planning phase complete — ROADMAP.md written, no implementation yet. Next up: **M0-T01**.
+M0 in progress. M0-T01 done (repository skeleton, CMake build system, module
+library targets, project warning set). Next up: **M0-T02**.
