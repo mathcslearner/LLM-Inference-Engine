@@ -21,6 +21,10 @@ endif()
 # Declared now so the documented `-DENGINE_ENABLE_CUDA=OFF` configure command
 # works from day one; the CUDA language and toolkit wiring land in M2.
 option(ENGINE_ENABLE_CUDA "Build the CUDA backend (device runtime and kernels)" ON)
+option(ENGINE_BUILD_TESTS "Build unit and integration tests" ON)
+
+# Third-party dependencies (pinned; policy in docs/dependencies.md).
+include(cmake/dependencies.cmake)
 
 # Project-wide warning set. Applied to project targets only: every engine
 # target links `engine_warnings` PRIVATE, and third-party targets must never

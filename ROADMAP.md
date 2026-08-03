@@ -82,7 +82,7 @@ warning set (`-Wall -Wextra -Werror` baseline), and a placeholder `main` executa
 - Debug/Release configurations work; warnings-as-errors is on for project code only.
 - Directory layout matches the module map; each module builds as its own static library target (empty for now).
 
-### M0-T02 · Third-party dependency management
+### M0-T02 · Third-party dependency management — ✅ DONE (2026-08-03)
 Wire up dependency fetching via CMake `FetchContent` (or CPM.cmake) with pinned
 versions: `fmt`, `spdlog`, `nlohmann_json`, `GoogleTest`. Document the policy for
 adding dependencies.

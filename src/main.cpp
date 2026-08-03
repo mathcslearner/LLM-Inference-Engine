@@ -1,6 +1,6 @@
-#include <cstdio>
+#include <fmt/base.h>
 
 int main() {
-  std::printf("llm-inference-engine %s\n", ENGINE_VERSION);
+  fmt::print("llm-inference-engine {}\n", ENGINE_VERSION);
   return 0;
 }

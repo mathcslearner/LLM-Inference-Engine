@@ -24,4 +24,6 @@ add_subdirectory(metrics)
 add_executable(engine_main main.cpp)
 set_target_properties(engine_main PROPERTIES OUTPUT_NAME engine)
 target_compile_definitions(engine_main PRIVATE ENGINE_VERSION="${PROJECT_VERSION}")
-target_link_libraries(engine_main PRIVATE engine_warnings engine::core)
+# fmt linked here as a smoke test that fetched dependencies compile and link
+# under the project toolchain; broader use starts with logging in M0-T06.
+target_link_libraries(engine_main PRIVATE engine_warnings engine::core fmt::fmt)

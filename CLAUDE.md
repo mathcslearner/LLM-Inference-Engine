@@ -93,4 +93,6 @@ scripts/check-format.sh
 ## Current status
 
 M0 in progress. M0-T01 done (repository skeleton, CMake build system, module
-library targets, project warning set). Next up: **M0-T02**.
+library targets, project warning set). M0-T02 done (pinned third-party
+dependencies via FetchContent — fmt, spdlog, nlohmann_json, GoogleTest —
+policy in `docs/dependencies.md`). Next up: **M0-T03**.
