@@ -98,4 +98,8 @@ dependencies via FetchContent — fmt, spdlog, nlohmann_json, GoogleTest —
 policy in `docs/dependencies.md`). M0-T03 done (GoogleTest/CTest harness:
 per-file test executables via `engine_add_tests`, shared `tests/common/`
 helper library, unit/integration labels, workflow in `tests/README.md`).
-Next up: **M0-T04**.
+M0-T04 done (formatting & static analysis: `.clang-format` (Google-based,
+rationale in-file) and curated `.clang-tidy`, enforced by
+`scripts/check-format.sh` / `scripts/format.sh` / `scripts/check-tidy.sh`;
+tooling pinned to upstream LLVM 20 via `scripts/clang-tools.sh`).
+Next up: **M0-T05**.

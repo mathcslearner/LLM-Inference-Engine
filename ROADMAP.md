@@ -99,7 +99,7 @@ shared `tests/common/` helper library, and one example test per tree.
 - `ctest --test-dir build` discovers and runs all tests; a deliberately failing test fails the run.
 - Adding a new test file requires only adding it to one CMake list (documented in `tests/README.md`).
 
-### M0-T04 · Formatting & static analysis
+### M0-T04 · Formatting & static analysis — ✅ DONE (2026-08-03)
 Add `.clang-format` (project style, documented rationale), `.clang-tidy` with a curated
 check set, and a `scripts/check-format.sh` that verifies formatting without modifying files.
 **Depends on:** M0-T01.

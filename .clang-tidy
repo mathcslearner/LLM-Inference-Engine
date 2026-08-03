@@ -1,0 +1,87 @@
+# Project static-analysis rules (M0-T04). Run via scripts/check-tidy.sh
+# (requires build/compile_commands.json; CMAKE_EXPORT_COMPILE_COMMANDS is ON).
+# Pinned to upstream LLVM clang-tidy major version 20 (scripts/clang-tools.sh).
+#
+# Curated check set — enabled groups and why:
+#   clang-analyzer-*  Path-sensitive static analysis: null derefs, leaks,
+#                     use-after-free. Highest-signal group clang-tidy has.
+#   bugprone-*        Real-bug patterns: integer overflow idioms, dangling
+#                     references, suspicious semicolons, narrowing.
+#   performance-*     Unnecessary copies, missing moves, inefficient loops —
+#                     directly relevant to a performance-focused engine.
+#   google-*          Consistency with the Google style the tree is written in
+#                     (build/include hygiene, explicit constructors, ...).
+#   modernize-*       Keeps C++20 idioms current (nullptr, override, using,
+#                     emplace, ...).
+#   readability-*     Mechanical clarity checks (const-correctness, redundant
+#                     code, misleading indentation).
+#   misc-*            Grab-bag of correctness checks not in other groups
+#                     (definitions-in-headers, unused parameters, ...).
+#
+# Individually disabled checks and why:
+#   bugprone-easily-swappable-parameters
+#       Flags every (int, int) signature; overwhelming noise, no fix that
+#       isn't strong-typedef ceremony.
+#   bugprone-exception-escape
+#       The project forbids exceptions across module boundaries (ADR-003,
+#       M0-T08) but links third-party code (fmt, spdlog) whose internals may
+#       throw; this check then flags main() and noexcept boundaries we cannot
+#       change. Policy is enforced by review and Status/StatusOr instead.
+#   google-readability-todo
+#       Requires a username in every TODO; we don't mandate that.
+#   modernize-use-trailing-return-type
+#       Style choice: the tree uses leading return types, per Google style.
+#   modernize-avoid-c-arrays
+#       CUDA kernels and fixed-size lookup tables legitimately use C arrays.
+#   readability-identifier-length
+#       Bans idiomatic short names (i, j, lhs, kv); noise.
+#   readability-magic-numbers
+#       Kernels, shapes, and tests are full of legitimate literals.
+#   misc-include-cleaner
+#       Include-what-you-use analysis needs a curated header mapping to avoid
+#       flagging umbrella headers (gtest, fmt); revisit if we build one.
+#   misc-non-private-member-variables-in-classes
+#       GoogleTest fixtures use protected members by design.
+#   misc-no-recursion
+#       Recursion is a deliberate, reviewable choice, not a defect.
+#
+# Possible later addition: readability-identifier-naming (mechanical
+# enforcement of Google naming); deferred until the tree is large enough to
+# justify the CheckOptions ceremony.
+---
+Checks: >
+  -*,
+  clang-analyzer-*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  performance-*,
+  google-*,
+  -google-readability-todo,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-avoid-c-arrays,
+  readability-*,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  misc-*,
+  -misc-include-cleaner,
+  -misc-non-private-member-variables-in-classes,
+  -misc-no-recursion
+
+# Every enabled check is enforced: a warning fails scripts/check-tidy.sh the
+# same way -Werror fails the build. A check too noisy to satisfy gets disabled
+# above with rationale, not tolerated as a warning.
+WarningsAsErrors: '*'
+
+# Diagnose headers under src/ and tests/ only. Third-party headers are already
+# excluded twice over: FetchContent declares them SYSTEM (docs/dependencies.md
+# policy #4) and their paths (build/_deps/...) don't match this regex.
+HeaderFilterRegex: '.*/(src|tests)/.*'
+
+# clang-tidy fix-its (when applied) follow .clang-format.
+FormatStyle: file
+CheckOptions:
+  # TEST()/TEST_F() expand to whole functions; don't charge their complexity
+  # to the test author.
+  readability-function-cognitive-complexity.IgnoreMacros: 'true'

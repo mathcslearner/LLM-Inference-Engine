@@ -1,8 +1,8 @@
-#include <filesystem>
+#include "common/paths.h"
 
 #include <gtest/gtest.h>
 
-#include "common/paths.h"
+#include <filesystem>
 
 namespace {
 

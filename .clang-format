@@ -1,0 +1,42 @@
+# Project formatting rules (M0-T04). Enforced by scripts/check-format.sh;
+# apply with scripts/format.sh. Pinned to upstream LLVM clang-format major
+# version 20 (see scripts/clang-tools.sh) so local and CI output agree.
+#
+# Rationale: the codebase is written in Google C++ style (2-space indent,
+# attached braces, `}  // namespace` closers, CamelCase functions), so we
+# codify that instead of inventing a house style. Google style is the most
+# widely tooled and documented C++ style, and its naming/include conventions
+# match how the tree is already laid out. Every key below that overrides a
+# Google default is commented with why; everything else inherits.
+---
+Language: Cpp
+BasedOnStyle: Google
+
+# Google default is 80; stated explicitly so a future clang-format default
+# change can never silently reflow the tree. Kernels or template-heavy code
+# that genuinely cannot fit should be restructured, not exempted.
+ColumnLimit: 80
+
+# Google style derives pointer alignment from the file being formatted, which
+# lets inconsistency creep in file by file. Fix it project-wide: `int* p`.
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# Deterministic include ordering, regrouped into blocks (blank-line separated):
+#   0. the TU's own header (matched automatically via IncludeIsMainRegex)
+#   1. project headers        — quoted:      #include "kvcache/block_pool.h"
+#   2. third-party headers    — angled path: #include <fmt/format.h>
+#   3. C system / CUDA headers — angled *.h: #include <cuda_runtime.h>
+#   4. C++ standard library   — angled, extensionless: #include <vector>
+# Own-header-first surfaces missing-include bugs in the header itself; the
+# remaining order is stable and mechanical so review never argues about it.
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^".*"'
+    Priority: 1
+  - Regex: '^<(fmt|spdlog|nlohmann|gtest|gmock)/'
+    Priority: 2
+  - Regex: '^<.*\.(h|hpp|cuh)>'
+    Priority: 3
+  - Regex: '^<[^.]+>'
+    Priority: 4
