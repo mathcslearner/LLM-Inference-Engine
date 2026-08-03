@@ -1,0 +1,153 @@
+# Continuous integration, CPU only (M0-T05). GPU jobs are out of scope here;
+# they arrive later as manual/self-hosted runners.
+#
+# Jobs:
+#   format      — scripts/check-format.sh with the pinned clang-format (LLVM 20).
+#   build-test  — GCC + Clang × Debug + Release: configure, build, ctest.
+#   tidy        — scripts/check-tidy.sh with the pinned clang-tidy (LLVM 20).
+#   ci          — aggregate gate. Branch protection requires this one check,
+#                 so the matrix can change without touching repository settings.
+#
+# Style checks run through the same scripts/ entry points developers use, with
+# the same LLVM 20 pin (resolved by scripts/clang-tools.sh); bumping
+# ENGINE_LLVM_MAJOR means updating the apt installs below in the same commit.
+#
+# Caching (targets: cold run < 15 min, warm run < 5 min):
+#   - ccache, one cache per (compiler, build type). The key ends in the commit
+#     SHA so every run saves a fresh cache; restore-keys falls back to the most
+#     recent one.
+#   - FetchContent trees (.deps via FETCHCONTENT_BASE_DIR), keyed on
+#     cmake/dependencies.cmake. Every dependency there is pinned by SHA256, so
+#     a key hit is exactly the right content. The tree contains compiled
+#     artifacts, so it is not shared across compilers or build types.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format (pinned LLVM 20)
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo tee /etc/apt/trusted.gpg.d/apt-llvm-org.asc >/dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" |
+            sudo tee /etc/apt/sources.list.d/apt-llvm-org.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format-20
+      - name: Check formatting
+        run: scripts/check-format.sh
+
+  build-test:
+    name: ${{ matrix.compiler }} · ${{ matrix.build_type }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Debug, Release]
+        include:
+          # Runner-preinstalled compilers, named explicitly so runner-image
+          # updates cannot silently change what CI tests. Both satisfy the
+          # project floor from M0-T01 (GCC 12+, Clang 16+).
+          - compiler: gcc
+            cxx: g++-13
+          - compiler: clang
+            cxx: clang++-18
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ninja and ccache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build ccache
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.compiler }}-${{ matrix.build_type }}-
+      - name: Restore dependencies
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('cmake/dependencies.cmake') }}
+      - name: Configure
+        run: |
+          ccache -z
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DENGINE_ENABLE_CUDA=OFF \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DFETCHCONTENT_BASE_DIR="${{ github.workspace }}/.deps"
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: ccache stats
+        if: always()
+        run: ccache -s
+
+  tidy:
+    name: tidy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-tidy (pinned LLVM 20) and ninja
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo tee /etc/apt/trusted.gpg.d/apt-llvm-org.asc >/dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" |
+            sudo tee /etc/apt/sources.list.d/apt-llvm-org.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-tidy-20 ninja-build
+      - name: Restore dependencies
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-tidy-${{ hashFiles('cmake/dependencies.cmake') }}
+      # clang-tidy only needs the compile database (plus the fetched dependency
+      # headers it references), so configure without building.
+      - name: Configure (compile database)
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENGINE_ENABLE_CUDA=OFF \
+            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DFETCHCONTENT_BASE_DIR="${{ github.workspace }}/.deps"
+      - name: Run clang-tidy
+        run: scripts/check-tidy.sh
+
+  ci:
+    name: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: [format, build-test, tidy]
+    if: always()
+    steps:
+      - name: Fail if any required job did not succeed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: exit 1
+      - name: All checks passed
+        run: echo "All CI jobs succeeded."

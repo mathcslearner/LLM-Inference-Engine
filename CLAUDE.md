@@ -117,4 +117,7 @@ M0-T04 done (formatting & static analysis: `.clang-format` (Google-based,
 rationale in-file) and curated `.clang-tidy`, enforced by
 `scripts/check-format.sh` / `scripts/format.sh` / `scripts/check-tidy.sh`;
 tooling pinned to upstream LLVM 20 via `scripts/clang-tools.sh`).
-Next up: **M0-T05**.
+M0-T05 done (CPU CI: `.github/workflows/ci.yml` — format check, GCC/Clang
+× Debug/Release build + ctest matrix, clang-tidy, all gated behind a single
+aggregate `ci` job for branch protection; ccache + FetchContent caching).
+Next up: **M0-T06**.

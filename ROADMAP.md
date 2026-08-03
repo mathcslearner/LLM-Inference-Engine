@@ -107,7 +107,7 @@ check set, and a `scripts/check-format.sh` that verifies formatting without modi
 - `scripts/check-format.sh` exits non-zero on misformatted code; `scripts/format.sh` fixes it.
 - `clang-tidy` runs clean on existing code; the enabled check list is committed and commented.
 
-### M0-T05 · Continuous integration (CPU)
+### M0-T05 · Continuous integration (CPU) — ✅ DONE (2026-08-03)
 GitHub Actions workflow: build (GCC + Clang, Debug + Release) and run tests on every
 push/PR, with ccache and dependency caching. GPU jobs are out of scope (added later as
 manual/self-hosted).
