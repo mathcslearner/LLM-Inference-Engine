@@ -8,3 +8,7 @@ engine_add_tests(TREE unit SOURCES
   logging_test.cpp
   status_test.cpp
   DEPS engine::core)
+
+engine_add_tests(TREE unit SOURCES
+  dtype_test.cpp
+  DEPS engine::tensor_base)

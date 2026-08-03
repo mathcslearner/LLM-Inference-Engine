@@ -168,7 +168,7 @@ eval, broadcasting beyond what inference needs).
 - Doc covers all sections above with API sketches for `Tensor`, `Buffer`, `Allocator`, `Device`.
 - Explicitly specifies thread-safety guarantees and copy/move semantics of `Tensor`.
 
-### M1-T02 · DataType enum & traits
+### M1-T02 · DataType enum & traits — ✅ DONE (2026-08-03)
 `src/tensor/dtype.h`: `DataType` enum (`kFloat32`, `kFloat16`, `kBFloat16`, `kInt8`,
 `kUInt8`, `kInt32`, `kInt64`, `kBool`, plus reserved `kFP8E4M3`, `kInt4` for later),
 `itemsize()`, `to_string()`/`from_string()`, and a compile-time `DTypeTraits<T>`

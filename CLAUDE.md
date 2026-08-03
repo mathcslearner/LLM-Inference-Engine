@@ -147,4 +147,14 @@ slice/reshape/view_as_dtype), explicit CHECK-vs-Status boundary table,
 host/device access rules, thread-safety contract, per-ticket test map;
 ADR-002 Amendment 1 adds the `memory → tensor_base` header-only edge via an
 INTERFACE target split so `Buffer` can hold `Device` without a cycle).
-Next up: **M1-T02** (DataType enum & traits).
+M1-T02 done (`src/tensor/dtype.h`, header-only: `DataType` enum with stable
+values incl. reserved kFP8E4M3/kInt4, `kAllDataTypes` iteration array,
+`itemsize_bits` total over all dtypes / `itemsize` CHECK-fails on sub-byte
+(kInt4 packing rule documented in-header), HuggingFace-style
+`to_string`/`from_string` (unknown name → InvalidArgument),
+is_floating_point/is_integral/is_sub_byte (kBool is neither kind),
+`DTypeTraits<T>`/`dtype_of<T>` with undefined primary template; CMake gains
+the `engine::tensor_base` INTERFACE target per ADR-002 Amendment 1, linked
+by `engine::tensor`; exhaustive golden-table tests incl. death test and
+compile-time static_asserts in `tests/unit/dtype_test.cpp`).
+Next up: **M1-T03** (Shape & strides).
