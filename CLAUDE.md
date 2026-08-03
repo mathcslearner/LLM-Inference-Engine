@@ -88,7 +88,22 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release   # add -DENGINE_ENABLE_CUDA=OFF for C
 cmake --build build -j
 ctest --test-dir build
 scripts/check-format.sh
+scripts/check-tidy.sh
 ```
+
+**On the macOS dev machine, always build with Homebrew LLVM 20, not Apple
+clang** — pass `-DENGINE_ENABLE_CUDA=OFF` (no CUDA on macOS) and:
+
+```bash
+CC="$(brew --prefix llvm@20)/bin/clang" CXX="$(brew --prefix llvm@20)/bin/clang++" \
+  cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DENGINE_ENABLE_CUDA=OFF
+```
+
+Two reasons: it matches the project's pinned clang-format/clang-tidy toolchain
+(LLVM 20, resolved by `scripts/clang-tools.sh`; Apple's clang uses different
+version numbering), and Apple's Command Line Tools install on this machine is
+broken — its libc++ headers are missing, so Apple clang cannot compile any
+C++ until the CLT is reinstalled.
 
 ## Current status
 

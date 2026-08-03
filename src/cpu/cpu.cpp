@@ -2,6 +2,7 @@
 // this module gains real sources (see ROADMAP.md).
 namespace engine::cpu {
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): must be external to anchor the TU
 void module_anchor() noexcept {}
 
 }  // namespace engine::cpu
