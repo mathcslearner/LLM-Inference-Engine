@@ -40,9 +40,11 @@ else
 fi
 
 # xargs exits non-zero if any clang-tidy invocation reports a diagnostic.
-# --cached --others --exclude-standard: tracked plus untracked files, minus
-# anything .gitignore'd — new TUs are analyzed before they are staged.
-if ! git ls-files -z --cached --others --exclude-standard -- '*.cc' '*.cpp' '*.cxx' |
+# engine_project_files scopes the listing to project source dirs (tracked
+# plus untracked, minus .gitignore'd) — new TUs are analyzed before they are
+# staged, and non-project trees like the CI FetchContent dir never are.
+# Headers are analyzed through the TUs that include them (HeaderFilterRegex).
+if ! engine_project_files cc cpp cxx |
   xargs -0 -P "$jobs" -n 1 \
     "$clang_tidy" -p "$build_dir" --quiet ${extra_args[@]+"${extra_args[@]}"}; then
   echo "" >&2

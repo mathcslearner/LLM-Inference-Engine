@@ -1,6 +1,10 @@
 # Build trees
 build*/
 
+# FetchContent tree when relocated via FETCHCONTENT_BASE_DIR (CI does this
+# for caching)
+.deps/
+
 # Tooling caches
 .cache/
 compile_commands.json

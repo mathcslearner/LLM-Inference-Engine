@@ -57,12 +57,31 @@ resolve_clang_tool() {
   exit 1
 }
 
-# engine_cxx_sources
-# NUL-delimited list of all C++/CUDA sources, for xargs -0: tracked files
-# plus untracked ones (--others), so new files are checked before they are
-# staged; --exclude-standard keeps .gitignore'd trees (build*/) out.
+# The directories containing the project's own C++/CUDA code. File listings
+# are scoped to these so untracked non-project trees (the CI FetchContent
+# dir .deps/, IDE build dirs) can never leak into format/tidy, whether or
+# not they are gitignore'd.
+ENGINE_SOURCE_DIRS=(src tests benchmarks)
+
+# engine_project_files <ext...>
+# NUL-delimited list (for xargs -0) of files with the given extensions under
+# ENGINE_SOURCE_DIRS: tracked files plus untracked ones (--others), so new
+# files are checked before they are staged; --exclude-standard keeps
+# .gitignore'd trees (build*/) out. Git pathspec globs match recursively.
 # Runs from the repository root (the entry-point scripts cd there).
+engine_project_files() {
+  local -a pathspecs=()
+  local dir ext
+  for dir in "${ENGINE_SOURCE_DIRS[@]}"; do
+    for ext in "$@"; do
+      pathspecs+=("${dir}/*.${ext}")
+    done
+  done
+  git ls-files -z --cached --others --exclude-standard -- "${pathspecs[@]}"
+}
+
+# engine_cxx_sources
+# All C++/CUDA sources, headers included — the formatting surface.
 engine_cxx_sources() {
-  git ls-files -z --cached --others --exclude-standard -- \
-    '*.h' '*.hpp' '*.cc' '*.cpp' '*.cxx' '*.cu' '*.cuh'
+  engine_project_files h hpp cc cpp cxx cu cuh
 }
