@@ -44,3 +44,10 @@ target_compile_options(engine_warnings INTERFACE
   $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:${ENGINE_WARNING_FLAGS}>)
 
 add_subdirectory(src)
+
+# enable_testing() rather than include(CTest): we want test registration only,
+# not the CDash dashboard targets (Experimental, Nightly, ...) CTest adds.
+if(ENGINE_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()

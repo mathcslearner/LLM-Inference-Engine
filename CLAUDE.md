@@ -95,4 +95,7 @@ scripts/check-format.sh
 M0 in progress. M0-T01 done (repository skeleton, CMake build system, module
 library targets, project warning set). M0-T02 done (pinned third-party
 dependencies via FetchContent — fmt, spdlog, nlohmann_json, GoogleTest —
-policy in `docs/dependencies.md`). Next up: **M0-T03**.
+policy in `docs/dependencies.md`). M0-T03 done (GoogleTest/CTest harness:
+per-file test executables via `engine_add_tests`, shared `tests/common/`
+helper library, unit/integration labels, workflow in `tests/README.md`).
+Next up: **M0-T04**.

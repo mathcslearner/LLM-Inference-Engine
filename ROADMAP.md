@@ -91,7 +91,7 @@ adding dependencies.
 - All dependencies pinned to exact tags/commits; a clean clone builds with no system-installed libraries beyond the toolchain.
 - `docs/dependencies.md` lists each dependency, version, license, and why it was chosen.
 
-### M0-T03 · Test harness
+### M0-T03 · Test harness — ✅ DONE (2026-08-03)
 Integrate GoogleTest with CTest. Create `tests/unit/` and `tests/integration/` trees, a
 shared `tests/common/` helper library, and one example test per tree.
 **Depends on:** M0-T02.
