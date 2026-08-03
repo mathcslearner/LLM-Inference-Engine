@@ -91,6 +91,15 @@ scripts/check-format.sh
 scripts/check-tidy.sh
 ```
 
+**Per-ticket validation workflow:** on every iteration, run the incremental
+build, the full ctest suite, and `scripts/check-format.sh` — all seconds.
+The full-tree `scripts/check-tidy.sh` sweep takes minutes; while iterating,
+scope it to the ticket's TUs instead (`scripts/check-tidy.sh
+tests/unit/foo_test.cpp`). Headers have no compile-database entry, so pass a
+TU that includes them — usually the ticket's test file — and
+`HeaderFilterRegex` analyzes them through it. Run the full no-arg sweep once
+before handing the ticket off; CI runs it regardless.
+
 **On the macOS dev machine, always build with Homebrew LLVM 20, not Apple
 clang** — pass `-DENGINE_ENABLE_CUDA=OFF` (no CUDA on macOS) and:
 
