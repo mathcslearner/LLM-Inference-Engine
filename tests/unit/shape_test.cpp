@@ -112,6 +112,14 @@ TEST(ShapeTest, MaxRankShapeIsAccepted) {
   EXPECT_EQ(shape.numel(), 16);
 }
 
+TEST(ShapeTest, FromDimsAcceptsMaxRank) {
+  // Rank 8 is the accept side of the rank-9 rejection below.
+  const std::vector<std::int64_t> dims(static_cast<std::size_t>(kMaxRank), 2);
+  const Shape shape = MustFromDims(dims);
+  EXPECT_EQ(shape.rank(), kMaxRank);
+  EXPECT_EQ(shape.numel(), 256);
+}
+
 TEST(ShapeTest, FromDimsRejectsNegativeDim) {
   auto shape = Shape::FromDims(std::vector<std::int64_t>{2, -1, 3});
   ASSERT_FALSE(shape.ok());
@@ -130,9 +138,22 @@ TEST(ShapeTest, FromDimsRejectsRankAboveMax) {
   EXPECT_TRUE(IsInvalidArgument(shape.status())) << shape.status();
 }
 
+TEST(ShapeTest, NumelUpToInt64MaxIsAccepted) {
+  // The accept side of the overflow boundary: a product of exactly
+  // kInt64Max is valid, and its row-major strides are too.
+  const Shape one_dim = MustFromDims({kInt64Max});
+  EXPECT_EQ(one_dim.numel(), kInt64Max);
+  EXPECT_EQ(RowMajorStrides(one_dim), (Strides{1}));
+  const Shape two_dims = MustFromDims({kInt64Max, 1});
+  EXPECT_EQ(two_dims.numel(), kInt64Max);
+  EXPECT_EQ(RowMajorStrides(two_dims), (Strides{1, 1}));
+}
+
 TEST(ShapeTest, FromDimsRejectsNumelOverflow) {
   for (const std::vector<std::int64_t>& dims :
        {std::vector<std::int64_t>{std::int64_t{1} << 32, std::int64_t{1} << 32},
+        // 2^62 * 2 == 2^63: exactly one past kInt64Max.
+        std::vector<std::int64_t>{std::int64_t{1} << 62, 2},
         std::vector<std::int64_t>{kInt64Max, 2},
         std::vector<std::int64_t>{kInt64Max, kInt64Max}}) {
     auto shape = Shape::FromDims(dims);
@@ -154,6 +175,14 @@ TEST(ShapeTest, OverflowIsJudgedOnNonZeroDims) {
       Shape::FromDims(std::vector<std::int64_t>{0, kInt64Max, 2});
   ASSERT_FALSE(overflowing.ok());
   EXPECT_TRUE(IsInvalidArgument(overflowing.status())) << overflowing.status();
+}
+
+TEST(ShapeTest, DimVectorMutableIndexWrites) {
+  // The non-const operator[] is the write path RowMajorStrides builds with.
+  Strides strides{1, 2, 3};
+  strides[1] = 42;
+  EXPECT_EQ(strides[1], 42);
+  EXPECT_EQ(strides, (Strides{1, 42, 3}));
 }
 
 TEST(ShapeTest, Equality) {
@@ -261,6 +290,18 @@ TEST(ShapeDeathTest, PushBackBeyondCapacityAborts) {
     strides.push_back(1);
   }
   EXPECT_DEATH(strides.push_back(1), "DimVector is full");
+}
+
+TEST(ShapeDeathTest, DimVectorInitializerListBeyondCapacityAborts) {
+  // Distinct from the Shape rank CHECK above: this is DimVector's own
+  // initializer_list guard (Strides has no Shape in front of it).
+  EXPECT_DEATH((void)Strides({1, 1, 1, 1, 1, 1, 1, 1, 1}),
+               "9 values exceed kMaxRank \\(8\\)");
+}
+
+TEST(ShapeDeathTest, MutableIndexOutOfRangeAborts) {
+  Strides strides{1, 2};
+  EXPECT_DEATH(strides[2] = 5, "index 2 out of range for size 2");
 }
 
 }  // namespace

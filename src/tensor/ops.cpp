@@ -120,6 +120,13 @@ template <typename T>
   return static_cast<double>(value);
 }
 
+// |v| as uint64, via two's-complement negation — well-defined for every
+// value including INT64_MIN (whose magnitude, 2^63, does not fit int64).
+[[nodiscard]] constexpr std::uint64_t UnsignedMagnitude(std::int64_t v) {
+  const auto u = static_cast<std::uint64_t>(v);
+  return v < 0 ? ~u + 1 : u;
+}
+
 // Whether integer value `v` is representable in integer dtype `dtype`.
 [[nodiscard]] bool FitsIntegerDtype(DataType dtype, std::int64_t v) {
   switch (dtype) {
@@ -382,7 +389,20 @@ StatusOr<Tensor> arange(std::int64_t start, std::int64_t end, std::int64_t step,
   }
   std::int64_t count = 0;
   if ((step > 0) == (span > 0) && span != 0) {
-    count = span / step + (span % step != 0 ? 1 : 0);
+    // ceil(|span| / |step|) in uint64: span == INT64_MIN with step == -1
+    // would make the signed division itself UB, and its count (2^63) does
+    // not fit int64 anyway.
+    const std::uint64_t uspan = UnsignedMagnitude(span);
+    const std::uint64_t ustep = UnsignedMagnitude(step);
+    const std::uint64_t ucount = (uspan / ustep) + (uspan % ustep != 0 ? 1 : 0);
+    if (ucount >
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      return InvalidArgumentError(
+          "arange: element count {} overflows int64 for start={}, end={}, "
+          "step={}",
+          ucount, start, end, step);
+    }
+    count = static_cast<std::int64_t>(ucount);
   }
   ASSIGN_OR_RETURN(Tensor tensor,
                    Tensor::empty(Shape{count}, dtype, device, allocator));

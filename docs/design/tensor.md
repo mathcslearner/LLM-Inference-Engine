@@ -104,6 +104,13 @@ enum class DataType : std::uint8_t {
   kInt4 = 9,     // AWQ/GPTQ weight quantization (M12)
 };
 
+// Count anchor + every DataType in declaration order, for exhaustive
+// iteration (dispatch tables, from_string, tests). static_asserts in
+// dtype.h keep the array dense, ordered, and sized by the anchor, so it
+// cannot silently drift from the enum.
+inline constexpr std::size_t kNumDataTypes = 10;
+inline constexpr std::array<DataType, kNumDataTypes> kAllDataTypes;
+
 // Element width in bits. Valid for every DataType, including sub-byte.
 [[nodiscard]] constexpr int itemsize_bits(DataType dtype);
 
@@ -226,13 +233,17 @@ class Shape {
 // The shared fixed-capacity inline container (int64_t, capacity kMaxRank,
 // append-only growth): Shape's dims and Strides both use it. Strides are
 // measured in ELEMENTS.
-class DimVector { /* size(), operator[], push_back(), ==, fmt-formattable */ };
+class DimVector { /* size(), operator[] (const + mutable), push_back(),
+                     values(), ==, fmt-formattable */ };
 using Strides = DimVector;
 
 [[nodiscard]] Strides RowMajorStrides(const Shape& shape);
 [[nodiscard]] bool IsContiguous(const Shape& shape, const Strides& strides);
 
 }  // namespace engine::tensor
+
+// fmt::formatter specializations for Shape and DimVector (covering the
+// Strides alias) render "[2, 3, 4]" / "[]".
 ```
 
 **Decisions.**
@@ -275,25 +286,36 @@ enum class DeviceType : std::uint8_t { kCPU = 0, kCUDA = 1 };
 // headers; a CUDA Device is *representable* on any build, but allocating on
 // one returns Unimplemented until M2 (and Unavailable-style failures after,
 // on non-CUDA builds).
-struct Device {
-  DeviceType type = DeviceType::kCPU;
-  int index = 0;  // Always 0 for kCPU; ordinal for kCUDA.
+//
+// Invariants, CHECKed at construction: index >= 0, and index == 0 for
+// kCPU. They keep operator== and ToString/Parse round-trips consistent —
+// an unconstrained {kCPU, 5} would format as "cpu" yet compare unequal to
+// Cpu().
+class Device {
+ public:
+  constexpr Device() = default;                 // cpu
+  constexpr Device(DeviceType type, int index); // CHECKs the invariants
 
-  [[nodiscard]] static constexpr Device Cpu() { return {DeviceType::kCPU, 0}; }
-  [[nodiscard]] static constexpr Device Cuda(int index) {
-    return {DeviceType::kCUDA, index};
-  }
+  [[nodiscard]] static constexpr Device Cpu();
+  [[nodiscard]] static constexpr Device Cuda(int index);
+
+  [[nodiscard]] constexpr DeviceType type() const;
+  [[nodiscard]] constexpr int index() const;  // always 0 for kCPU
+
   // "cpu", "cuda:0". Parse accepts exactly these forms (plus bare "cuda" ==
   // "cuda:0"); anything else, including "cpu:1", is InvalidArgument.
   [[nodiscard]] static core::StatusOr<Device> Parse(std::string_view spec);
   [[nodiscard]] std::string ToString() const;
 
-  [[nodiscard]] bool is_cpu() const;
-  [[nodiscard]] bool is_cuda() const;
-  friend bool operator==(const Device&, const Device&) = default;
+  [[nodiscard]] constexpr bool is_cpu() const;
+  [[nodiscard]] constexpr bool is_cuda() const;
+  friend constexpr bool operator==(const Device&, const Device&) = default;
 };
 
 }  // namespace engine::tensor
+
+// fmt::formatter specializations for DeviceType ("cpu") and Device
+// ("cuda:1") — the printing contract §7.1 relies on.
 ```
 
 The device *registry* (how many CUDA devices exist, their properties) is
@@ -301,6 +323,13 @@ M2's problem (`src/cuda/`); `Device` itself is just an address. Nothing in
 layer 1 validates `index` against hardware at construction time — validation
 happens where a device is *used* (allocation, M2 transfer), where a `Status`
 can be returned with real context.
+
+**Refined post-M1 (hardening pass, 2026-08-03).** Originally sketched as an
+open aggregate (`struct` with public `type`/`index`); that allowed
+`Device{kCPU, 5}`, which broke the agreement between `operator==` and
+`ToString`/`Parse` round-trips. `Device` is now a class whose constructor
+CHECKs the invariants above (programmer error per ADR-003 — data-driven
+specs go through `Parse`, which can only produce valid devices).
 
 ---
 
@@ -311,12 +340,16 @@ namespace engine::memory {
 
 // Move-only owning handle to one contiguous allocation. Destroying an
 // engaged Buffer invokes its deleter exactly once — including for zero-size
-// buffers. A moved-from Buffer is disengaged: destruction is a no-op.
+// buffers. A moved-from Buffer is disengaged and indistinguishable from a
+// default-constructed one (null data, zero size, cpu device, no deleter):
+// destruction is a no-op.
 class Buffer {
  public:
   using Deleter = std::function<void(void*)>;
 
   Buffer() = default;  // disengaged
+  // Preconditions (CHECK — Buffers are built by Allocator implementations,
+  // not from external input): deleter non-null; data null iff size_bytes 0.
   Buffer(void* data, std::size_t size_bytes, tensor::Device device,
          Deleter deleter);
   Buffer(Buffer&&) noexcept;             // transfers ownership
@@ -332,6 +365,9 @@ class Buffer {
 
 class Allocator {
  public:
+  Allocator() = default;
+  Allocator(const Allocator&) = delete;
+  Allocator& operator=(const Allocator&) = delete;
   virtual ~Allocator() = default;
 
   // `alignment` must be a power of two (CHECK — a caller-authored constant).
@@ -349,11 +385,21 @@ class Allocator {
 class CpuAllocator final : public Allocator {
  public:
   explicit CpuAllocator(std::size_t default_alignment = 64);
-  // ...
+
+  // The two-arg override, plus a convenience overload at the configured
+  // default alignment.
+  [[nodiscard]] core::StatusOr<Buffer> Allocate(std::size_t bytes,
+                                                std::size_t alignment) override;
+  [[nodiscard]] core::StatusOr<Buffer> Allocate(std::size_t bytes);
+
+  [[nodiscard]] tensor::Device device() const override;  // cpu
+  [[nodiscard]] std::size_t default_alignment() const;
 };
 
 // Process-wide CpuAllocator instance used when Tensor factories are not
-// given an explicit allocator. Never destroyed (function-local static).
+// given an explicit allocator. Never destroyed — an intentionally leaked
+// heap instance, so the pointer stays valid during static destruction (a
+// function-local static *object* would be destroyed at exit).
 [[nodiscard]] Allocator* DefaultCpuAllocator();
 
 }  // namespace engine::memory
@@ -428,7 +474,10 @@ class Tensor {
   [[nodiscard]] core::StatusOr<Tensor> reshape(Shape new_shape) const;
   [[nodiscard]] core::StatusOr<Tensor> view_as_dtype(DataType new_dtype) const;
 
-  // Raw access. data() is the buffer base plus byte_offset.
+  // Raw access. data() is the buffer base plus byte_offset. nullptr only
+  // for tensors whose underlying buffer is zero-sized (created with
+  // numel() == 0); a zero-numel view of a non-empty tensor keeps a non-null
+  // pointer — data() == nullptr implies numel() == 0, not the converse.
   [[nodiscard]] void* data() const;
   // Typed access: CHECKs dtype_of<T> == dtype(). Programmer error by
   // definition — the call site names T statically.
@@ -436,8 +485,11 @@ class Tensor {
 
   // CPU-only element accessor for tests and debugging. CHECKs: cpu device,
   // dtype match, rank match, indices in range. Applies strides — works on
-  // non-contiguous views. Never use on a hot path.
+  // non-contiguous views. Never use on a hot path. The initializer_list
+  // overload is what call sites use: t.item<float>({1, 2}) (an
+  // initializer_list does not convert to std::span until C++26).
   template <typename T> [[nodiscard]] T item(std::span<const int64_t> indices) const;
+  template <typename T> [[nodiscard]] T item(std::initializer_list<int64_t> indices) const;
 };
 
 }  // namespace engine::tensor
@@ -496,16 +548,20 @@ M1-T02 … M1-T09, so individual tickets don't decide ad hoc):
 
 **Copy/move semantics (acceptance criterion, stated precisely).**
 
-- `Tensor` is copyable and movable; both are `noexcept` except copy
-  (shared_ptr copy — still cheap, one atomic increment). Copy is shallow:
-  the copy aliases the same `Buffer`, same offset/shape/strides/dtype.
-- Moved-from `Tensor` is the empty handle (`defined() == false`); the only
-  valid operations on it are destruction, assignment, and `defined()`.
+- `Tensor` is copyable and movable; both are `noexcept` (`shared_ptr`'s
+  copy constructor is `noexcept`, and every other member is trivially
+  copyable — copy costs one atomic increment). Copy is shallow: the copy
+  aliases the same `Buffer`, same offset/shape/strides/dtype.
+- Moved-from `Tensor` is undefined (`defined() == false`); the only valid
+  operations on it are destruction, assignment, and `defined()`. Its other
+  metadata is unspecified — moves transfer the buffer without resetting
+  shape/dtype/device, which is why it is *not* the same as the
+  default-constructed empty handle (whose metadata accessors are valid).
 - Equality is **not** defined on `Tensor` (would it mean same handle or
   same values? — ambiguous, so neither; value comparison is
   `ops::allclose`, M1-T08).
 
-### 7.1 CPU ops (`ops.h`, M1-T08) — refinements decided at implementation
+### 7.1 CPU ops (`ops.h`, M1-T08/T09) — refinements decided at implementation
 
 Free functions in `namespace engine::tensor::ops`, compiled into
 `engine::tensor`. Everything here is host-side and CPU-only (§8: the
@@ -517,14 +573,19 @@ unchanged, with these additions:
   value not representable in an integer dtype (non-integral, out of range,
   NaN/inf; kBool accepts exactly 0/1) is `InvalidArgument`, checked *after*
   allocation so reserved dtypes still report `Unimplemented`. `arange`
-  computes in int64 (`step == 0` and `end - start` overflow →
-  `InvalidArgument`), proves integer representability via the range's
+  computes in int64 (`step == 0`, `end - start` overflow, and an element
+  count beyond int64 — e.g. span `INT64_MIN` with step `-1`, whose naive
+  signed count math would also be UB, so the count is computed in uint64 →
+  all `InvalidArgument`), proves integer representability via the range's
   extremes, and narrows per M1-T07 for floating dtypes (out-of-range fp16
   values become ±inf, the NumPy behavior). Default `arange` dtype is
   kInt64 (NumPy/PyTorch).
 - **Seeded fills** (`fill_uniform`/`fill_normal`) mutate an existing
-  floating-dtype tensor through a `const Tensor&` (const is shallow, §8),
-  writing elements in **logical row-major order** — part of the
+  floating-dtype tensor through a `const Tensor&` (const is shallow, §8);
+  a non-floating dtype, a non-finite/inverted uniform range (or an extent
+  overflowing to inf), or a non-finite mean / negative stddev is
+  `InvalidArgument`. Elements are written in **logical row-major order** —
+  part of the
   determinism contract, and what makes fills on strided views
   well-defined. The RNG is `std::mt19937_64` (sequence fixed by the C++
   standard) with hand-rolled transforms, because
@@ -543,10 +604,13 @@ unchanged, with these additions:
   the worst mismatch's index/values; `Summary()` is the human-readable
   report. Per-dtype default tolerances (`default_allclose_tolerance`):
   kFloat32 `{1e-5, 1e-8}`, kFloat16 `{1e-3, 1e-5}`, kBFloat16
-  `{1.6e-2, 1e-5}` (NumPy/PyTorch values), integers/kBool `{0, 0}`.
+  `{1.6e-2, 1e-5}` (NumPy/PyTorch values), integers/kBool `{0, 0}`;
+  reserved dtypes (no comparable host values until their milestone) CHECK.
+  Negative or NaN tolerances passed to `allclose` are `InvalidArgument`.
 - **`to_string`**: header line + nested NumPy-style rows, `edge_items`
-  truncation (`[0, 1, 2, ..., 7, 8, 9]`). An undefined handle prints
-  `"Tensor(undefined)"` rather than CHECKing — it is a debugging aid.
+  truncation (`[0, 1, 2, ..., 7, 8, 9]`; `edge_items` must be positive:
+  CHECK). An undefined handle prints `"Tensor(undefined)"` rather than
+  CHECKing — it is a debugging aid.
 - **`copy`** (M1-T09): `copy(dst, src)` requires identical shape *and*
   dtype — dtype conversion is only ever the named `cast` (§1's
   no-implicit-anything rule) — otherwise `InvalidArgument`. Elements are
@@ -569,7 +633,12 @@ unchanged, with these additions:
   (double → float → half) — the same path the factories and fills use,
   which is what makes "fp32→fp16 matches the half.h constructors
   bit-exactly" hold by construction; out-of-range values become ±inf and
-  NaN passes through. Integer targets truncate floating sources toward
+  NaN passes through. Caveat (noted post-M1): the double/float hops are
+  hardware conversions, so a *signaling* NaN is quieted in transit —
+  "matches half.h bit-exactly" holds for all values except sNaNs, which
+  half.h's pure bit conversions preserve and `cast` does not. Irrelevant
+  to inference; recorded so the exactness claim is honest. Integer
+  targets truncate floating sources toward
   zero (C semantics) and require the result representable: NaN, ±inf, or
   out-of-range — including integer→integer narrowing — is
   `InvalidArgument` naming the first offending value and its logical

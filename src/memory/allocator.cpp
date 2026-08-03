@@ -35,7 +35,7 @@ Buffer::Buffer(void* data, std::size_t size_bytes, tensor::Device device,
 Buffer::Buffer(Buffer&& other) noexcept
     : data_(std::exchange(other.data_, nullptr)),
       size_bytes_(std::exchange(other.size_bytes_, 0)),
-      device_(other.device_),
+      device_(std::exchange(other.device_, tensor::Device::Cpu())),
       deleter_(std::exchange(other.deleter_, nullptr)) {}
 
 Buffer& Buffer::operator=(Buffer&& other) noexcept {
@@ -45,7 +45,7 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
     }
     data_ = std::exchange(other.data_, nullptr);
     size_bytes_ = std::exchange(other.size_bytes_, 0);
-    device_ = other.device_;
+    device_ = std::exchange(other.device_, tensor::Device::Cpu());
     deleter_ = std::exchange(other.deleter_, nullptr);
   }
   return *this;

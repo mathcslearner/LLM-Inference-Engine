@@ -26,8 +26,9 @@ namespace engine::memory {
 
 // Move-only owning handle to one contiguous allocation. Destroying an
 // engaged Buffer invokes its deleter exactly once — including for zero-size
-// buffers, whose data() is nullptr. A moved-from (or default-constructed)
-// Buffer is disengaged: destruction is a no-op.
+// buffers, whose data() is nullptr. A moved-from Buffer is disengaged and
+// indistinguishable from a default-constructed one (null data, zero size,
+// cpu device, no deleter): destruction is a no-op.
 class Buffer {
  public:
   using Deleter = std::function<void(void*)>;

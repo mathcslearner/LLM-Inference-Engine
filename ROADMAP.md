@@ -239,6 +239,26 @@ max-abs-diff report, and human-readable tensor printing for debugging.
 **Acceptance criteria:**
 - Unit tests: contiguous and strided copies, all supported cast pairs, precision-loss cases (fp32→fp16 rounding) match the M1-T07 conversion functions exactly.
 
+### Post-M1 hardening — ✅ DONE (2026-08-03)
+Audit-driven fixes before M2, in one change. Bugs: `arange` count math was UB
+for span `INT64_MIN` / step `-1` (now computed in uint64; count overflow →
+`InvalidArgument`); `Device` was an open aggregate whose documented
+`index == 0`-for-CPU invariant was unenforced (now a class CHECKing its
+invariants at construction); `Buffer` moves left the source's `device()`
+unchanged (now reset, so moved-from == default-constructed). Contract
+corrections (header comments promised more than the code guaranteed):
+`Tensor::data()` nullness, moved-from `Tensor` metadata, `cast`'s
+signaling-NaN quieting vs half.h, `DefaultCpuAllocator` lifetime wording;
+design-doc API sketches synced (`kAllDataTypes`/`kNumDataTypes`, fmt
+formatters, `CpuAllocator` convenience overload, `item(initializer_list)`).
+Test hardening: `DeviceType` stable-value and `kAllDataTypes`
+density/anchor static_asserts, death tests for previously uncovered CHECK
+paths, boundary cases (rank-8 `FromDims`, numel at `INT64_MAX`,
+`cuda:INT_MAX` parse), half→int and int64-double-rounding casts, rank-0
+copy/cast, non-contiguous self-copy, multi-dim print truncation, half
+printing, and normal-fill goldens made libm-tolerant (uniform stays
+bit-exact).
+
 ---
 
 ## Milestone 2 — CUDA Backend Foundation

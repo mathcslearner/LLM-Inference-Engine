@@ -45,8 +45,11 @@ class Tensor {
   // Empty handle: no storage (defined() == false), rank 0, kFloat32, cpu.
   // Valid operations on it: destruction, assignment, defined(), and the
   // metadata accessors (which report those defaults); anything touching
-  // storage — data access or views — CHECKs. Moved-from Tensors are empty
-  // handles.
+  // storage — data access or views — CHECKs. A moved-from Tensor is also
+  // undefined (defined() == false), but only destruction, assignment, and
+  // defined() are meaningful on it: moves transfer the buffer without
+  // resetting the remaining metadata, so its shape/dtype/device are
+  // unspecified (design §7).
   Tensor() = default;
 
   // Allocates uninitialized, contiguous, row-major storage. `allocator` may
@@ -106,8 +109,11 @@ class Tensor {
   // tensor (M2+) data()/data_ptr() return the *device* pointer — legal to
   // hold and pass to kernels, illegal to dereference on the host.
 
-  // Buffer base plus byte_offset(); nullptr iff numel() == 0. CHECKs
-  // defined().
+  // Buffer base plus byte_offset(). CHECKs defined(). nullptr only for
+  // tensors whose underlying buffer is zero-sized (created with
+  // numel() == 0); a zero-numel VIEW of a non-empty tensor keeps a non-null
+  // (possibly past-the-end) pointer. So data() == nullptr implies
+  // numel() == 0, but not the converse.
   [[nodiscard]] void* data() const {
     CHECK(defined(), "data() on an undefined Tensor");
     void* base = buffer_->data();

@@ -45,16 +45,33 @@ enum class DeviceType : std::uint8_t {
 
 // Plain value type naming a memory/execution space. Cheap to copy,
 // equality-comparable, fmt-formattable as "cpu" / "cuda:0".
-struct Device {
-  DeviceType type = DeviceType::kCPU;
-  int index = 0;  // Always 0 for kCPU; ordinal for kCUDA.
+//
+// Invariants, enforced at construction (CHECK — Device values are built by
+// our own code via the factories or Parse, never directly from external
+// input): index >= 0 always, and index == 0 for kCPU. Enforcing them here
+// is what keeps operator== and ToString/Parse round-trips consistent:
+// without it a Device(kCPU, 5) would format as "cpu" yet compare unequal
+// to Cpu().
+class Device {
+ public:
+  constexpr Device() = default;  // cpu
 
-  [[nodiscard]] static constexpr Device Cpu() {
-    return {.type = DeviceType::kCPU, .index = 0};
+  // CHECKs the invariants above. Data-driven specs go through Parse, which
+  // returns InvalidArgument instead.
+  constexpr Device(DeviceType type, int index) : type_(type), index_(index) {
+    CHECK(index_ >= 0, "negative device index {}", index_);
+    CHECK(type_ != DeviceType::kCPU || index_ == 0,
+          "cpu device index must be 0, got {}", index_);
   }
+
+  [[nodiscard]] static constexpr Device Cpu() { return {}; }
   [[nodiscard]] static constexpr Device Cuda(int index) {
-    return {.type = DeviceType::kCUDA, .index = index};
+    return {DeviceType::kCUDA, index};
   }
+
+  [[nodiscard]] constexpr DeviceType type() const { return type_; }
+  // Always 0 for kCPU; ordinal for kCUDA.
+  [[nodiscard]] constexpr int index() const { return index_; }
 
   // Parses a device spec. Accepts exactly "cpu", "cuda" (== "cuda:0"), and
   // "cuda:N" with N a base-10 int; anything else — including "cpu:0", other
@@ -89,20 +106,24 @@ struct Device {
 
   // Canonical spec: "cpu" for CPU, "cuda:N" for CUDA (index always printed).
   [[nodiscard]] std::string ToString() const {
-    if (type == DeviceType::kCPU) {
-      return std::string(to_string(type));
+    if (type_ == DeviceType::kCPU) {
+      return std::string(to_string(type_));
     }
-    return fmt::format("{}:{}", to_string(type), index);
+    return fmt::format("{}:{}", to_string(type_), index_);
   }
 
   [[nodiscard]] constexpr bool is_cpu() const {
-    return type == DeviceType::kCPU;
+    return type_ == DeviceType::kCPU;
   }
   [[nodiscard]] constexpr bool is_cuda() const {
-    return type == DeviceType::kCUDA;
+    return type_ == DeviceType::kCUDA;
   }
 
   friend constexpr bool operator==(const Device&, const Device&) = default;
+
+ private:
+  DeviceType type_ = DeviceType::kCPU;
+  int index_ = 0;
 };
 
 }  // namespace engine::tensor

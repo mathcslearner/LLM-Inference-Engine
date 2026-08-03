@@ -62,7 +62,8 @@ namespace engine::tensor::ops {
     Device device = Device::Cpu(), memory::Allocator* allocator = nullptr);
 
 // 1-d tensor holding start, start + step, ... up to but excluding `end`
-// (empty when the range is empty; `step` may be negative; step == 0 →
+// (empty when the range is empty; `step` may be negative; step == 0, an
+// end - start that overflows int64, or an element count that does →
 // InvalidArgument). Values are computed in int64 arithmetic; for integer
 // dtypes every value must be representable (checked via the extremes) →
 // otherwise InvalidArgument; floating dtypes narrow per M1-T07 (a value
@@ -94,7 +95,7 @@ namespace engine::tensor::ops {
                                         double high, std::uint64_t seed);
 
 // Normal(mean, stddev) via Box–Muller on consecutive engine outputs: per
-// pair of elements, u1 = (mt19937_64() >> 11 + 1) * 2^-53 ∈ (0, 1], then
+// pair of elements, u1 = ((mt19937_64() >> 11) + 1) * 2^-53 ∈ (0, 1], then
 // u2 as in fill_uniform, r = sqrt(-2 ln u1), z0 = r cos(2π u2),
 // z1 = r sin(2π u2); an odd element count discards the final z1. Requires
 // finite mean and finite stddev >= 0. Caveat: log/cos/sin come from libm,
@@ -133,7 +134,9 @@ namespace engine::tensor::ops {
 //    and narrows per M1-T07 (double → float → half), the same path the
 //    factories and fills use — so fp32→fp16/bf16 matches the half.h
 //    constructors bit-exactly, out-of-range values become ±inf, and NaN
-//    passes through.
+//    passes through. Caveat: quiet NaNs only — the double/float hops are
+//    hardware conversions that quiet a signaling NaN, unlike half.h's pure
+//    bit conversions (irrelevant to inference; noted for exactness).
 //  - Integer targets: floating sources truncate toward zero (C semantics);
 //    a NaN, ±inf, or out-of-range result — including integer→integer
 //    narrowing — is InvalidArgument naming the first offending value and

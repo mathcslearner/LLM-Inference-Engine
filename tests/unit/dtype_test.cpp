@@ -21,6 +21,7 @@ using engine::tensor::is_sub_byte;
 using engine::tensor::itemsize;
 using engine::tensor::itemsize_bits;
 using engine::tensor::kAllDataTypes;
+using engine::tensor::kNumDataTypes;
 using engine::tensor::to_string;
 
 // Enum values are stable — they reach fixtures and serialized test data
@@ -35,6 +36,11 @@ static_assert(static_cast<std::uint8_t>(DataType::kInt64) == 6);
 static_assert(static_cast<std::uint8_t>(DataType::kBool) == 7);
 static_assert(static_cast<std::uint8_t>(DataType::kFP8E4M3) == 8);
 static_assert(static_cast<std::uint8_t>(DataType::kInt4) == 9);
+
+// The count anchor (dtype.h ties kAllDataTypes to it; the golden table below
+// is sized by it too).
+static_assert(kNumDataTypes == 10);
+static_assert(kAllDataTypes.size() == kNumDataTypes);
 
 // The size queries and predicates are constexpr.
 static_assert(itemsize_bits(DataType::kInt4) == 4);
@@ -115,6 +121,16 @@ TEST(DTypeTest, ItemsizeBytesGolden) {
 TEST(DTypeDeathTest, ItemsizeOnSubByteDtypeAborts) {
   EXPECT_DEATH((void)itemsize(DataType::kInt4),
                "itemsize\\(\\) is undefined for sub-byte dtypes");
+}
+
+TEST(DTypeDeathTest, ItemsizeBitsOnInvalidValueAborts) {
+  EXPECT_DEATH((void)itemsize_bits(static_cast<DataType>(42)),
+               "invalid DataType value 42");
+}
+
+TEST(DTypeDeathTest, ToStringOnInvalidValueAborts) {
+  EXPECT_DEATH((void)to_string(static_cast<DataType>(42)),
+               "invalid DataType value 42");
 }
 
 TEST(DTypeTest, ToStringGolden) {

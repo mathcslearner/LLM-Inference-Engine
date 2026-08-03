@@ -4,6 +4,7 @@
 #include "core/status.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 
@@ -39,12 +40,32 @@ enum class DataType : std::uint8_t {
   kInt4 = 9,     // AWQ/GPTQ weight quantization (M12)
 };
 
-// Every DataType, for exhaustive iteration (dispatch tables, tests).
-inline constexpr std::array<DataType, 10> kAllDataTypes = {
+// Number of DataType values. When appending an enumerator: bump this, add
+// the value to kAllDataTypes below, and let -Wswitch (warnings-as-errors)
+// drive the switch updates (itemsize_bits, to_string, dispatch tables) —
+// the static_asserts below keep the count and the array from drifting.
+inline constexpr std::size_t kNumDataTypes = 10;
+
+// Every DataType, for exhaustive iteration (dispatch tables, tests), in
+// declaration order.
+inline constexpr std::array<DataType, kNumDataTypes> kAllDataTypes = {
     DataType::kFloat32, DataType::kFloat16, DataType::kBFloat16,
     DataType::kInt8,    DataType::kUInt8,   DataType::kInt32,
     DataType::kInt64,   DataType::kBool,    DataType::kFP8E4M3,
     DataType::kInt4};
+
+// The enum's values are dense 0..kNumDataTypes-1 (stable, see above), so an
+// in-order, gap-free array provably contains every enumerator exactly once.
+static_assert(
+    [] {
+      for (std::size_t i = 0; i < kAllDataTypes.size(); ++i) {
+        if (static_cast<std::size_t>(kAllDataTypes[i]) != i) {
+          return false;
+        }
+      }
+      return true;
+    }(),
+    "kAllDataTypes must list every DataType once, in declaration order");
 
 // Classification. Every dtype is exactly one of: floating-point, integral,
 // or kBool — kBool is neither floating nor integral (the NumPy/PyTorch kind

@@ -291,6 +291,10 @@ TEST(TensorTest, SliceEmptyRange) {
   EXPECT_TRUE(s.defined());
   EXPECT_EQ(s.shape(), (Shape{0, 3}));
   EXPECT_EQ(s.numel(), 0);
+  // A zero-numel view of a non-empty tensor keeps a non-null pointer (base
+  // plus offset); data() is null only for zero-sized buffers (tensor.h).
+  EXPECT_EQ(s.byte_offset(), 2U * 3U * sizeof(float));
+  EXPECT_EQ(s.data(), t.data_ptr<float>() + (2 * 3));
 }
 
 TEST(TensorTest, SliceFullRangeIsIdentityMetadata) {
@@ -388,7 +392,8 @@ TEST(TensorTest, ViewAsDtypeSameSizePairs) {
       Unwrap(Tensor::empty(Shape{4}, DataType::kInt8, Device::Cpu()));
   EXPECT_EQ(Unwrap(i8.view_as_dtype(DataType::kUInt8)).dtype(),
             DataType::kUInt8);
-  // No host arithmetic types for fp16/bf16 until M1-T07 — metadata only.
+  // fp16 ↔ bf16: same 16-bit width, different formats — the fixture-loading
+  // reinterpretation case.
   const Tensor f16 =
       Unwrap(Tensor::empty(Shape{4}, DataType::kFloat16, Device::Cpu()));
   const Tensor bf16 = Unwrap(f16.view_as_dtype(DataType::kBFloat16));

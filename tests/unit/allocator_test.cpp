@@ -248,6 +248,26 @@ TEST(BufferTest, MoveAssignmentIntoDisengagedBuffer) {
   EXPECT_EQ(count, 1);
 }
 
+TEST(BufferTest, MovesTransferDeviceAndResetSourceToDefault) {
+  // A non-CPU device makes the transfer observable; a moved-from Buffer
+  // must be indistinguishable from a default-constructed one (cpu device).
+  int count = 0;
+  int value = 0;
+  Buffer source(&value, sizeof(value), Device::Cuda(3),
+                [&count](void*) { ++count; });
+  EXPECT_EQ(source.device(), Device::Cuda(3));
+  Buffer dest(std::move(source));
+  EXPECT_EQ(dest.device(), Device::Cuda(3));
+  // Reading the moved-from Buffer is deliberate: its state is specified.
+  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  EXPECT_EQ(source.device(), Device::Cpu());
+  Buffer assigned;
+  assigned = std::move(dest);
+  EXPECT_EQ(assigned.device(), Device::Cuda(3));
+  // NOLINTNEXTLINE(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+  EXPECT_EQ(dest.device(), Device::Cpu());
+}
+
 TEST(BufferTest, SelfMoveAssignmentIsSafe) {
   int count = 0;
   int value = 0;

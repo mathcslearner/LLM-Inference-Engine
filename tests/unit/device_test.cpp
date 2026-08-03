@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstdint>
 #include <string_view>
 
 namespace {
@@ -16,18 +17,24 @@ using engine::tensor::Device;
 using engine::tensor::DeviceType;
 using engine::tensor::to_string;
 
+// Enum values are stable — they reach fixtures and serialized test data
+// (device.h) — so renumbering must be a loud, deliberate change (mirrors
+// dtype_test's stable-value block).
+static_assert(static_cast<std::uint8_t>(DeviceType::kCPU) == 0);
+static_assert(static_cast<std::uint8_t>(DeviceType::kCUDA) == 1);
+
 // The type is constexpr-usable end to end (except Parse/ToString, which
 // build strings); pin the core contracts at compile time (mirrors
 // dtype_test's static_assert block).
-static_assert(Device{}.type == DeviceType::kCPU);
-static_assert(Device{}.index == 0);
+static_assert(Device{}.type() == DeviceType::kCPU);
+static_assert(Device{}.index() == 0);
 static_assert(Device{} == Device::Cpu());
 static_assert(Device::Cpu().is_cpu());
 static_assert(!Device::Cpu().is_cuda());
 static_assert(Device::Cuda(3).is_cuda());
 static_assert(!Device::Cuda(3).is_cpu());
-static_assert(Device::Cuda(3).type == DeviceType::kCUDA);
-static_assert(Device::Cuda(3).index == 3);
+static_assert(Device::Cuda(3).type() == DeviceType::kCUDA);
+static_assert(Device::Cuda(3).index() == 3);
 static_assert(Device::Cuda(0) != Device::Cuda(1));
 static_assert(Device::Cpu() != Device::Cuda(0));
 static_assert(to_string(DeviceType::kCPU) == "cpu");
@@ -88,6 +95,14 @@ TEST(DeviceTest, ParseToleratesLeadingZeros) {
   EXPECT_EQ(*parsed, Device::Cuda(7));
 }
 
+TEST(DeviceTest, ParseAcceptsIntMaxIndex) {
+  // The exact from_chars boundary: INT_MAX parses, INT_MAX + 1 (below) does
+  // not.
+  const StatusOr<Device> parsed = Device::Parse("cuda:2147483647");
+  ASSERT_TRUE(parsed.ok()) << parsed.status().ToString();
+  EXPECT_EQ(*parsed, Device::Cuda(2147483647));
+}
+
 TEST(DeviceTest, ParseRoundTripsToString) {
   for (const DeviceGolden& golden : kGolden) {
     const StatusOr<Device> parsed = Device::Parse(golden.device.ToString());
@@ -97,7 +112,7 @@ TEST(DeviceTest, ParseRoundTripsToString) {
 }
 
 TEST(DeviceTest, ParseRejectsInvalidSpecs) {
-  constexpr std::array<std::string_view, 17> kInvalid = {
+  constexpr std::array<std::string_view, 18> kInvalid = {
       "",
       "cpu:0",
       "cpu:1",
@@ -114,6 +129,7 @@ TEST(DeviceTest, ParseRejectsInvalidSpecs) {
       "cuda:+1",
       "cuda:1x",
       "cuda:abc",
+      "cuda:2147483648",   // INT_MAX + 1: one past the exact boundary
       "cuda:99999999999",  // exceeds int range
   };
   for (const std::string_view spec : kInvalid) {
@@ -124,6 +140,21 @@ TEST(DeviceTest, ParseRejectsInvalidSpecs) {
     // The offending spec is quoted in the message.
     EXPECT_NE(parsed.status().message().find(spec), std::string_view::npos);
   }
+}
+
+// --- Death tests (invariants CHECKed at construction; design §5) ---
+
+TEST(DeviceDeathTest, CpuWithNonzeroIndexAborts) {
+  EXPECT_DEATH((void)Device(DeviceType::kCPU, 1), "cpu device index must be 0");
+}
+
+TEST(DeviceDeathTest, NegativeIndexAborts) {
+  EXPECT_DEATH((void)Device::Cuda(-1), "negative device index");
+}
+
+TEST(DeviceDeathTest, ToStringOnInvalidDeviceTypeAborts) {
+  EXPECT_DEATH((void)to_string(static_cast<DeviceType>(9)),
+               "invalid DeviceType value 9");
 }
 
 }  // namespace

@@ -284,4 +284,17 @@ zero with NaN/±inf/out-of-range (incl. int→int narrowing) →
 InvalidArgument naming the first offending value and its logical index;
 strided/self-copy/all-49-pairs/fp32→half-bit-golden/truncation/range-error
 tests in `ops_test.cpp`). **Milestone 1 complete.**
+Post-M1 hardening done (2026-08-03, audit follow-up; details in ROADMAP):
+fixed `arange` count UB (span INT64_MIN/step -1 → InvalidArgument, uint64
+count math), `Device` now a class CHECKing `index >= 0` and index-0-for-CPU
+at construction (members via `type()`/`index()` accessors), `Buffer` moves
+reset the source's device; corrected overclaiming contracts
+(`Tensor::data()` nullness, moved-from `Tensor` metadata unspecified,
+`cast` quiets signaling NaNs unlike half.h, `DefaultCpuAllocator` is an
+intentional leak); added `kNumDataTypes` + density static_asserts,
+`DeviceType` stable-value asserts, death tests for uncovered CHECK paths,
+boundary/edge tests (rank-8 FromDims, numel INT64_MAX, cuda:INT_MAX,
+half→int & int64-rounding casts, rank-0 copy/cast, non-contiguous
+self-copy, print truncation), normal-fill goldens libm-tolerant; design
+doc §3–§7.1 synced.
 Next up: **M2-T01** (design doc: CUDA backend).

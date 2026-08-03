@@ -192,6 +192,17 @@ TEST(OpsArangeTest, Goldens) {
   const Tensor bools = Unwrap(ops::arange(0, 2, 1, DataType::kBool));
   EXPECT_FALSE(bools.item<bool>({0}));
   EXPECT_TRUE(bools.item<bool>({1}));
+
+  const Tensor bf = Unwrap(ops::arange(0, 4, 1, DataType::kBFloat16));
+  EXPECT_EQ(bf.item<bfloat16>({3}).to_bits(), bfloat16(3.0F).to_bits());
+
+  const Tensor i8 = Unwrap(ops::arange(-2, 2, 1, DataType::kInt8));
+  EXPECT_EQ(i8.item<std::int8_t>({0}), -2);
+  EXPECT_EQ(i8.item<std::int8_t>({3}), 1);
+
+  const Tensor u8 = Unwrap(ops::arange(250, 256, 1, DataType::kUInt8));
+  EXPECT_EQ(u8.item<std::uint8_t>({0}), 250);
+  EXPECT_EQ(u8.item<std::uint8_t>({5}), 255);
 }
 
 TEST(OpsArangeTest, EmptyRanges) {
@@ -211,6 +222,11 @@ TEST(OpsArangeTest, InvalidArguments) {
   // end - start overflows int64.
   EXPECT_TRUE(IsInvalidArgument(
       ops::arange(-2, std::numeric_limits<std::int64_t>::max(), 1).status()));
+  // span == INT64_MIN with step == -1: end - start is exactly representable
+  // but the naive count math (span / step) would be UB and the true count
+  // (2^63) does not fit int64. Regression test — this used to SIGFPE.
+  EXPECT_TRUE(IsInvalidArgument(
+      ops::arange(0, std::numeric_limits<std::int64_t>::min(), -1).status()));
 }
 
 // --- Seeded fills ---
@@ -329,6 +345,17 @@ TEST(OpsFillUniformTest, InvalidArguments) {
                         std::numeric_limits<double>::max(), 0)));
 }
 
+// The normal goldens go through libm (log/cos/sin), which ops.h documents
+// as only sub-ulp-reproducible across platforms — so unlike the uniform
+// goldens (bit-exact by construction, EXPECT_EQ above), these compare with
+// a few-ulp relative tolerance. Exact per-platform determinism is pinned
+// separately by DeterministicAndSeedSensitive.
+void ExpectWithinUlps(float actual, float expected, std::int64_t i) {
+  EXPECT_NEAR(actual, expected,
+              8.0F * std::abs(expected) * std::numeric_limits<float>::epsilon())
+      << "at [" << i << "]";
+}
+
 TEST(OpsFillNormalTest, GoldenValuesFp32) {
   // Box-Muller on mt19937_64(123), per the ops.h contract.
   const Tensor t = Unwrap(ops::zeros(Shape{6}, DataType::kFloat32));
@@ -336,7 +363,7 @@ TEST(OpsFillNormalTest, GoldenValuesFp32) {
   const float kExpected[6] = {-0x1.6e3328p+0F, -0x1.0cc7fcp-1F, -0x1.f5f71ap-6F,
                               -0x1.6c2722p-2F, 0x1.3a1c54p-1F,  0x1.b5720cp+0F};
   for (std::int64_t i = 0; i < 6; ++i) {
-    EXPECT_EQ(t.item<float>({i}), kExpected[i]) << "at [" << i << "]";
+    ExpectWithinUlps(t.item<float>({i}), kExpected[i], i);
   }
 }
 
@@ -347,7 +374,7 @@ TEST(OpsFillNormalTest, GoldenValuesAffineOddCount) {
   ASSERT_TRUE(ops::fill_normal(t, 5.0, 2.0, 123).ok());
   const float kExpected[3] = {0x1.11ccd8p+1F, 0x1.f99c02p+1F, 0x1.3c1412p+2F};
   for (std::int64_t i = 0; i < 3; ++i) {
-    EXPECT_EQ(t.item<float>({i}), kExpected[i]) << "at [" << i << "]";
+    ExpectWithinUlps(t.item<float>({i}), kExpected[i], i);
   }
 }
 
@@ -611,6 +638,27 @@ TEST(OpsToStringTest, ScalarEmptyAndBool) {
             "Tensor(shape=[2], dtype=bool, device=cpu)\n[false, true]");
 }
 
+TEST(OpsToStringTest, TruncatesOuterDims) {
+  // The non-innermost truncation branch: "..." on its own indented row.
+  const Tensor t = Unwrap(
+      Unwrap(ops::arange(0, 16, 1, DataType::kInt32)).reshape(Shape{8, 2}));
+  EXPECT_EQ(ops::to_string(t, 1),
+            "Tensor(shape=[8, 2], dtype=int32, device=cpu)\n"
+            "[[0, 1],\n"
+            " ...,\n"
+            " [14, 15]]");
+}
+
+TEST(OpsToStringTest, HalfDtypes) {
+  // Half values render through the half.h fmt formatters (exact fp32 value).
+  const Tensor f16 = Unwrap(ops::full(Shape{2}, DataType::kFloat16, 1.5));
+  EXPECT_EQ(ops::to_string(f16),
+            "Tensor(shape=[2], dtype=float16, device=cpu)\n[1.5, 1.5]");
+  const Tensor bf16 = Unwrap(ops::full(Shape{1}, DataType::kBFloat16, -0.5));
+  EXPECT_EQ(ops::to_string(bf16),
+            "Tensor(shape=[1], dtype=bfloat16, device=cpu)\n[-0.5]");
+}
+
 TEST(OpsToStringTest, NestedIndentation) {
   const Tensor t = Unwrap(
       Unwrap(ops::arange(0, 8, 1, DataType::kInt32)).reshape(Shape{2, 2, 2}));
@@ -714,6 +762,27 @@ TEST(OpsCopyTest, SelfCopyIsANoOp) {
   for (std::int64_t i = 0; i < 4; ++i) {
     EXPECT_EQ(t.item<float>({i}), static_cast<float>(i));
   }
+}
+
+TEST(OpsCopyTest, NonContiguousSelfCopyIsANoOp) {
+  // The documented no-op guarantee also holds off the memcpy fast path: an
+  // identical non-contiguous view self-copies element-wise (every write a
+  // self-assign), leaving all values unchanged.
+  const Tensor parent = Unwrap(
+      Unwrap(ops::arange(0, 8, 1, DataType::kFloat32)).reshape(Shape{2, 4}));
+  const Tensor view = Unwrap(parent.slice(1, 1, 3));  // [[1, 2], [5, 6]]
+  ASSERT_FALSE(view.is_contiguous());
+  ASSERT_TRUE(ops::copy(view, view).ok());
+  for (std::int64_t i = 0; i < 8; ++i) {
+    EXPECT_EQ(parent.item<float>({i / 4, i % 4}), static_cast<float>(i));
+  }
+}
+
+TEST(OpsCopyTest, RankZeroTensors) {
+  const Tensor src = Unwrap(ops::full(Shape{}, DataType::kFloat32, 2.5));
+  const Tensor dst = Unwrap(ops::zeros(Shape{}, DataType::kFloat32));
+  ASSERT_TRUE(ops::copy(dst, src).ok());
+  EXPECT_EQ(dst.item<float>({}), 2.5F);
 }
 
 TEST(OpsCopyTest, EmptyTensors) {
@@ -828,6 +897,50 @@ TEST(OpsCastTest, StridedSource) {
   EXPECT_EQ(out.item<float>({0, 1}), 2.0F);
   EXPECT_EQ(out.item<float>({1, 0}), 5.0F);
   EXPECT_EQ(out.item<float>({1, 1}), 6.0F);
+}
+
+TEST(OpsCastTest, HalfSourceToIntegerTruncates) {
+  // Exercises CastElement's float-source truncation path with fp16/bf16
+  // sources (the widen via operator float is exact).
+  const Tensor f16 = Unwrap(ops::zeros(Shape{4}, DataType::kFloat16));
+  f16.data_ptr<float16>()[0] = float16(2.5F);
+  f16.data_ptr<float16>()[1] = float16(-2.5F);
+  f16.data_ptr<float16>()[2] = float16(100.0F);
+  f16.data_ptr<float16>()[3] = float16(-0.9F);
+  const Tensor i32 = Unwrap(ops::cast(f16, DataType::kInt32));
+  EXPECT_EQ(i32.item<std::int32_t>({0}), 2);
+  EXPECT_EQ(i32.item<std::int32_t>({1}), -2);
+  EXPECT_EQ(i32.item<std::int32_t>({2}), 100);
+  EXPECT_EQ(i32.item<std::int32_t>({3}), 0);
+
+  // bf16 source, narrow integer target: 300 (exact in bf16) overflows int8.
+  const Tensor bf16 = Unwrap(ops::full(Shape{1}, DataType::kBFloat16, 300.0));
+  EXPECT_EQ(Unwrap(ops::cast(bf16, DataType::kInt32)).item<std::int32_t>({0}),
+            300);
+  EXPECT_TRUE(IsInvalidArgument(ops::cast(bf16, DataType::kInt8).status()));
+}
+
+TEST(OpsCastTest, Int64WidensThroughDoubleRounding) {
+  // Floating targets widen int64 sources to double first: 2^53 + 1 is not
+  // representable there and rounds to nearest-even (2^53) before the final
+  // narrow — the documented policy (ops.h), pinned here.
+  const Tensor i64 = Unwrap(ops::zeros(Shape{1}, DataType::kInt64));
+  i64.data_ptr<std::int64_t>()[0] = (std::int64_t{1} << 53) + 1;
+  EXPECT_EQ(Unwrap(ops::cast(i64, DataType::kFloat32)).item<float>({0}),
+            0x1p53F);
+  // int64 → fp16 beyond range overflows to ±inf like any floating target.
+  i64.data_ptr<std::int64_t>()[0] = 100000;
+  const float widened = static_cast<float>(
+      Unwrap(ops::cast(i64, DataType::kFloat16)).item<float16>({0}));
+  EXPECT_TRUE(std::isinf(widened));
+  EXPECT_GT(widened, 0.0F);
+}
+
+TEST(OpsCastTest, RankZeroTensor) {
+  const Tensor src = Unwrap(ops::full(Shape{}, DataType::kFloat32, 2.0));
+  const Tensor out = Unwrap(ops::cast(src, DataType::kInt32));
+  EXPECT_EQ(out.shape().rank(), 0);
+  EXPECT_EQ(out.item<std::int32_t>({}), 2);
 }
 
 TEST(OpsCastTest, FloatToIntTruncatesTowardZero) {
