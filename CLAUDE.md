@@ -169,4 +169,15 @@ convention); `IsContiguous` with size-1 dims unconstrained and numel==0
 always contiguous; fmt formatters ("[2, 3, 4]"); design-doc §4 updated with
 the two refinements; constexpr static_asserts + golden/death tests in
 `tests/unit/shape_test.cpp`).
-Next up: **M1-T04** (Device abstraction).
+M1-T04 done (`src/tensor/device.h`, header-only tensor_base header:
+`DeviceType{kCPU,kCUDA}` (stable values) with constexpr `to_string`,
+`Device{type,index}` plain value type — constexpr `Cpu()`/`Cuda(int)`
+factories, defaulted `operator==`, `is_cpu`/`is_cuda`;
+`Parse(string_view) → StatusOr<Device>` accepts exactly "cpu", "cuda"
+(≡ cuda:0), "cuda:N" (strict `from_chars`, full consumption, non-negative,
+overflow → InvalidArgument; "cpu:0"/casing/whitespace rejected);
+`ToString()` + fmt formatters produce canonical "cpu"/"cuda:N"; no CUDA
+headers — device registry/validation deferred to M2 where allocation can
+return real Statuses; constexpr static_asserts + golden round-trip +
+invalid-spec table tests in `tests/unit/device_test.cpp`).
+Next up: **M1-T05** (Allocator interface & CPU allocator).

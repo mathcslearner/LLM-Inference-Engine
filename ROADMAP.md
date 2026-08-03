@@ -185,7 +185,7 @@ stride computation, `is_contiguous()` check, dim validation, equality, formattin
 **Acceptance criteria:**
 - Unit tests: 0-d through 5-d shapes, numel overflow detection, contiguity for sliced strides, stride computation golden cases.
 
-### M1-T04 · Device abstraction
+### M1-T04 · Device abstraction — ✅ DONE (2026-08-03)
 `src/tensor/device.h`: `Device{DeviceType type; int index;}` with `DeviceType::kCPU`
 and `DeviceType::kCUDA`, parsing (`"cuda:0"`), equality, formatting. CUDA devices are
 representable now but any attempt to allocate on them returns `Unimplemented` until M2.
