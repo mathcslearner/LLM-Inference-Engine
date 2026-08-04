@@ -22,14 +22,18 @@ engine_add_tests(TREE unit SOURCES
 
 engine_add_tests(TREE unit SOURCES
   cuda_utils_test.cpp
+  stream_test.cpp
   DEPS engine::cuda)
 
-# Includes cuda/cuda_check.h and therefore the CUDA toolkit; only buildable
-# on CUDA builds. Most of it runs without a GPU (ToStatus and the macros are
-# pure host code); GPU-dependent assertions use the shared skip predicate.
+# Only buildable on CUDA builds: cuda_check_test.cpp includes
+# cuda/cuda_check.h and therefore the CUDA toolkit (most of it runs without
+# a GPU — ToStatus and the macros are pure host code); stream_cuda_test.cu
+# launches its own delay kernel (M2-T08's kernels don't exist yet), so it is
+# a .cu TU. GPU-dependent assertions use the shared skip predicate.
 if(ENGINE_ENABLE_CUDA)
   engine_add_tests(TREE unit SOURCES
     cuda_check_test.cpp
+    stream_cuda_test.cu
     DEPS engine::cuda)
 endif()
 

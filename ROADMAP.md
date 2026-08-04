@@ -302,7 +302,7 @@ RAII.
 - GPU test: querying properties of device 0 returns sane values; deliberately bad call surfaces a `Status` with the CUDA error string embedded.
 - Tests are skipped (not failed) on machines without a GPU, via a shared test predicate.
 
-### M2-T04 · Stream & event wrappers
+### M2-T04 · Stream & event wrappers — ✅ DONE (2026-08-04)
 `src/cuda/stream.h`: RAII `CudaStream` (non-blocking), `CudaEvent` (timing and
 sync variants), `record/wait/synchronize/elapsed_ms`, and a per-device default stream
 accessor.

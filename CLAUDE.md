@@ -372,4 +372,34 @@ golden table, macro single-evaluation/message tests, bad-cudaSetDevice
 acceptance test, CUDA_CHECK death test, ScopedSetDevice restore via
 cudaGetDevice). CPU-only path validated (271 tests green, 3 GPU tests
 skip); CUDA-side sources await a toolkit machine, like M2-T02).
-Next up: **M2-T04** (stream & event wrappers).
+M2-T04 done (stream & event wrappers per design §6: `src/cuda/stream_handle.h`
+— toolkit-free trivially-copyable `StreamHandle` over a forward-declared
+`CUstream_st*` (null ≡ "engine default stream for the relevant device", no
+ownership/validation — §6.3's deliberately thin spot); `src/cuda/stream.h` —
+toolkit-free public header (CUDA handle types spelled as pointers to
+forward-declared `CUstream_st`/`CUevent_st`, identical to the toolkit
+typedefs in CUDA TUs — §6.2 refined): move-only RAII `CudaStream`
+(`Create()` → cudaStreamNonBlocking on the current device, `Synchronize`,
+`WaitEvent`, `get`/`handle`/`device_index`) and `CudaEvent` (`Timing()`/
+`Sync()` flavors, `Record`, `Synchronize`, `Query`, static `ElapsedMs` —
+flavor misuse → InvalidArgument, incomplete record pre-checked →
+FailedPrecondition so cudaErrorNotReady never maps to kInternal); both drain
+on destruction (sync then destroy, CHECK on failure — sticky/terminal §4.3)
+and on move-assign-over; moved-from members CHECK (Tensor's
+undefined-handle policy); never-recorded events count complete
+(Query true / WaitEvent no-op — CUDA semantics, documented); lifetime rule
+"event may outlive its stream" documented + tested; `DefaultStream(i)` —
+lazy, leaked, mutex-guarded per-device non-blocking stream, out-of-range
+index or creation failure fatal (§6.3 refined); stream.cpp vs
+stream_stub.cpp source-list seam (stub factories → Unimplemented "built
+without CUDA", DefaultStream CHECKs); tests: `stream_test.cpp` (all
+configs: stub taxonomy, StreamHandle static_asserts, uniform DefaultStream
+death test; GPU-skipped: create/sync, move semantics, moved-from death
+tests, event lifecycle, ElapsedMs taxonomy, event-outlives-stream,
+DefaultStream identity + concurrency) + `stream_cuda_test.cu` (CUDA builds
+only, brings its own clock64 delay kernel since M2-T08 kernels don't exist
+yet: elapsed-of-known-duration > 0, FailedPrecondition before completion,
+cross-stream WaitEvent ordering via flag readback, destructor drains
+in-flight work). CPU-only path validated (286 tests green, GPU tests skip);
+CUDA-side sources await a toolkit machine, like M2-T02/T03).
+Next up: **M2-T05** (CUDA device allocator).

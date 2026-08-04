@@ -399,6 +399,24 @@ Lifetime rules (documented on the classes, tested in M2-T04):
   handle and every member CHECKs engagement, mirroring `Tensor`'s
   undefined-handle policy).
 
+*Refined in M2-T04 (implementation):*
+
+- **Toolkit-free spelling.** `stream.h` must be includable on every build
+  (§2.2), so the sketch's `cudaStream_t`/`cudaEvent_t` appear as pointers
+  to the forward-declared opaque structs `CUstream_st`/`CUevent_st` — the
+  exact types the toolkit typedefs name, so CUDA-compiled TUs use them
+  interchangeably with no cast.
+- **Events drain on destruction too**, mirroring the stream destructor
+  (synchronize, then destroy): destruction cannot return Status, and no
+  wrapper dies with its work unobserved.
+- **`ElapsedMs` misuse taxonomy:** a `Sync()`-flavor argument →
+  `InvalidArgument`; a not-yet-completed record → `FailedPrecondition`
+  (pre-checked via `Query`, so `cudaErrorNotReady` never surfaces as the
+  §4.2 table's opaque `kInternal`).
+- **Never-recorded events count as complete** (CUDA semantics, documented
+  on the members): `Query()` → true, `Synchronize()` → immediate success,
+  and `WaitEvent` on one is a no-op.
+
 ### 6.3 The per-device default stream, and the opaque handle
 
 ```cpp
@@ -408,6 +426,13 @@ Lifetime rules (documented on the classes, tested in M2-T04):
 // Thread-safe. NOT the CUDA legacy default stream.
 [[nodiscard]] CudaStream& DefaultStream(int device_index);
 ```
+
+*Refined in M2-T04:* `DefaultStream` returns a reference and cannot return
+Status, so both failure modes are fatal: an out-of-range device index is
+programmer error → CHECK (validate data-driven indices against
+`device_count()` first — the `ScopedSetDevice` stance, §5.2), and stream
+creation failure on a valid, visible device is `CHECK_OK`ed (not an
+operating condition the engine plans around).
 
 APIs outside the `cuda` module that accept a stream (`tensor`'s transfer
 overload §8, `kernels` launchers §9) take it as an **opaque handle** so

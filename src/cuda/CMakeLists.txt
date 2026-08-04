@@ -4,9 +4,9 @@
 # cuda.cu stays as a device-code anchor proving the pinned architectures
 # compile (M2-T02) until real .cu sources land (M2-T08).
 if(ENGINE_ENABLE_CUDA)
-  set(ENGINE_CUDA_SOURCES cuda_utils.cpp cuda.cu)
+  set(ENGINE_CUDA_SOURCES cuda_utils.cpp stream.cpp cuda.cu)
 else()
-  set(ENGINE_CUDA_SOURCES cuda_utils_stub.cpp)
+  set(ENGINE_CUDA_SOURCES cuda_utils_stub.cpp stream_stub.cpp)
 endif()
 
 add_library(engine_cuda STATIC ${ENGINE_CUDA_SOURCES})
