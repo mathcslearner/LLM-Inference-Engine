@@ -20,6 +20,14 @@ engine_add_tests(TREE unit SOURCES
   allocator_test.cpp
   DEPS engine::memory)
 
+# caching_allocator_test.cpp compiles on every configuration: the pool is
+# device-agnostic, so the size-class/stats/reuse/OOM-retry/concurrency
+# contracts run over host upstreams everywhere, and the GPU acceptance tests
+# skip without a device.
+engine_add_tests(TREE unit SOURCES
+  caching_allocator_test.cpp
+  DEPS engine::memory)
+
 # cuda_allocator_test.cpp compiles on every configuration (stub taxonomy on
 # CPU-only builds, index validation + GPU-skipped allocation tests on CUDA
 # builds); engine::cuda supplies device_count() for the index tests.
@@ -37,8 +45,9 @@ engine_add_tests(TREE unit SOURCES
 # a GPU — ToStatus and the macros are pure host code); stream_cuda_test.cu
 # launches its own delay kernel (M2-T08's kernels don't exist yet), so it is
 # a .cu TU; cuda_allocator_cuda_test.cpp calls cudaMemGetInfo/cudaMemcpy for
-# the M2-T05 leak and round-trip checks. GPU-dependent assertions use the
-# shared skip predicate.
+# the M2-T05 leak and round-trip checks, and caching_allocator_cuda_test.cpp
+# does the same for the M2-T06 released-to-driver and reuse checks.
+# GPU-dependent assertions use the shared skip predicate.
 if(ENGINE_ENABLE_CUDA)
   engine_add_tests(TREE unit SOURCES
     cuda_check_test.cpp
@@ -46,6 +55,7 @@ if(ENGINE_ENABLE_CUDA)
     DEPS engine::cuda)
   engine_add_tests(TREE unit SOURCES
     cuda_allocator_cuda_test.cpp
+    caching_allocator_cuda_test.cpp
     DEPS engine::memory engine::cuda)
 endif()
 

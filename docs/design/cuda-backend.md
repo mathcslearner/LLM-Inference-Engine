@@ -634,6 +634,38 @@ Design decisions:
   M2-T06 acceptance test scripts a sequence and asserts exact counter
   values, and proves reuse by asserting `miss_count` doesn't grow.
 
+*Refined in M2-T06 (implementation):*
+
+- **One fixed pool-wide upstream alignment** closes the gap this section
+  left open (a cached block's alignment vs. a later request's): every
+  upstream allocation is requested at
+  `CachingAllocator::kMaxAlignment` (256 — cudaMalloc's guarantee, ≥ every
+  alignment the engine uses) and `Allocate` CHECK-rejects requests above
+  it. Any cached block therefore satisfies any admissible request, so free
+  lists are keyed by size class alone. The alternative — keying by
+  `(class, alignment)` — would fragment the cache for no current caller.
+- **Stats are denominated in class-rounded bytes**, so `bytes_reserved` is
+  exactly the pool's upstream footprint and the invariant
+  `bytes_reserved == bytes_allocated + cached bytes` holds; the Buffer
+  handed to the caller still reports the *requested* size (the
+  CpuAllocator convention). `miss_count` counts requests that went
+  upstream, incremented once per request even when the OOM-retry path
+  calls the upstream twice.
+- **Zero-byte requests bypass the cache and the stats** (there is no block
+  to pool); their deleter deliberately does not reference the pool.
+- **The OOM courtesy triggers on `kResourceExhausted` or `kOutOfMemory`**:
+  the pool is device-agnostic and a host upstream reports exhaustion as
+  the latter. Other error codes propagate immediately, cache intact.
+- **The class is non-movable** (deleters capture `this`), and the
+  destructor CHECK ("no live Buffers") is the lifetime rule above made
+  fatal.
+- **Lock discipline**: the deleter path locks the pool mutex, so cached
+  upstream Buffers are destroyed outside the lock in `release_cached()`
+  (never holding the pool mutex across `cudaFree`); the OOM-retry path is
+  the exception and frees under the lock, since the memory must actually
+  be back with the upstream before the retry (safe — upstream deleters
+  are self-contained and cannot re-enter the pool).
+
 ### 7.4 Stream semantics of the pool (decided: stream-agnostic)
 
 The pool does **not** track streams. A block freed (Buffer destroyed) and

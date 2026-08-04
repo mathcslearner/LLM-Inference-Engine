@@ -434,4 +434,33 @@ round-trip proves real device memory); tensor_test CUDA-empty tests forked
 per build (CPU-only → Unimplemented, CUDA → device-tagged tensor /
 InvalidArgument index). CPU-only path validated (288 tests green, GPU tests
 skip); CUDA-side sources await a toolkit machine, like M2-T02…T04).
-Next up: **M2-T06** (caching pool allocator).
+M2-T06 done (caching pool allocator per design §7.3–§7.4:
+`src/memory/caching_allocator.h`/`.cpp` — toolkit-free, compiled on every
+configuration (the pool is device-agnostic over any upstream `Allocator*`,
+no source-list seam needed); size classes 512B min / powers of two to 1MiB /
+1MiB steps above (constexpr `SizeClass` with overflow guard, static_asserts
+pin the table), per-class free lists with exact-class reuse, one mutex,
+exact `Stats{bytes_allocated, bytes_reserved, hit_count, miss_count}` in
+class-rounded bytes (`bytes_reserved` == upstream footprint; handed-out
+Buffers report the requested size), `release_cached()` (upstream deleters
+run outside the pool mutex), upstream-exhaustion → release + one retry
+(triggers on kResourceExhausted *or* kOutOfMemory — device-agnostic;
+miss_count counts once per request), zero-byte requests bypass cache and
+stats; deleters capture `this` (the documented Buffer-ownership exception:
+pool must outlive its Buffers, class non-movable, destructor CHECKs no live
+Buffers then returns cached blocks). Design §7.3 gained a "Refined in
+M2-T06" note: fixed pool-wide upstream alignment `kMaxAlignment` (256,
+CHECK-ceiling on requests) so free lists never need alignment keys, plus the
+stats denomination, zero-byte, retry-code, and lock-discipline decisions.
+Tests: `caching_allocator_test.cpp` (all configs — scriptable counting
+FakeUpstream: reuse/no-upstream-call, class-rounding table, exact scripted
+stats sequence, release_cached incl. live-buffers-unaffected and
+destructor-releases-cache, retry taxonomy incl. non-exhaustion-no-retry,
+zero-byte, real-CpuAllocator round-trip, death tests for alignment/null
+upstream/live-buffer-at-destruction, 8-thread stress with invariant checks;
+GPU-skipped: reuse-via-stats + scripted stats over `DefaultCudaAllocator`)
++ `caching_allocator_cuda_test.cpp` (CUDA builds only: cudaMemGetInfo
+cached-vs-released driver deltas, reused-block memset/D2H round-trip).
+CPU-only path validated (311 tests green, GPU tests skip); CUDA-side
+awaits a toolkit machine, like M2-T02…T05).
+Next up: **M2-T07** (pinned memory & host↔device transfer).

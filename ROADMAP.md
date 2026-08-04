@@ -318,7 +318,7 @@ accessor.
 **Acceptance criteria:**
 - GPU tests: allocate/free cycles leak-free (`cudaMemGetInfo` delta check), device tensors report correct device, huge-allocation failure returns `ResourceExhausted` (not crash).
 
-### M2-T06 · Caching pool allocator
+### M2-T06 · Caching pool allocator — ✅ DONE (2026-08-04)
 `src/memory/caching_allocator.h`: a caching allocator over the naive one — size-class
 binning, free-list reuse, stats (`bytes_allocated`, `bytes_reserved`, hit/miss
 counts), `release_cached()`. This is the memory-pooling foundation for the whole

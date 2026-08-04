@@ -3,9 +3,11 @@
 # toolkit-touching cuda_allocator.cpp, CPU-only builds a stub with the same
 # symbols whose factories return Unimplemented.
 if(ENGINE_ENABLE_CUDA)
-  set(ENGINE_MEMORY_SOURCES allocator.cpp cuda_allocator.cpp)
+  set(ENGINE_MEMORY_SOURCES allocator.cpp caching_allocator.cpp
+                            cuda_allocator.cpp)
 else()
-  set(ENGINE_MEMORY_SOURCES allocator.cpp cuda_allocator_stub.cpp)
+  set(ENGINE_MEMORY_SOURCES allocator.cpp caching_allocator.cpp
+                            cuda_allocator_stub.cpp)
 endif()
 
 add_library(engine_memory STATIC ${ENGINE_MEMORY_SOURCES})
