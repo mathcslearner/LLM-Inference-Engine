@@ -292,7 +292,7 @@ and make the CPU-only build (CI) compile cleanly with all CUDA targets excluded.
 - With CUDA toolkit present: `.cu` files compile into `src/cuda/` and `src/kernels/` targets.
 - With `ENGINE_ENABLE_CUDA=OFF` (or no toolkit): full build + tests pass; `Device::kCUDA` operations return `Unimplemented`.
 
-### M2-T03 · CUDA error handling & device utilities
+### M2-T03 · CUDA error handling & device utilities — ✅ DONE (2026-08-04)
 `src/cuda/cuda_utils.h`: `CUDA_CHECK` (fatal) and `CUDA_RETURN_IF_ERROR` (→ `Status`)
 macros capturing file/line and error string; device introspection (`device_count()`,
 `DeviceProperties` with name, SM count, memory, compute capability); `ScopedSetDevice`

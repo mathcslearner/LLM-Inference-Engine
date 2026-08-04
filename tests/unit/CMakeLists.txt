@@ -21,6 +21,19 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::memory)
 
 engine_add_tests(TREE unit SOURCES
+  cuda_utils_test.cpp
+  DEPS engine::cuda)
+
+# Includes cuda/cuda_check.h and therefore the CUDA toolkit; only buildable
+# on CUDA builds. Most of it runs without a GPU (ToStatus and the macros are
+# pure host code); GPU-dependent assertions use the shared skip predicate.
+if(ENGINE_ENABLE_CUDA)
+  engine_add_tests(TREE unit SOURCES
+    cuda_check_test.cpp
+    DEPS engine::cuda)
+endif()
+
+engine_add_tests(TREE unit SOURCES
   ops_test.cpp
   tensor_test.cpp
   DEPS engine::tensor)

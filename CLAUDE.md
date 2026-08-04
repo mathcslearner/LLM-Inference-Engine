@@ -341,4 +341,35 @@ builds compile placeholder-kernel `.cu` anchors, CPU-only builds keep the
 `.cpp` anchors. CPU-only path fully validated (auto-detect downgrade +
 explicit OFF, build + 263 tests green); toolkit-present path awaits a GPU
 machine — first exercised by M2-T03+).
-Next up: **M2-T03** (CUDA error handling & device utilities).
+M2-T03 done (CUDA error handling & device utilities per design §4–§5:
+`src/cuda/cuda_utils.h` — toolkit-free public introspection API
+(`device_count()` memoized, never fails, 0 without GPU/toolkit and on
+CPU-only builds; `DeviceProperties` + `GetDeviceProperties` with
+out-of-range → InvalidArgument naming index and count; `ScopedSetDevice`
+RAII, CHECKing ctor, restores previous device); `src/cuda/cuda_check.h` —
+internal toolkit-including header (design §2.2 refined: the macro/ToStatus
+declarations inherently name toolkit types, so they split out of the
+public header; includable only from CUDA-compiled TUs) with
+`ToStatus(cudaError_t, what)` per the §4.2 code table (device OOM →
+kResourceExhausted, invalid device/value → kInvalidArgument, no
+device/driver/support → kUnavailable, else kInternal; message always
+embeds cudaGetErrorName/String, sticky context-poisoning errors marked
+terminal), `CUDA_CHECK` (fatal via CheckFailed) and `CUDA_RETURN_IF_ERROR`
+(→ Status with expression + file:line), both single-evaluation;
+implementation in `cuda_utils.cpp` (CUDA builds; first enumeration logs
+per-device info line — §4.4) vs `cuda_utils_stub.cpp` (CPU-only:
+GetDeviceProperties → Unimplemented "built without CUDA",
+ScopedSetDevice ctor CHECKs); `find_package(CUDAToolkit)` +
+`CUDA::cudart_static` linked PUBLIC on engine_cuda (host TUs including
+cuda_runtime.h need it — design §3 refined); top-level CMP0156 (guarded)
+dedups test link lines; shared GPU-skip predicate pulled forward from
+M2-T09: `tests/common/cuda.h` `HasCudaDevice()` +
+`ENGINE_SKIP_WITHOUT_CUDA()` — GPU tests skip, never fail, without a
+device; `cuda_utils_test.cpp` runs on every configuration (stub taxonomy
+via #ifdef, GPU sanity checks guarded, uniform ScopedSetDevice death
+test), `cuda_check_test.cpp` (CUDA builds only, mostly GPU-less: ToStatus
+golden table, macro single-evaluation/message tests, bad-cudaSetDevice
+acceptance test, CUDA_CHECK death test, ScopedSetDevice restore via
+cudaGetDevice). CPU-only path validated (271 tests green, 3 GPU tests
+skip); CUDA-side sources await a toolkit machine, like M2-T02).
+Next up: **M2-T04** (stream & event wrappers).

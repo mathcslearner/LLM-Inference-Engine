@@ -1,5 +1,15 @@
 cmake_minimum_required(VERSION 3.26)
 
+# De-duplicate link lines (CMake ≥ 3.29; guarded — 3.26 stays the floor).
+# Once two dependency paths reach the same engine archive (e.g. a test
+# linking engine::core directly and via engine::test_common → engine::cuda,
+# M2-T03), the OLD behavior repeats it on the link line and Apple's ld64
+# warns on every test link. NEW keeps static-link correctness and drops the
+# repeats.
+if(POLICY CMP0156)
+  cmake_policy(SET CMP0156 NEW)
+endif()
+
 project(llm_inference_engine
   VERSION 0.1.0
   DESCRIPTION "Multi-GPU LLM inference engine for decoder-only transformers"

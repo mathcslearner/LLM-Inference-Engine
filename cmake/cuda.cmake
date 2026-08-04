@@ -36,6 +36,12 @@ if(ENGINE_ENABLE_CUDA)
     set(CMAKE_CUDA_STANDARD 20)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_EXTENSIONS OFF)
+    # Imported CUDA::* targets (M2-T03): host .cpp TUs that include
+    # cuda_runtime.h and the final test executables need the runtime's
+    # include dirs and library, which nvcc-compiled TUs get implicitly but
+    # host-compiled ones do not. engine_cuda links CUDA::cudart_static
+    # PUBLIC (src/cuda/CMakeLists.txt).
+    find_package(CUDAToolkit REQUIRED)
     # Separable compilation stays at its OFF default until something needs
     # device linking (design §3): no cross-TU device calls are planned.
   else()

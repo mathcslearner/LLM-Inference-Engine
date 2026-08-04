@@ -60,7 +60,8 @@ Components and files (all paths per ROADMAP tickets):
 
 | File | Module | Contents | Ticket |
 |---|---|---|---|
-| `src/cuda/cuda_utils.h/.cpp` | cuda | `CUDA_CHECK`, `CUDA_RETURN_IF_ERROR`, `ToStatus`, `device_count()`, `DeviceProperties`, `ScopedSetDevice` | M2-T03 |
+| `src/cuda/cuda_utils.h/.cpp` | cuda | `device_count()`, `DeviceProperties`, `ScopedSetDevice` (toolkit-free) | M2-T03 |
+| `src/cuda/cuda_check.h` | cuda | `CUDA_CHECK`, `CUDA_RETURN_IF_ERROR`, `ToStatus` (internal, includes the toolkit — split from cuda_utils.h in M2-T03, see §2.2) | M2-T03 |
 | `src/cuda/stream.h/.cpp` | cuda | `CudaStream`, `CudaEvent`, per-device default stream | M2-T04 |
 | `src/memory/cuda_allocator.h/.cpp` | memory | `CudaAllocator` (naive `cudaMalloc`) | M2-T05 |
 | `src/memory/caching_allocator.h/.cpp` | memory | `CachingAllocator` + stats | M2-T06 |
@@ -69,7 +70,7 @@ Components and files (all paths per ROADMAP tickets):
 | `src/kernels/launch.h` | kernels | grid/block helpers, `CUDA_1D_KERNEL_LOOP` | M2-T08 |
 | `src/kernels/dispatch.h` | kernels | `DISPATCH_FLOATING_TYPES` | M2-T08 |
 | `src/kernels/elementwise.h/.cu` | kernels | `add`, `mul`, `scale`, `cast` launchers + kernels | M2-T08 |
-| `tests/common/cuda.h/.cpp` | tests | skip predicate, `CudaTestFixture`, `expect_tensors_close` | M2-T09 |
+| `tests/common/cuda.h/.cpp` | tests | skip predicate (landed M2-T03 — its acceptance criterion needs it), `CudaTestFixture`, `expect_tensors_close` | M2-T09 |
 
 ### 2.1 ADR-002 conformance
 
@@ -113,7 +114,14 @@ CUDA-touching modules:
   `kernels`, `memory`, or `tensor` includes a CUDA toolkit header. Toolkit
   includes live in `.cpp`/`.cu` files only. Public headers use opaque
   handles (§6.3) and plain types, so a CPU-only TU can include
-  `cuda/stream.h` and compile.
+  `cuda/stream.h` and compile. *Refined in M2-T03:* declarations that
+  inherently name toolkit types (`ToStatus(cudaError_t, …)` and the error
+  macros, which expand `cudaSuccess`/`cudaGetErrorName`) cannot live in a
+  toolkit-free header, so they moved to an **internal** header
+  (`cuda/cuda_check.h`) that includes `<cuda_runtime.h>` and may be
+  included only by CUDA-compiled `.cpp`/`.cu` TUs — the sharing mechanism
+  for toolkit-touching code, not a public surface. The rule above governs
+  *public* headers; it is unchanged.
 - **Sources split, not `#ifdef`-riddled.** Each CUDA-touching target lists
   its `.cu`/CUDA-dependent `.cpp` sources only when `ENGINE_ENABLE_CUDA` is
   ON. With CUDA off, a small `*_stub.cpp` provides the same symbols
@@ -170,6 +178,12 @@ CUDA-touching modules:
   milestone. Greppable, reviewed, matches ADR-002 rule 3.
 - **Separable compilation is OFF** until something needs device linking
   (no cross-TU device calls planned; keeps link simple and fast).
+- *Refined in M2-T03:* CUDA builds `find_package(CUDAToolkit)` and
+  `engine_cuda` links `CUDA::cudart_static` PUBLIC — host-compiled TUs that
+  include `<cuda_runtime.h>` (allocators, transfer code, CUDA-only tests)
+  need the runtime's include dirs and library, which only nvcc-compiled TUs
+  get implicitly. Static runtime: no `libcudart.so` deploy dependency;
+  shared is a one-line change if tooling ever needs it.
 - **CPU-only exclusion:** with CUDA off, no target lists a `.cu` source and
   the stub sources take their place (§2.2). All existing M0/M1 targets are
   untouched either way.
@@ -288,7 +302,9 @@ struct DeviceProperties {
   std::size_t total_memory_bytes;
 };
 
-// InvalidArgument if index is out of [0, device_count()).
+// InvalidArgument if index is out of [0, device_count()). On CPU-only
+// builds: Unimplemented per the §2.2 taxonomy (refined in M2-T03 — the
+// code distinguishes "built without CUDA" from "no such device").
 [[nodiscard]] core::StatusOr<DeviceProperties> GetDeviceProperties(int index);
 
 // RAII: cudaSetDevice(index) on construction, restores the previous
