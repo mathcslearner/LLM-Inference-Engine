@@ -328,7 +328,7 @@ engine.
 - GPU tests: alloc→free→alloc of same size reuses the block (no cudaMalloc call — verified via stats), stats accurate through a scripted sequence, `release_cached()` returns memory to the driver.
 - Concurrent allocation from multiple threads is safe (stress test).
 
-### M2-T07 · Pinned memory & host↔device transfer
+### M2-T07 · Pinned memory & host↔device transfer — ✅ DONE (2026-08-04)
 `PinnedCpuAllocator` for page-locked host memory; `copy(dst, src, stream)` supporting
 H2D/D2H/D2D async transfers; `Tensor::to(device, stream)` returning a new tensor.
 **Depends on:** M2-T06.

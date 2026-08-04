@@ -66,7 +66,7 @@ Components and files (all paths per ROADMAP tickets):
 | `src/memory/cuda_allocator.h/.cpp` | memory | `CudaAllocator` (naive `cudaMalloc`) | M2-T05 |
 | `src/memory/caching_allocator.h/.cpp` | memory | `CachingAllocator` + stats | M2-T06 |
 | `src/memory/pinned_allocator.h/.cpp` | memory | `PinnedCpuAllocator` (`cudaHostAlloc`) | M2-T07 |
-| `src/tensor/ops.h` (+`transfer.cpp`) | tensor | device-aware `copy(dst, src, stream)` overload, `Tensor::to` | M2-T07 |
+| `src/tensor/ops.h` (+`transfer_detail.h`, `transfer.cpp`/`transfer_stub.cpp`) | tensor | device-aware `copy(dst, src, stream)` overload, `Tensor::to` | M2-T07 |
 | `src/kernels/launch.h` | kernels | grid/block helpers, `CUDA_1D_KERNEL_LOOP` | M2-T08 |
 | `src/kernels/dispatch.h` | kernels | `DISPATCH_FLOATING_TYPES` | M2-T08 |
 | `src/kernels/elementwise.h/.cu` | kernels | `add`, `mul`, `scale`, `cast` launchers + kernels | M2-T08 |
@@ -102,19 +102,25 @@ bullet. ADR-002 Amendment 2 records the fix.
   streams. `kernels` never includes anything from layer 2+ (model,
   scheduler, runtime) — the acceptance-criteria review point.
 - `tensor`'s M2-T07 transfer code calls into `cuda` (memcpy on a stream).
-  `tensor → cuda` is **not** a listed edge, and adding it would be wrong —
-  it would drag the CUDA toolkit under every `tensor` consumer. Resolution
-  in §8.1: the device-aware copy lives behind a small internal dispatch
-  seam compiled into `engine_tensor` only when `ENGINE_ENABLE_CUDA=ON`,
-  calling only toolkit functions (`cudaMemcpyAsync`), not `engine::cuda`
-  types — mirroring how `memory` touches the toolkit without new edges.
-  The public API stays in `tensor/ops.h`; a stream is passed as an opaque
-  handle (§6.3). Rule 3's module list gains no new member in spirit:
-  toolkit use stays inside `tensor`'s own `.cpp`, compiled out on CPU-only
-  builds. Recorded here rather than as an ADR amendment because rule 3
-  governs *toolkit* access (build concern), while the ADR's edge table
-  governs *module* dependencies — and `tensor` gains no dependency on the
-  `cuda` module.
+  This design originally planned toolkit access without a module edge —
+  the seam calling only `cudaMemcpyAsync`, never `engine::cuda` symbols.
+  *Refined in M2-T07 (implementation): that was wrong, for the same reason
+  the M2-T05 bullet above was* — the transfer contract needs cuda-module
+  state and code, not just the toolkit: a null `StreamHandle` resolves to
+  the process-wide `DefaultStream` (§6.3, §8.1), which cannot be forked
+  without breaking FIFO ordering against every other user of the engine
+  default stream, and memcpy/sync failures must map through the one §4.2
+  code table. **ADR-002 Amendment 3 adds `tensor → cuda`** — PRIVATE, so
+  `tensor`'s public headers stay toolkit-free: `ops.h`/`tensor.h` include
+  only the toolkit-free `cuda/stream_handle.h`, and the toolkit-touching
+  code sits behind an internal seam (`transfer_detail.h`, §8.1) whose CUDA
+  implementation (`transfer.cpp`) is compiled only when
+  `ENGINE_ENABLE_CUDA=ON` (CPU-only builds compile a stub, §2.2). Rule 3's
+  toolkit list gains `tensor` (its transfer TU), recorded in the same
+  amendment. The original concern — dragging the CUDA toolkit under every
+  `tensor` consumer — does not materialize: a PRIVATE edge propagates no
+  toolkit headers, and the link-closure cost was already paid by
+  `memory → cuda`.
 
 ### 2.2 CPU-only builds (`ENGINE_ENABLE_CUDA=OFF`)
 
@@ -567,6 +573,27 @@ driver detects registered ranges), and callers that care (the engine's I/O
 staging buffers, later) simply choose this allocator. On CPU-only builds:
 `Unimplemented`.
 
+*Refined in M2-T07 (implementation):*
+
+- **`Create()` factory, mirroring `CudaAllocator`**: the stub's
+  `Unimplemented` lives there (only producer of instances), and on CUDA
+  builds `Create` eagerly reports **`kUnavailable` when no CUDA device is
+  visible** — pinning requires a driver context, and the eager check beats
+  letting `cudaHostAlloc` fail later (`cudaErrorNoDevice` maps to the same
+  code via §4.2).
+- **Alignment ceiling `kGuaranteedAlignment` (256)**, the same constant and
+  CHECK as `CudaAllocator`: `cudaHostAlloc` returns page-aligned memory,
+  and the shared ceiling keeps `CachingAllocator`'s fixed upstream
+  alignment (§7.3) valid over either upstream. Exhaustion →
+  `kResourceExhausted` (the §4.2 mapping of `cudaErrorMemoryAllocation`) —
+  which the pool's OOM-retry already catches.
+- **Deleters capture nothing**: `cudaFreeHost` needs no device context, so
+  unlike `CudaAllocator`'s deleter there is no device index to carry;
+  failures log-and-drop as usual.
+- **No default-instance accessor** (`DefaultPinnedAllocator`): no consumer
+  exists yet; the engine's staging paths (M4+) will own their allocator
+  explicitly. Add one when a caller actually wants ambient pinned memory.
+
 ### 7.3 `CachingAllocator` (M2-T06)
 
 The memory-pooling backbone. A caching layer over any upstream `Allocator`
@@ -744,6 +771,29 @@ definitions live in a `transfer.cpp` compiled into `engine_tensor` only on
 CUDA builds (stub returns `Unimplemented` otherwise), calling
 `cudaMemcpyAsync` directly.
 
+*Refined in M2-T07 (implementation):*
+
+- **The seam moved below the public functions.** Validation and H2H
+  delegation are build-invariant, so `copy(dst, src, stream)` lives in
+  `ops.cpp` and `Tensor::to` in `tensor.cpp` (always compiled); they
+  dispatch device-involving copies to one internal function —
+  `detail::DeviceCopy(dst, src, stream, synchronize)` in
+  `transfer_detail.h` — implemented by `transfer.cpp` (CUDA builds) or
+  `transfer_stub.cpp` (`Unimplemented`, CPU-only). Consequences: the
+  "mismatched shapes/dtypes → InvalidArgument" acceptance criterion is
+  testable on CPU-only CI, and **H2H pairs work on every build** (the stub
+  taxonomy applies only to copies that actually involve a CUDA tensor —
+  unreachable through supported factories on CPU-only builds).
+- The public layer also owns the small-print: `numel() == 0` succeeds
+  without touching the toolkit (zero-size tensors may hold null data
+  pointers), an identical dst/src view is a well-defined no-op (mirroring
+  the two-argument `copy`), and the cross-device `Unimplemented` fires
+  before the seam, so `DeviceCopy`'s CUDA pair always shares one device.
+- `transfer.cpp` passes **explicit `cudaMemcpyKind`s** rather than
+  `cudaMemcpyDefault`: the direction is already classified, and the
+  explicit kind keeps the driver's pointer validation.
+- The module edge this TU needs is ADR-002 Amendment 3 (§2.1).
+
 ### 8.2 Synchronization semantics (the honest table)
 
 `cudaMemcpyAsync` on a stream is only as async as the host memory allows:
@@ -772,6 +822,12 @@ cost is irrelevant; hot paths that care will pass a stream explicitly.
 Same-device `to` returning the same handle (not a copy) mirrors
 `reshape`'s "never copies" philosophy; a deep copy is `ops::copy` onto a
 fresh tensor, as always.
+
+*Refined in M2-T07 (implementation):* the source-contiguity requirement is
+checked **before** the same-device fast path, so a non-contiguous `to` is
+`InvalidArgument` even when no copy would have happened — the contract does
+not depend on the destination, and relaxing later (when strided device copy
+exists) cannot break anyone.
 
 ---
 

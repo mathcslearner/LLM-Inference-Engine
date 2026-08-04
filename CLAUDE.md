@@ -463,4 +463,44 @@ GPU-skipped: reuse-via-stats + scripted stats over `DefaultCudaAllocator`)
 cached-vs-released driver deltas, reused-block memset/D2H round-trip).
 CPU-only path validated (311 tests green, GPU tests skip); CUDA-side
 awaits a toolkit machine, like M2-T02…T05).
-Next up: **M2-T07** (pinned memory & host↔device transfer).
+M2-T07 done (pinned memory & host↔device transfer per design §7.2/§8:
+`src/memory/pinned_allocator.h` — toolkit-free public header; `PinnedCpuAllocator`
+final over cudaHostAlloc(Portable)/cudaFreeHost, `Create()` → StatusOr (no visible
+device → Unavailable — eager, cudaErrorNoDevice maps there anyway; CPU-only builds
+→ Unimplemented from the stub), same 256-byte `kGuaranteedAlignment` CHECK-ceiling
+as CudaAllocator (keeps the caching pool's fixed upstream alignment valid over
+either), exhaustion → kResourceExhausted (which the pool's OOM-retry already
+catches), **`device()` == `Device::Cpu()`** — pinnedness is a property of the
+allocation, not a DeviceType; deleters capture nothing (cudaFreeHost needs no
+device context); no default singleton (no consumer yet). Transfers:
+`ops::copy(dst, src, StreamHandle)` — same shape+dtype (InvalidArgument), both
+contiguous (InvalidArgument; strided device copy deferred), H2H delegates to the
+2-arg overload on every build (stream ignored), cross-device CUDA pair →
+Unimplemented, identical views no-op, numel==0 early-out; `Tensor::to(device[,
+stream])` — contiguity checked *before* the same-device fast path (uniform
+contract), same device → same handle, stream-less spelling enqueues on the engine
+default stream then synchronizes (§8.3 safe default), stream spelling enqueues and
+returns (§6.4 discipline). Structure refined from the design's letter: validation
+and H2H live in always-compiled ops.cpp/tensor.cpp (the InvalidArgument acceptance
+criterion runs on CPU-only CI); only `detail::DeviceCopy(dst, src, stream,
+synchronize)` (internal `transfer_detail.h`) sits behind the source seam —
+transfer.cpp (cudaMemcpyAsync with explicit kinds, null handle resolved to
+`DefaultStream(destination-relevant device)`, sync via cudaStreamSynchronize) vs
+transfer_stub.cpp (Unimplemented). **ADR-002 Amendment 3: `tensor → cuda`**
+(PRIVATE; public headers stay toolkit-free, only stream_handle.h is included) —
+the null-handle contract needs cuda's process-wide DefaultStream (a tensor-local
+stream would fork FIFO ordering) and the §4.2 error table; rule 3's toolkit list
+gains tensor's transfer TU. Tests: `pinned_allocator_test.cpp` (all configs: stub
+taxonomy; CUDA GPU-less: no-device Unavailable; GPU-skipped: 256-alignment +
+host-writability, zero-byte, huge → ResourceExhausted, buffer-outlives-allocator,
+pinned-tensor-is-ordinary-CPU-tensor via fill/item, alignment death tests) +
+`transfer_test.cpp` (all configs: dtype/shape-mismatch + non-contiguous
+InvalidArgument, H2H-with-stream value copy, identical-view no-op, same-device
+same-handle, contiguity-before-fast-path, undefined-handle death tests, CPU-only
+to(cuda) → Unimplemented / CUDA builds out-of-range index → InvalidArgument;
+GPU-skipped acceptance: byte-exact H2D→D2H round-trip across all non-reserved
+dtypes, D2D, cross-stream event ordering, pinned round-trip on a stream,
+to(stream)+event sync, zero-numel, 2-GPU cross-device Unimplemented). CPU-only
+path validated (330 tests green, GPU tests skip); CUDA-side sources await a
+toolkit machine, like M2-T02…T06).
+Next up: **M2-T08** (kernel launch infrastructure & first elementwise kernels).

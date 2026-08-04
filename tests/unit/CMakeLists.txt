@@ -64,3 +64,12 @@ engine_add_tests(TREE unit SOURCES
   ops_test.cpp
   tensor_test.cpp
   DEPS engine::tensor engine::cuda)
+
+# M2-T07: both compile on every configuration. pinned_allocator_test links
+# engine::tensor for the pinned-Tensor smoke test; transfer_test's
+# validation/H2H cases run everywhere (design §8.1) and its GPU round-trip,
+# stream/event, and pinned acceptance tests skip without a device.
+engine_add_tests(TREE unit SOURCES
+  pinned_allocator_test.cpp
+  transfer_test.cpp
+  DEPS engine::tensor engine::cuda)

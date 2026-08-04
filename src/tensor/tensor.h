@@ -2,6 +2,7 @@
 
 #include "core/check.h"
 #include "core/status.h"
+#include "cuda/stream_handle.h"
 #include "memory/allocator.h"
 #include "tensor/device.h"
 #include "tensor/dtype.h"
@@ -104,6 +105,33 @@ class Tensor {
   // mismatch → InvalidArgument; reserved dtypes → Unimplemented (consistent
   // with empty()).
   [[nodiscard]] core::StatusOr<Tensor> view_as_dtype(DataType new_dtype) const;
+
+  // --- Device transfer (M2-T07; design: docs/design/cuda-backend.md §8) ---
+  //
+  // Allocate a contiguous row-major tensor on `device` (via the default
+  // allocator for that device) holding this tensor's values — or, when
+  // already on `device`, return *this: the same shared handle, no copy
+  // (reshape's "never copies" philosophy; a deep copy is ops::copy onto a
+  // fresh tensor). The source must be contiguous → InvalidArgument
+  // otherwise (strided device copy needs a kernel; deferred), checked
+  // before the same-device fast path so the contract does not depend on
+  // the destination.
+  //
+  // Without a stream the call is SYNCHRONOUS: it enqueues on the engine
+  // default stream of the device involved and blocks until the transfer
+  // completes, so on return the result is safe to consume from the host or
+  // any stream (design §8.3 — the safe default for model loading and
+  // tests). The stream overload ENQUEUES on `stream` (null = the engine
+  // default stream, design §6.3) and returns immediately: the result must
+  // not be consumed before a sync point per design §6.4.
+  //
+  // Errors: CUDA→CUDA across devices → Unimplemented (distributed
+  // milestone); a CUDA `device` on CPU-only builds → Unimplemented; an
+  // out-of-range CUDA index → InvalidArgument; allocation failure
+  // propagates. Undefined handle → CHECK.
+  [[nodiscard]] core::StatusOr<Tensor> to(Device device) const;
+  [[nodiscard]] core::StatusOr<Tensor> to(Device device,
+                                          cuda::StreamHandle stream) const;
 
   // --- Raw access ---
   //
