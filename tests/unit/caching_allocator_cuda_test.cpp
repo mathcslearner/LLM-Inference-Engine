@@ -31,8 +31,12 @@ using engine::memory::DefaultCudaAllocator;
 // cudaMemGetInfo with a generous tolerance — the driver rounds allocations
 // and may lazily grow context-internal state (the warm-up triggers the
 // latter first), so the block size dominates only when it is large.
-TEST(CachingAllocatorCudaTest, ReleaseCachedReturnsMemoryToTheDriver) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+// On CudaTestFixture (M2-T09) for the skip guard and device selection; the
+// pools under test are built locally.
+class CachingAllocatorDriverGpuTest : public engine::testing::CudaTestFixture {
+};
+
+TEST_F(CachingAllocatorDriverGpuTest, ReleaseCachedReturnsMemoryToTheDriver) {
   Allocator* const upstream = DefaultCudaAllocator(0).value();
   CachingAllocator pool(upstream);
   constexpr std::size_t kBlockBytes = std::size_t{64} << 20U;  // 64 MiB
@@ -65,8 +69,7 @@ TEST(CachingAllocatorCudaTest, ReleaseCachedReturnsMemoryToTheDriver) {
 
 // A cache-hit block is real, writable device memory: memset a fresh pattern
 // after reuse and round-trip it through a D2H copy.
-TEST(CachingAllocatorCudaTest, ReusedBlockIsRealDeviceMemory) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CachingAllocatorDriverGpuTest, ReusedBlockIsRealDeviceMemory) {
   Allocator* const upstream = DefaultCudaAllocator(0).value();
   CachingAllocator pool(upstream);
   constexpr std::size_t kBytes = 4096;

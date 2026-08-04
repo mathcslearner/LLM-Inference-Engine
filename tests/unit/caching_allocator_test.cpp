@@ -449,11 +449,14 @@ TEST(CachingAllocatorTest, ConcurrentAllocationStress) {
 }
 
 // --- GPU: the ticket's acceptance criteria over the real CudaAllocator.
-// Skip (never fail) without a device; the cudaMemGetInfo "returned to the
-// driver" check needs the toolkit and lives in caching_allocator_cuda_test.
+// On CudaTestFixture (M2-T09): skip (never fail) without a device; the
+// pools under test are built locally over the default device allocator.
+// The cudaMemGetInfo "returned to the driver" check needs the toolkit and
+// lives in caching_allocator_cuda_test.
 
-TEST(CachingAllocatorGpuTest, ReuseIsServedFromCacheOnDevice) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+class CachingAllocatorGpuTest : public engine::testing::CudaTestFixture {};
+
+TEST_F(CachingAllocatorGpuTest, ReuseIsServedFromCacheOnDevice) {
   Allocator* const upstream = DefaultCudaAllocator(0).value();
   CachingAllocator pool(upstream);
   EXPECT_EQ(pool.device(), Device::Cuda(0));
@@ -471,8 +474,7 @@ TEST(CachingAllocatorGpuTest, ReuseIsServedFromCacheOnDevice) {
               /*hit_count=*/1, /*miss_count=*/1);
 }
 
-TEST(CachingAllocatorGpuTest, ScriptedSequenceStatsAreExactOnDevice) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CachingAllocatorGpuTest, ScriptedSequenceStatsAreExactOnDevice) {
   Allocator* const upstream = DefaultCudaAllocator(0).value();
   CachingAllocator pool(upstream);
   Buffer a = pool.Allocate(300, 64).value();   // 512 class, miss

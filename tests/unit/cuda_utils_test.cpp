@@ -72,8 +72,12 @@ TEST(GetDevicePropertiesTest, OutOfRangeIndexFails) {
   }
 }
 
-TEST(GetDevicePropertiesTest, Device0PropertiesAreSane) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+// GPU tests on CudaTestFixture (M2-T09): the fixture supplies the skip
+// guard; its ScopedSetDevice member is itself part of the API under test.
+class DevicePropertiesGpuTest : public engine::testing::CudaTestFixture {};
+class ScopedSetDeviceGpuTest : public engine::testing::CudaTestFixture {};
+
+TEST_F(DevicePropertiesGpuTest, Device0PropertiesAreSane) {
   const StatusOr<DeviceProperties> properties = GetDeviceProperties(0);
   ASSERT_TRUE(properties.ok()) << properties.status();
   EXPECT_FALSE(properties->name.empty());
@@ -84,8 +88,7 @@ TEST(GetDevicePropertiesTest, Device0PropertiesAreSane) {
   EXPECT_GT(properties->total_memory_bytes, 0U);
 }
 
-TEST(GetDevicePropertiesTest, EveryVisibleDeviceHasProperties) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(DevicePropertiesGpuTest, EveryVisibleDeviceHasProperties) {
   for (int i = 0; i < device_count(); ++i) {
     const StatusOr<DeviceProperties> properties = GetDeviceProperties(i);
     EXPECT_TRUE(properties.ok())
@@ -95,8 +98,7 @@ TEST(GetDevicePropertiesTest, EveryVisibleDeviceHasProperties) {
 
 // --- ScopedSetDevice ---
 
-TEST(ScopedSetDeviceTest, ValidIndexScopeRuns) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(ScopedSetDeviceGpuTest, ValidIndexScopeRuns) {
   const ScopedSetDevice guard(0);
   // Restoration of the previous device is verified with cudaGetDevice in
   // cuda_check_test.cpp (needs the toolkit).

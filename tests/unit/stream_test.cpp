@@ -73,9 +73,18 @@ TEST(DefaultStreamDeathTest, BadIndexChecks) {
 }
 
 // --- GPU tests (toolkit-free surface; skip without a device) ---
+//
+// On CudaTestFixture (M2-T09) for the skip guard and device selection; the
+// streams/events under test are built locally, and the fixture's own stream
+// is deliberately unused.
 
-TEST(CudaStreamTest, CreateSynchronizeEmpty) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+class CudaStreamGpuTest : public engine::testing::CudaTestFixture {};
+class CudaStreamGpuDeathTest : public engine::testing::CudaTestFixture {};
+class CudaEventGpuTest : public engine::testing::CudaTestFixture {};
+class CudaEventGpuDeathTest : public engine::testing::CudaTestFixture {};
+class DefaultStreamGpuTest : public engine::testing::CudaTestFixture {};
+
+TEST_F(CudaStreamGpuTest, CreateSynchronizeEmpty) {
   StatusOr<CudaStream> stream = CudaStream::Create();
   ASSERT_TRUE(stream.ok()) << stream.status();
   EXPECT_NE(stream->get(), nullptr);
@@ -85,8 +94,7 @@ TEST(CudaStreamTest, CreateSynchronizeEmpty) {
   EXPECT_TRUE(stream->Synchronize().ok());
 }
 
-TEST(CudaStreamTest, MoveTransfersOwnership) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaStreamGpuTest, MoveTransfersOwnership) {
   StatusOr<CudaStream> created = CudaStream::Create();
   ASSERT_TRUE(created.ok()) << created.status();
   CudaStream source = *std::move(created);
@@ -105,8 +113,7 @@ TEST(CudaStreamTest, MoveTransfersOwnership) {
   EXPECT_TRUE(via_assign.Synchronize().ok());
 }
 
-TEST(CudaStreamDeathTest, MovedFromMembersCheck) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaStreamGpuDeathTest, MovedFromMembersCheck) {
   StatusOr<CudaStream> created = CudaStream::Create();
   ASSERT_TRUE(created.ok()) << created.status();
   CudaStream source = *std::move(created);
@@ -121,8 +128,7 @@ TEST(CudaStreamDeathTest, MovedFromMembersCheck) {
   EXPECT_NE(target.get(), nullptr);
 }
 
-TEST(CudaEventTest, RecordSynchronizeQuery) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaEventGpuTest, RecordSynchronizeQuery) {
   StatusOr<CudaStream> stream = CudaStream::Create();
   ASSERT_TRUE(stream.ok()) << stream.status();
   StatusOr<CudaEvent> event = CudaEvent::Timing();
@@ -136,8 +142,7 @@ TEST(CudaEventTest, RecordSynchronizeQuery) {
   EXPECT_TRUE(*done);
 }
 
-TEST(CudaEventTest, UnrecordedEventIsComplete) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaEventGpuTest, UnrecordedEventIsComplete) {
   StatusOr<CudaEvent> event = CudaEvent::Sync();
   ASSERT_TRUE(event.ok()) << event.status();
   EXPECT_FALSE(event->is_timing());
@@ -155,8 +160,7 @@ TEST(CudaEventTest, UnrecordedEventIsComplete) {
   EXPECT_TRUE(stream->Synchronize().ok());
 }
 
-TEST(CudaEventTest, ElapsedMsOfCompletedPairIsNonNegative) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaEventGpuTest, ElapsedMsOfCompletedPairIsNonNegative) {
   StatusOr<CudaStream> stream = CudaStream::Create();
   ASSERT_TRUE(stream.ok()) << stream.status();
   StatusOr<CudaEvent> start = CudaEvent::Timing();
@@ -172,8 +176,7 @@ TEST(CudaEventTest, ElapsedMsOfCompletedPairIsNonNegative) {
   EXPECT_GE(*elapsed, 0.0F);
 }
 
-TEST(CudaEventTest, ElapsedMsRejectsSyncEvents) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaEventGpuTest, ElapsedMsRejectsSyncEvents) {
   StatusOr<CudaEvent> timing = CudaEvent::Timing();
   ASSERT_TRUE(timing.ok()) << timing.status();
   StatusOr<CudaEvent> sync = CudaEvent::Sync();
@@ -184,8 +187,7 @@ TEST(CudaEventTest, ElapsedMsRejectsSyncEvents) {
   EXPECT_TRUE(IsInvalidArgument(elapsed.status())) << elapsed.status();
 }
 
-TEST(CudaEventDeathTest, MovedFromMembersCheck) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaEventGpuDeathTest, MovedFromMembersCheck) {
   StatusOr<CudaEvent> created = CudaEvent::Timing();
   ASSERT_TRUE(created.ok()) << created.status();
   CudaEvent source = *std::move(created);
@@ -202,8 +204,7 @@ TEST(CudaEventDeathTest, MovedFromMembersCheck) {
 // Lifetime rule (design §6.2): an event may outlive the stream it was
 // recorded on — completion state survives stream destruction, and the
 // stream's draining destructor has already observed completion anyway.
-TEST(CudaEventTest, EventOutlivesItsStream) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaEventGpuTest, EventOutlivesItsStream) {
   StatusOr<CudaEvent> event = CudaEvent::Timing();
   ASSERT_TRUE(event.ok()) << event.status();
   {
@@ -219,8 +220,7 @@ TEST(CudaEventTest, EventOutlivesItsStream) {
 
 // --- DefaultStream ---
 
-TEST(DefaultStreamTest, SameObjectEveryCall) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(DefaultStreamGpuTest, SameObjectEveryCall) {
   CudaStream& first = DefaultStream(0);
   EXPECT_NE(first.get(), nullptr);
   EXPECT_EQ(first.device_index(), 0);
@@ -228,8 +228,7 @@ TEST(DefaultStreamTest, SameObjectEveryCall) {
   EXPECT_TRUE(first.Synchronize().ok());
 }
 
-TEST(DefaultStreamTest, ConcurrentCallsAgree) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(DefaultStreamGpuTest, ConcurrentCallsAgree) {
   constexpr int kThreads = 8;
   std::array<CudaStream*, kThreads> seen{};
   {

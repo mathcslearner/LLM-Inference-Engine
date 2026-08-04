@@ -27,8 +27,11 @@ using engine::memory::CudaAllocator;
 // verified as a cudaMemGetInfo free-memory delta of zero (with a small
 // tolerance — the driver may lazily grow context-internal allocations, which
 // the warm-up allocation is there to trigger first).
-TEST(CudaAllocatorCudaTest, AllocateFreeCyclesAreLeakFree) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+// On CudaTestFixture (M2-T09) for the skip guard and device selection; the
+// allocator under test is built locally.
+class CudaAllocatorDriverGpuTest : public engine::testing::CudaTestFixture {};
+
+TEST_F(CudaAllocatorDriverGpuTest, AllocateFreeCyclesAreLeakFree) {
   CudaAllocator allocator = CudaAllocator::Create(0).value();
   constexpr std::size_t kBlockBytes = std::size_t{1} << 20U;  // 1 MiB
   {
@@ -52,8 +55,7 @@ TEST(CudaAllocatorCudaTest, AllocateFreeCyclesAreLeakFree) {
 
 // The returned pointer is real, writable device memory on the allocator's
 // device: a device-side memset round-trips through a D2H copy.
-TEST(CudaAllocatorCudaTest, ReturnedMemoryIsRealDeviceMemory) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaAllocatorDriverGpuTest, ReturnedMemoryIsRealDeviceMemory) {
   CudaAllocator allocator = CudaAllocator::Create(0).value();
   constexpr std::size_t kBytes = 4096;
   const Buffer buffer = allocator.Allocate(kBytes, 256).value();

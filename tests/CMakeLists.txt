@@ -9,8 +9,18 @@ include(GoogleTest)
 #
 # For each source file `foo_test.cpp`, creates executable `<tree>_foo_test`
 # linked against the shared test helpers and GoogleTest's default main, and
-# registers its tests with CTest under the label <tree> and the ctest-name
-# prefix "<tree>/". DEPS lists the engine targets under test.
+# registers its tests with CTest under the ctest-name prefix "<tree>/".
+# DEPS lists the engine targets under test.
+#
+# Labels (M2-T09, design §10.1): tests in suites named `*GpuTest` /
+# `*GpuDeathTest` — the CudaTestFixture naming contract (tests/common/cuda.h)
+# — are labeled `<tree>-gpu`; everything else `<tree>`. The combined label is
+# a single string because gtest_discover_tests(PROPERTIES) flattens
+# list-valued properties at the CMake 3.26 floor; ctest -L matches labels by
+# regex, so `-L gpu`, `-L unit`, and `-L integration` all select the right
+# sets. Two discovery calls per target split the label sets (supported:
+# per-target call counter since 3.10, TEST_FILTER since 3.22; a filter
+# matching nothing registers nothing, without error).
 function(engine_add_tests)
   cmake_parse_arguments(ARG "" "TREE" "SOURCES;DEPS" ${ARGN})
   foreach(source IN LISTS ARG_SOURCES)
@@ -27,6 +37,12 @@ function(engine_add_tests)
     # GPU-only tests arriving in M2).
     gtest_discover_tests(${target}
       TEST_PREFIX "${ARG_TREE}/"
+      TEST_FILTER "*GpuTest.*:*GpuDeathTest.*"
+      DISCOVERY_MODE PRE_TEST
+      PROPERTIES LABELS "${ARG_TREE}-gpu")
+    gtest_discover_tests(${target}
+      TEST_PREFIX "${ARG_TREE}/"
+      TEST_FILTER "-*GpuTest.*:*GpuDeathTest.*"
       DISCOVERY_MODE PRE_TEST
       PROPERTIES LABELS ${ARG_TREE})
   endforeach()

@@ -1008,6 +1008,32 @@ provides: the skip guard in `SetUp`, device 0 selection, a per-test
 mechanically. M2-T09 migrates the tests M2-T03…T08 wrote inline onto the
 fixture and documents this pattern in `tests/README.md`.
 
+> **Refined in M2-T09.** Three decisions the implementation pinned down:
+>
+> - **Helper signature.** The comparison helper is
+>   `engine::testing::ExpectTensorsClose(actual, expected, CudaStream&,
+>   optional<double> rtol, optional<double> atol)` — the project's
+>   PascalCase, mirroring `allclose`'s optional tolerances rather than bare
+>   `(atol, rtol)` scalars. It takes a `CudaStream&` (not a `StreamHandle`)
+>   so `tests/common` stays toolkit-free: synchronizing a raw handle would
+>   need `cudaStreamSynchronize`, while `CudaStream::Synchronize()` is on
+>   the toolkit-free surface. Null-handle launch tests pass
+>   `DefaultStream(0)`. It is a free function (usable from `.cu` TUs and
+>   non-fixture code) rather than a fixture member; the fixture is the usual
+>   source of the stream argument.
+> - **The `gpu` label mechanism.** Suites needing a device follow a naming
+>   contract — `*GpuTest` / `*GpuDeathTest`, which deriving from
+>   `CudaTestFixture` produces naturally — and `engine_add_tests` runs
+>   `gtest_discover_tests` twice per target with complementary
+>   `TEST_FILTER`s. The GPU set gets the single label `<tree>-gpu` (not the
+>   list `<tree>;gpu`: the module flattens list-valued PROPERTIES at the
+>   CMake 3.26 floor); `ctest -L` matches by regex, so `-L gpu` and
+>   `-L <tree>` both select correctly.
+> - **Fixture members are `std::optional`s** (`ScopedSetDevice`, stream,
+>   pool), engaged only after the skip guard passes — so the fixture
+>   compiles and skips cleanly on CPU-only builds without touching a stub —
+>   and torn down in reverse order after the stream sync.
+
 ### 10.3 What runs where
 
 | Environment | What runs |

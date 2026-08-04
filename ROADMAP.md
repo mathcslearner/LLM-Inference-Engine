@@ -345,7 +345,7 @@ a dtype-dispatch macro (`DISPATCH_FLOATING_TYPES`), and elementwise kernels: `ad
 - GPU tests: each kernel matches the CPU implementation via `allclose` across shapes (including non-multiple-of-blockDim sizes) and dtypes.
 - Kernels validate inputs (shape/dtype/device match) and return `Status` on violation.
 
-### M2-T09 · GPU test infrastructure
+### M2-T09 · GPU test infrastructure — ✅ DONE (2026-08-04)
 Shared `CudaTestFixture` (skips without GPU, sets device, provides stream +
 allocator), `expect_tensors_close(gpu_tensor, cpu_reference)` helper that handles the
 D2H copy, and documentation of the kernel-testing pattern in `tests/README.md`. Add an

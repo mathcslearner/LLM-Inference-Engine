@@ -118,10 +118,12 @@ TEST(CudaReturnIfErrorTest, BadRuntimeCallSurfacesStatus) {
   EXPECT_TRUE(Contains(status.message(), "cudaError")) << status;
 }
 
-TEST(CudaReturnIfErrorTest, BadRuntimeCallErrorCodeWithDevice) {
-  // Driverless machines report cudaErrorNoDevice/InsufficientDriver instead
-  // of cudaErrorInvalidDevice; only assert the specific error with a GPU.
-  ENGINE_SKIP_WITHOUT_CUDA();
+// On CudaTestFixture (M2-T09): driverless machines report
+// cudaErrorNoDevice/InsufficientDriver instead of cudaErrorInvalidDevice,
+// so the specific error is only asserted with a GPU.
+class CudaReturnIfErrorGpuTest : public engine::testing::CudaTestFixture {};
+
+TEST_F(CudaReturnIfErrorGpuTest, BadRuntimeCallErrorCodeWithDevice) {
   const Status status = SetAbsurdDevice();
   ASSERT_FALSE(status.ok());
   EXPECT_EQ(status.code(), StatusCode::kInvalidArgument) << status;
@@ -152,8 +154,10 @@ TEST(CudaCheckDeathTest, FailureAborts) {
 
 // --- ScopedSetDevice: restore semantics (needs cudaGetDevice) ---
 
-TEST(ScopedSetDeviceTest, RestoresPreviousDevice) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+class ScopedSetDeviceRestoreGpuTest : public engine::testing::CudaTestFixture {
+};
+
+TEST_F(ScopedSetDeviceRestoreGpuTest, RestoresPreviousDevice) {
   const int last = engine::cuda::device_count() - 1;
   CUDA_CHECK(cudaSetDevice(0));
   {

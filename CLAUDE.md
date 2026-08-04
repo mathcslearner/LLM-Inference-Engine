@@ -539,4 +539,38 @@ builds, GPU-less: alias binding per dtype, Unimplemented default naming
 the op, body-Status propagation). CPU-only path validated (351 tests
 green, GPU tests skip); CUDA-side sources await a toolkit machine, like
 M2-T02…T07).
-Next up: **M2-T09** (GPU test infrastructure).
+M2-T09 done (GPU test infrastructure per design §10: `tests/common/cuda.h`
+gains `CudaTestFixture` — SetUp skips without a device (never fails),
+selects device 0 via `ScopedSetDevice`, provides a per-test `CudaStream`
+(`stream()`/`stream_handle()`) and per-test `CachingAllocator` over
+`DefaultCudaAllocator(0)` (`allocator()`); members are `std::optional`s
+engaged only past the skip guard so the TU compiles and skips cleanly on
+every configuration; TearDown syncs the stream then destroys the pool
+(§6.4/§7.4 order) — and free `ExpectTensorsClose(actual, expected,
+CudaStream&, rtol, atol)` — stream sync → D2H → `ops::allclose` with the
+per-dtype defaults, failures carry `Summary()`; takes `CudaStream&` not
+`StreamHandle` so tests/common stays toolkit-free (null-handle tests pass
+`DefaultStream(0)`); `engine_test_common` now links cuda/memory/tensor
+PUBLIC. **`gpu` ctest label** via a naming contract — suites deriving the
+fixture are `*GpuTest`/`*GpuDeathTest` — and dual `gtest_discover_tests`
+calls per target with complementary `TEST_FILTER`s; the GPU set gets the
+single label `<tree>-gpu` (not a `<tree>;gpu` list — the module flattens
+list-valued PROPERTIES at the CMake 3.26 floor; `-L` is a regex so
+`-L gpu` and `-L unit` both match; zero-match filters register nothing,
+without error). All 57 inline GPU tests across 12 TUs migrated onto
+fixture-derived suites (elementwise's `RunAndCompare` became a fixture
+member over `stream()`/`allocator()`/`ExpectTensorsClose`; stream/event/
+allocator suites derive the fixture for skip+device only, their subjects
+stay locally built; `PinnedCpuAllocatorTest.CreateWithoutDeviceIsUnavailable`
+deliberately stays unlabeled — it runs GPU-less). New
+`cuda_fixture_test.cpp` self-tests (fixture members, round-trip accept,
+`EXPECT_NONFATAL_FAILURE` mismatch report, pool-served tensors);
+`tests/README.md` gains the GPU section (naming contract, 5-step
+CPU-reference kernel-test recipe, tolerance stance, what-runs-where);
+dormant `.github/workflows/gpu-ci.yml` (workflow_dispatch-only,
+self-hosted `gpu` runner label, CUDA auto-detect Release build + full
+ctest + `-L gpu -N` listing, activation steps in-file); design §10 gained
+the M2-T09 refinement note. CPU-only path validated (fixture suites skip;
+labels verified via `ctest -N`); CUDA-side execution awaits a toolkit
+machine, like M2-T02…T08. **Milestone 2 complete.**
+Next up: **M3-T01** (design doc: model loading & tokenization).

@@ -23,16 +23,15 @@
 // CPU-only CI (CPU tensors → InvalidArgument on every build; the design
 // §2.2 Unimplemented taxonomy is unreachable through supported factories).
 // The GPU acceptance tests — each kernel vs the CPU reference via
-// ops::allclose across shapes and dtypes — skip (never fail) without a
-// device. Written inline per the M2-T03…T08 pattern; M2-T09 migrates them
-// onto CudaTestFixture.
+// ExpectTensorsClose across shapes and dtypes — run on CudaTestFixture
+// (M2-T09) and skip (never fail) without a device.
 
 namespace {
 
 using engine::core::IsInvalidArgument;
 using engine::core::IsUnimplemented;
 using engine::core::Status;
-using engine::cuda::CudaStream;
+using engine::cuda::DefaultStream;
 using engine::cuda::StreamHandle;
 using engine::kernels::kDefaultBlockSize;
 using engine::kernels::kMaxGridBlocks;
@@ -43,6 +42,7 @@ using engine::tensor::Device;
 using engine::tensor::float16;
 using engine::tensor::Shape;
 using engine::tensor::Tensor;
+using engine::testing::ExpectTensorsClose;
 namespace ops = engine::tensor::ops;
 
 // --- LaunchConfig1D (host arithmetic; every configuration) ---
@@ -124,26 +124,27 @@ constexpr DataType kKernelDtypes[] = {DataType::kFloat32, DataType::kFloat16,
 constexpr std::int64_t kSizeSweep[] = {
     1, 255, 256, 257, (std::int64_t{kMaxGridBlocks} * kDefaultBlockSize) + 7};
 
-// Uploads inputs, runs `launch` on a dedicated stream, synchronizes
-// (surfacing deferred execution errors, §4.3), downloads, and compares
-// against `expected` with the M1-T08 per-dtype allclose defaults (fp32
-// {1e-5, 1e-8}, fp16 {1e-3, 1e-5}, bf16 {1.6e-2, 1e-5}) — comfortably
-// loose: kernel and reference share the widen-to-float arithmetic, so the
-// results should in fact be bit-identical.
-template <typename LaunchFn>
-void RunAndCompare(const Tensor& dst_cpu_template, const Tensor& expected,
-                   LaunchFn&& launch) {
-  const Tensor dst = Tensor::empty(dst_cpu_template.shape(),
-                                   dst_cpu_template.dtype(), Device::Cuda(0))
-                         .value();
-  CudaStream stream = CudaStream::Create().value();
-  const Status status = launch(dst, stream.handle());
-  ASSERT_TRUE(status.ok()) << status.ToString();
-  ASSERT_TRUE(stream.Synchronize().ok());
-  const Tensor result = dst.to(Device::Cpu()).value();
-  const auto close = ops::allclose(result, expected).value();
-  EXPECT_TRUE(close.allclose) << close.Summary();
-}
+// GPU acceptance tests run on CudaTestFixture (M2-T09): the fixture skips
+// without a device, selects device 0, and provides the per-test stream and
+// caching allocator every device tensor here comes from.
+class ElementwiseGpuTest : public engine::testing::CudaTestFixture {
+ protected:
+  // Runs `launch` into a fresh device tensor on the fixture stream and
+  // compares against `expected` via ExpectTensorsClose with the per-dtype
+  // allclose defaults (fp32 {1e-5, 1e-8}, fp16 {1e-3, 1e-5}, bf16
+  // {1.6e-2, 1e-5}) — comfortably loose: kernel and reference share the
+  // widen-to-float arithmetic, so the results should in fact be
+  // bit-identical.
+  template <typename LaunchFn>
+  void RunAndCompare(const Tensor& expected, LaunchFn&& launch) {
+    const Tensor dst = Tensor::empty(expected.shape(), expected.dtype(),
+                                     Device::Cuda(0), allocator())
+                           .value();
+    const Status status = launch(dst, stream_handle());
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    ExpectTensorsClose(dst, expected, stream());
+  }
+};
 
 // --- Validation (every configuration; the M2-T08 acceptance criterion) ---
 //
@@ -279,8 +280,7 @@ TEST(ElementwiseDeathTest, UndefinedHandleChecks) {
 
 // --- GPU acceptance (skip without a device; the §10.2 pattern) ---
 
-TEST(ElementwiseGpuTest, AddMatchesCpuReferenceAcrossShapesAndDtypes) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(ElementwiseGpuTest, AddMatchesCpuReferenceAcrossShapesAndDtypes) {
   for (const DataType dtype : kKernelDtypes) {
     for (const std::int64_t n : kSizeSweep) {
       SCOPED_TRACE(testing::Message()
@@ -293,15 +293,14 @@ TEST(ElementwiseGpuTest, AddMatchesCpuReferenceAcrossShapesAndDtypes) {
           dtype, a, b, [](float x, float y) { return x + y; });
       const Tensor a_gpu = a.to(Device::Cuda(0)).value();
       const Tensor b_gpu = b.to(Device::Cuda(0)).value();
-      RunAndCompare(a, expected, [&](const Tensor& dst, StreamHandle stream) {
+      RunAndCompare(expected, [&](const Tensor& dst, StreamHandle stream) {
         return engine::kernels::add(dst, a_gpu, b_gpu, stream);
       });
     }
   }
 }
 
-TEST(ElementwiseGpuTest, MulMatchesCpuReferenceAcrossShapesAndDtypes) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(ElementwiseGpuTest, MulMatchesCpuReferenceAcrossShapesAndDtypes) {
   for (const DataType dtype : kKernelDtypes) {
     for (const std::int64_t n : kSizeSweep) {
       SCOPED_TRACE(testing::Message()
@@ -314,15 +313,14 @@ TEST(ElementwiseGpuTest, MulMatchesCpuReferenceAcrossShapesAndDtypes) {
           dtype, a, b, [](float x, float y) { return x * y; });
       const Tensor a_gpu = a.to(Device::Cuda(0)).value();
       const Tensor b_gpu = b.to(Device::Cuda(0)).value();
-      RunAndCompare(a, expected, [&](const Tensor& dst, StreamHandle stream) {
+      RunAndCompare(expected, [&](const Tensor& dst, StreamHandle stream) {
         return engine::kernels::mul(dst, a_gpu, b_gpu, stream);
       });
     }
   }
 }
 
-TEST(ElementwiseGpuTest, ScaleMatchesCpuReferenceAcrossShapesAndDtypes) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(ElementwiseGpuTest, ScaleMatchesCpuReferenceAcrossShapesAndDtypes) {
   constexpr double kScalar = -2.5;
   for (const DataType dtype : kKernelDtypes) {
     for (const std::int64_t n : kSizeSweep) {
@@ -335,15 +333,14 @@ TEST(ElementwiseGpuTest, ScaleMatchesCpuReferenceAcrossShapesAndDtypes) {
           dtype, src, src,
           [](float x, float) { return x * static_cast<float>(kScalar); });
       const Tensor src_gpu = src.to(Device::Cuda(0)).value();
-      RunAndCompare(src, expected, [&](const Tensor& dst, StreamHandle stream) {
+      RunAndCompare(expected, [&](const Tensor& dst, StreamHandle stream) {
         return engine::kernels::scale(dst, src_gpu, kScalar, stream);
       });
     }
   }
 }
 
-TEST(ElementwiseGpuTest, CastMatchesCpuCastForAllFloatingPairs) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(ElementwiseGpuTest, CastMatchesCpuCastForAllFloatingPairs) {
   const Shape shape({4099});  // non-multiple of the block size
   for (const DataType src_dtype : kKernelDtypes) {
     for (const DataType dst_dtype : kKernelDtypes) {
@@ -353,25 +350,21 @@ TEST(ElementwiseGpuTest, CastMatchesCpuCastForAllFloatingPairs) {
       const Tensor expected = ops::cast(src, dst_dtype).value();
       const Tensor src_gpu = src.to(Device::Cuda(0)).value();
       const Tensor dst =
-          Tensor::empty(shape, dst_dtype, Device::Cuda(0)).value();
-      CudaStream stream = CudaStream::Create().value();
+          Tensor::empty(shape, dst_dtype, Device::Cuda(0), allocator()).value();
       const Status status =
-          engine::kernels::cast(dst, src_gpu, stream.handle());
+          engine::kernels::cast(dst, src_gpu, stream_handle());
       ASSERT_TRUE(status.ok()) << status.ToString();
-      ASSERT_TRUE(stream.Synchronize().ok());
-      const Tensor result = dst.to(Device::Cpu()).value();
-      // Exact: kernel and ops::cast both widen to float and narrow
-      // round-to-nearest-even (§9.3 / half.h), so every pair — including
-      // the same-dtype deep copy — must agree bit-for-bit on these
-      // fill_uniform values (finite, no signaling-NaN quieting involved).
-      const auto close = ops::allclose(result, expected, 0.0, 0.0).value();
-      EXPECT_TRUE(close.allclose) << close.Summary();
+      // Exact tolerances: kernel and ops::cast both widen to float and
+      // narrow round-to-nearest-even (§9.3 / half.h), so every pair —
+      // including the same-dtype deep copy — must agree bit-for-bit on
+      // these fill_uniform values (finite, no signaling-NaN quieting
+      // involved).
+      ExpectTensorsClose(dst, expected, stream(), 0.0, 0.0);
     }
   }
 }
 
-TEST(ElementwiseGpuTest, NullStreamHandleUsesDefaultStream) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(ElementwiseGpuTest, NullStreamHandleUsesDefaultStream) {
   const Tensor a = MakeCpu(Shape({1000}), DataType::kFloat32, 700);
   const Tensor b = MakeCpu(Shape({1000}), DataType::kFloat32, 701);
   const Tensor expected = ReferenceForDtype(
@@ -379,49 +372,40 @@ TEST(ElementwiseGpuTest, NullStreamHandleUsesDefaultStream) {
   const Tensor a_gpu = a.to(Device::Cuda(0)).value();
   const Tensor b_gpu = b.to(Device::Cuda(0)).value();
   const Tensor dst =
-      Tensor::empty(a.shape(), a.dtype(), Device::Cuda(0)).value();
-  // Enqueue on the engine default stream (null handle, §6.3); the
-  // stream-less download below enqueues on the same stream and
-  // synchronizes, so FIFO order makes the result visible (§8.3).
+      Tensor::empty(a.shape(), a.dtype(), Device::Cuda(0), allocator()).value();
+  // Enqueue on the engine default stream (null handle, §6.3); comparing via
+  // that same stream synchronizes it before the download (§8.3).
   const Status status = engine::kernels::add(dst, a_gpu, b_gpu, StreamHandle());
   ASSERT_TRUE(status.ok()) << status.ToString();
-  const Tensor result = dst.to(Device::Cpu()).value();
-  const auto close = ops::allclose(result, expected).value();
-  EXPECT_TRUE(close.allclose) << close.Summary();
+  ExpectTensorsClose(dst, expected, DefaultStream(0));
 }
 
-TEST(ElementwiseGpuTest, DstMayAliasInput) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(ElementwiseGpuTest, DstMayAliasInput) {
   const Tensor a = MakeCpu(Shape({512}), DataType::kFloat32, 800);
   const Tensor b = MakeCpu(Shape({512}), DataType::kFloat32, 801);
   const Tensor expected = ReferenceForDtype(
       DataType::kFloat32, a, b, [](float x, float y) { return x + y; });
   const Tensor a_gpu = a.to(Device::Cuda(0)).value();
   const Tensor b_gpu = b.to(Device::Cuda(0)).value();
-  CudaStream stream = CudaStream::Create().value();
   // In-place: dst IS a_gpu (identical handle → identical data pointer),
   // well-defined for the same-dtype kernels (elementwise.h aliasing rule).
   const Status status =
-      engine::kernels::add(a_gpu, a_gpu, b_gpu, stream.handle());
+      engine::kernels::add(a_gpu, a_gpu, b_gpu, stream_handle());
   ASSERT_TRUE(status.ok()) << status.ToString();
-  ASSERT_TRUE(stream.Synchronize().ok());
-  const Tensor result = a_gpu.to(Device::Cpu()).value();
-  const auto close = ops::allclose(result, expected).value();
-  EXPECT_TRUE(close.allclose) << close.Summary();
+  ExpectTensorsClose(a_gpu, expected, stream());
 }
 
-TEST(ElementwiseGpuTest, MixedDevicePlacementIsInvalid) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(ElementwiseGpuTest, MixedDevicePlacementIsInvalid) {
   const Tensor cpu = MakeCpu(Shape({4}), DataType::kFloat32, 900);
   const Tensor gpu = cpu.to(Device::Cuda(0)).value();
-  const Tensor dst =
-      Tensor::empty(Shape({4}), DataType::kFloat32, Device::Cuda(0)).value();
+  const Tensor dst = Tensor::empty(Shape({4}), DataType::kFloat32,
+                                   Device::Cuda(0), allocator())
+                         .value();
   const Status status = engine::kernels::add(dst, cpu, gpu, StreamHandle());
   EXPECT_TRUE(IsInvalidArgument(status)) << status.ToString();
 }
 
-TEST(ElementwiseGpuTest, ZeroNumelReturnsOkWithoutLaunching) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(ElementwiseGpuTest, ZeroNumelReturnsOkWithoutLaunching) {
   const Shape shape({0});
   const Tensor dst =
       Tensor::empty(shape, DataType::kFloat32, Device::Cuda(0)).value();

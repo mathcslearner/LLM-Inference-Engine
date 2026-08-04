@@ -166,9 +166,11 @@ TEST(TensorTest, EmptyCudaIsUnimplementedOnCpuOnlyBuilds) {
 }
 #else
 // CUDA builds with a GPU: a real device tensor, tagged with the requested
-// device (the M2-T05 acceptance criterion).
-TEST(TensorTest, EmptyCudaAllocatesDeviceTensor) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+// device (the M2-T05 acceptance criterion). On CudaTestFixture (M2-T09) for
+// the skip guard; empty() routes through DefaultCudaAllocator itself.
+class TensorGpuTest : public engine::testing::CudaTestFixture {};
+
+TEST_F(TensorGpuTest, EmptyCudaAllocatesDeviceTensor) {
   const Tensor t =
       Unwrap(Tensor::empty(Shape{2, 3}, DataType::kFloat32, Device::Cuda(0)));
   EXPECT_TRUE(t.device() == Device::Cuda(0));

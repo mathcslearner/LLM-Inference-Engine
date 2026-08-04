@@ -40,6 +40,13 @@ engine_add_tests(TREE unit SOURCES
   stream_test.cpp
   DEPS engine::cuda)
 
+# M2-T09: self-tests for the shared GPU test infrastructure (CudaTestFixture
+# + ExpectTensorsClose in tests/common/cuda.h). Compiles on every
+# configuration; every test skips without a device.
+engine_add_tests(TREE unit SOURCES
+  cuda_fixture_test.cpp
+  DEPS engine::tensor engine::cuda)
+
 # Only buildable on CUDA builds: cuda_check_test.cpp includes
 # cuda/cuda_check.h and therefore the CUDA toolkit (most of it runs without
 # a GPU — ToStatus and the macros are pure host code); stream_cuda_test.cu

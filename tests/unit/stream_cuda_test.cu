@@ -75,9 +75,13 @@ class DeviceInt {
   return *std::move(created);
 }
 
+// GPU tests on CudaTestFixture (M2-T09): the fixture supplies the skip
+// guard and device selection; streams/events under test are built locally.
+class CudaEventTimingGpuTest : public engine::testing::CudaTestFixture {};
+class CudaStreamOrderingGpuTest : public engine::testing::CudaTestFixture {};
+
 // Elapsed time of a known-duration workload is strictly positive.
-TEST(CudaEventCudaTest, ElapsedMsOfDelayKernelIsPositive) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaEventTimingGpuTest, ElapsedMsOfDelayKernelIsPositive) {
   CudaStream stream = MakeStream();
   CudaEvent start = MakeEvent(CudaEvent::Timing());
   CudaEvent stop = MakeEvent(CudaEvent::Timing());
@@ -96,8 +100,7 @@ TEST(CudaEventCudaTest, ElapsedMsOfDelayKernelIsPositive) {
 
 // ElapsedMs on a still-running record is FailedPrecondition, not an opaque
 // mapped cudaErrorNotReady.
-TEST(CudaEventCudaTest, ElapsedMsBeforeCompletionIsFailedPrecondition) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaEventTimingGpuTest, ElapsedMsBeforeCompletionIsFailedPrecondition) {
   CudaStream stream = MakeStream();
   CudaEvent start = MakeEvent(CudaEvent::Timing());
   CudaEvent stop = MakeEvent(CudaEvent::Timing());
@@ -118,8 +121,7 @@ TEST(CudaEventCudaTest, ElapsedMsBeforeCompletionIsFailedPrecondition) {
 // Cross-stream ordering (the acceptance criterion): stream B's work must
 // not start until the event recorded after stream A's delay kernel has
 // completed, so B's readback observes the kernel's write.
-TEST(CudaStreamCudaTest, WaitEventOrdersAcrossStreams) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaStreamOrderingGpuTest, WaitEventOrdersAcrossStreams) {
   CudaStream stream_a = MakeStream();
   CudaStream stream_b = MakeStream();
   CudaEvent done = MakeEvent(CudaEvent::Sync());
@@ -140,8 +142,7 @@ TEST(CudaStreamCudaTest, WaitEventOrdersAcrossStreams) {
 // Destruction-order safety (the acceptance criterion): the destructor
 // drains, so a stream destroyed with a kernel in flight finishes that
 // kernel first — its write is visible immediately afterwards.
-TEST(CudaStreamCudaTest, DestructorDrainsInFlightWork) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaStreamOrderingGpuTest, DestructorDrainsInFlightWork) {
   const DeviceInt flag;
   {
     CudaStream stream = MakeStream();

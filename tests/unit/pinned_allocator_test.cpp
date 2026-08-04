@@ -69,8 +69,13 @@ TEST(PinnedCpuAllocatorTest, CreateWithoutDeviceIsUnavailable) {
       << allocator.status().ToString();
 }
 
-TEST(PinnedCpuAllocatorTest, AllocateReturnsAlignedHostWritableBuffer) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+// GPU tests on CudaTestFixture (M2-T09): the fixture supplies the skip
+// guard and device selection; the pinned allocator under test is built
+// locally, and the fixture's own pool is deliberately unused.
+class PinnedAllocatorGpuTest : public engine::testing::CudaTestFixture {};
+class PinnedAllocatorGpuDeathTest : public engine::testing::CudaTestFixture {};
+
+TEST_F(PinnedAllocatorGpuTest, AllocateReturnsAlignedHostWritableBuffer) {
   PinnedCpuAllocator allocator = PinnedCpuAllocator::Create().value();
   EXPECT_TRUE(allocator.device() == Device::Cpu());
   const Buffer buffer = allocator.Allocate(1024, 256).value();
@@ -89,8 +94,7 @@ TEST(PinnedCpuAllocatorTest, AllocateReturnsAlignedHostWritableBuffer) {
   }
 }
 
-TEST(PinnedCpuAllocatorTest, ZeroByteAllocationIsEngagedAndNull) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(PinnedAllocatorGpuTest, ZeroByteAllocationIsEngagedAndNull) {
   PinnedCpuAllocator allocator = PinnedCpuAllocator::Create().value();
   const Buffer buffer = allocator.Allocate(0, 64).value();
   EXPECT_EQ(buffer.data(), nullptr);
@@ -99,8 +103,7 @@ TEST(PinnedCpuAllocatorTest, ZeroByteAllocationIsEngagedAndNull) {
   // Destruction runs the deleter on a null pointer — must be a benign no-op.
 }
 
-TEST(PinnedCpuAllocatorTest, HugeAllocationIsResourceExhausted) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(PinnedAllocatorGpuTest, HugeAllocationIsResourceExhausted) {
   PinnedCpuAllocator allocator = PinnedCpuAllocator::Create().value();
   const StatusOr<Buffer> huge = allocator.Allocate(std::size_t{1} << 62U, 256);
   ASSERT_FALSE(huge.ok());
@@ -111,8 +114,7 @@ TEST(PinnedCpuAllocatorTest, HugeAllocationIsResourceExhausted) {
 
 // Deleters capture nothing (cudaFreeHost needs no device context), so a
 // Buffer may outlive the allocator that produced it — the M1 contract.
-TEST(PinnedCpuAllocatorTest, BufferOutlivesAllocator) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(PinnedAllocatorGpuTest, BufferOutlivesAllocator) {
   Buffer buffer;
   {
     PinnedCpuAllocator allocator = PinnedCpuAllocator::Create().value();
@@ -124,8 +126,7 @@ TEST(PinnedCpuAllocatorTest, BufferOutlivesAllocator) {
 
 // The §7.2 claim: tensors over pinned memory are ordinary CPU tensors —
 // the same factories, fills, and accessors apply.
-TEST(PinnedCpuAllocatorTest, PinnedTensorIsOrdinaryCpuTensor) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(PinnedAllocatorGpuTest, PinnedTensorIsOrdinaryCpuTensor) {
   PinnedCpuAllocator allocator = PinnedCpuAllocator::Create().value();
   const Tensor tensor = Tensor::empty(Shape({2, 3}), DataType::kFloat32,
                                       Device::Cpu(), &allocator)
@@ -137,8 +138,7 @@ TEST(PinnedCpuAllocatorTest, PinnedTensorIsOrdinaryCpuTensor) {
   EXPECT_LT(value, 1.0F);
 }
 
-TEST(PinnedCpuAllocatorDeathTest, AlignmentMisuseAborts) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(PinnedAllocatorGpuDeathTest, AlignmentMisuseAborts) {
   PinnedCpuAllocator allocator = PinnedCpuAllocator::Create().value();
   EXPECT_DEATH((void)allocator.Allocate(16, 3), "power of two");
   EXPECT_DEATH((void)allocator.Allocate(16, 512), "exceeds");

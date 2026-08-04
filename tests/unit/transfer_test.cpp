@@ -177,12 +177,15 @@ TEST(TransferTest, ToCudaOutOfRangeIndexIsInvalidArgument) {
 
 #endif  // ENGINE_ENABLE_CUDA
 
-// --- GPU tests: skip (never fail) without a device ---
+// --- GPU tests: on CudaTestFixture (M2-T09), skip without a device ---
+
+// Tests whose subject is a specific stream/event pattern build their own
+// objects; the rest use the fixture stream.
+class TransferGpuTest : public engine::testing::CudaTestFixture {};
 
 // The M2-T07 acceptance criterion: H2D→D2H round-trips preserve bytes for
 // every (non-reserved) dtype. Odd extents exercise non-power-of-two sizes.
-TEST(TransferTest, RoundTripPreservesBytesForEveryDtype) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(TransferGpuTest, RoundTripPreservesBytesForEveryDtype) {
   std::uint8_t salt = 1;
   for (const DataType dtype : engine::tensor::kAllDataTypes) {
     if (dtype == DataType::kInt4 || dtype == DataType::kFP8E4M3) {
@@ -200,8 +203,7 @@ TEST(TransferTest, RoundTripPreservesBytesForEveryDtype) {
   }
 }
 
-TEST(TransferTest, DeviceToDeviceCopy) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(TransferGpuTest, DeviceToDeviceCopy) {
   const Tensor src = MakePatternTensor(Shape({4, 8}), DataType::kFloat32, 0x5A);
   const Tensor gpu_a = src.to(Device::Cuda(0)).value();
   const Tensor gpu_b =
@@ -211,8 +213,7 @@ TEST(TransferTest, DeviceToDeviceCopy) {
   EXPECT_TRUE(SameBytes(src, back));
 }
 
-TEST(TransferTest, ToSameCudaDeviceReturnsSameHandle) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(TransferGpuTest, ToSameCudaDeviceReturnsSameHandle) {
   const Tensor src = MakePatternTensor(Shape({2, 2}), DataType::kFloat32, 0x6B);
   const Tensor gpu = src.to(Device::Cuda(0)).value();
   const Tensor same = gpu.to(Device::Cuda(0)).value();
@@ -220,21 +221,20 @@ TEST(TransferTest, ToSameCudaDeviceReturnsSameHandle) {
 }
 
 // The M2-T07 acceptance criterion: async copies on an explicit stream with
-// cross-stream event ordering (the design §6.4 pattern) — H2D on stream A,
-// D2H on stream B gated by an event recorded after the upload.
-TEST(TransferTest, AsyncCopyOnStreamWithEventOrdering) {
-  ENGINE_SKIP_WITHOUT_CUDA();
-  const engine::cuda::CudaStream stream_a =
-      engine::cuda::CudaStream::Create().value();
+// cross-stream event ordering (the design §6.4 pattern) — H2D on the
+// fixture stream, D2H on a second stream gated by an event recorded after
+// the upload.
+TEST_F(TransferGpuTest, AsyncCopyOnStreamWithEventOrdering) {
   engine::cuda::CudaStream stream_b =
       engine::cuda::CudaStream::Create().value();
   const Tensor src =
       MakePatternTensor(Shape({64, 64}), DataType::kFloat32, 0x7C);
   const Tensor gpu =
-      Tensor::empty(src.shape(), src.dtype(), Device::Cuda(0)).value();
-  ASSERT_TRUE(ops::copy(gpu, src, stream_a.handle()).ok());
+      Tensor::empty(src.shape(), src.dtype(), Device::Cuda(0), allocator())
+          .value();
+  ASSERT_TRUE(ops::copy(gpu, src, stream_handle()).ok());
   engine::cuda::CudaEvent uploaded = engine::cuda::CudaEvent::Sync().value();
-  ASSERT_TRUE(uploaded.Record(stream_a).ok());
+  ASSERT_TRUE(uploaded.Record(stream()).ok());
   ASSERT_TRUE(stream_b.WaitEvent(uploaded).ok());
   const Tensor out =
       Tensor::empty(src.shape(), src.dtype(), Device::Cpu()).value();
@@ -245,8 +245,7 @@ TEST(TransferTest, AsyncCopyOnStreamWithEventOrdering) {
 
 // The M2-T07 acceptance criterion: pinned round-trip. Both host tensors live
 // in page-locked memory, and same-stream FIFO orders the D2H after the H2D.
-TEST(TransferTest, PinnedRoundTripOnStream) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(TransferGpuTest, PinnedRoundTripOnStream) {
   PinnedCpuAllocator pinned = PinnedCpuAllocator::Create().value();
   const Shape shape({16, 32});
   const Tensor src =
@@ -255,31 +254,27 @@ TEST(TransferTest, PinnedRoundTripOnStream) {
   const Tensor dst =
       Tensor::empty(shape, DataType::kFloat32, Device::Cpu(), &pinned).value();
   const Tensor gpu =
-      Tensor::empty(shape, DataType::kFloat32, Device::Cuda(0)).value();
-  engine::cuda::CudaStream stream = engine::cuda::CudaStream::Create().value();
-  ASSERT_TRUE(ops::copy(gpu, src, stream.handle()).ok());
-  ASSERT_TRUE(ops::copy(dst, gpu, stream.handle()).ok());
-  ASSERT_TRUE(stream.Synchronize().ok());
+      Tensor::empty(shape, DataType::kFloat32, Device::Cuda(0), allocator())
+          .value();
+  ASSERT_TRUE(ops::copy(gpu, src, stream_handle()).ok());
+  ASSERT_TRUE(ops::copy(dst, gpu, stream_handle()).ok());
+  ASSERT_TRUE(stream().Synchronize().ok());
   EXPECT_TRUE(SameBytes(src, dst));
 }
 
 // to(device, stream) enqueues and returns; the result is consumable after a
 // sync point (here an event synchronize — the §6.4 host-consumption rule).
-TEST(TransferTest, ToWithStreamThenEventSync) {
-  ENGINE_SKIP_WITHOUT_CUDA();
-  const engine::cuda::CudaStream stream =
-      engine::cuda::CudaStream::Create().value();
+TEST_F(TransferGpuTest, ToWithStreamThenEventSync) {
   const Tensor src = MakePatternTensor(Shape({8, 8}), DataType::kInt32, 0x1F);
-  const Tensor gpu = src.to(Device::Cuda(0), stream.handle()).value();
+  const Tensor gpu = src.to(Device::Cuda(0), stream_handle()).value();
   engine::cuda::CudaEvent done = engine::cuda::CudaEvent::Sync().value();
-  ASSERT_TRUE(done.Record(stream).ok());
+  ASSERT_TRUE(done.Record(stream()).ok());
   ASSERT_TRUE(done.Synchronize().ok());
   const Tensor back = gpu.to(Device::Cpu()).value();
   EXPECT_TRUE(SameBytes(src, back));
 }
 
-TEST(TransferTest, ZeroNumelTransferRoundTrip) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(TransferGpuTest, ZeroNumelTransferRoundTrip) {
   const Tensor src =
       Tensor::empty(Shape({0, 3}), DataType::kFloat32, Device::Cpu()).value();
   const Tensor gpu = src.to(Device::Cuda(0)).value();
@@ -289,7 +284,7 @@ TEST(TransferTest, ZeroNumelTransferRoundTrip) {
   EXPECT_EQ(back.numel(), 0);
 }
 
-TEST(TransferTest, CrossDeviceCopyIsUnimplemented) {
+TEST_F(TransferGpuTest, CrossDeviceCopyIsUnimplemented) {
   if (engine::cuda::device_count() < 2) {
     GTEST_SKIP() << "needs two CUDA devices";
   }

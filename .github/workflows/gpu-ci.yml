@@ -1,0 +1,51 @@
+# GPU continuous integration (M2-T09) — DORMANT by design.
+#
+# This workflow only runs when triggered manually (workflow_dispatch); it is
+# not part of the required `ci` gate (.github/workflows/ci.yml) and never
+# fires on push/PR. It targets a self-hosted runner with an NVIDIA GPU and
+# the CUDA 12.x toolkit installed, which this repository does not currently
+# have — triggering it without one queues the job until it times out.
+#
+# To activate:
+#   1. Register a self-hosted runner (Settings → Actions → Runners) on a
+#      Linux x86-64 machine with an NVIDIA driver and CUDA 12.x toolkit,
+#      and give it the `gpu` label.
+#   2. Trigger the workflow from the Actions tab (or `gh workflow run
+#      gpu-ci`).
+#
+# The build configures with CUDA auto-detection (cmake/cuda.cmake): on a
+# machine with the toolkit, ENGINE_ENABLE_CUDA resolves to ON and the real
+# CUDA sources compile; ctest then runs the full suite — the GPU tests
+# execute instead of skipping. `ctest -L gpu` afterwards lists the GPU
+# subset explicitly so the run's log shows what actually exercised the
+# device.
+
+name: gpu-ci
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-gpu:
+    name: gpu · Release
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: GPU sanity
+        run: |
+          nvidia-smi
+          nvcc --version
+      - name: Configure (CUDA auto-detect)
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Verify CUDA is enabled
+        run: grep -q "ENGINE_ENABLE_CUDA:BOOL=ON" build/CMakeCache.txt
+      - name: Build
+        run: cmake --build build -j
+      - name: Test (full suite)
+        run: ctest --test-dir build -j 4 --output-on-failure
+      - name: List the GPU subset
+        run: ctest --test-dir build -L gpu -N

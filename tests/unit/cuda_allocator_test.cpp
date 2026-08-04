@@ -81,8 +81,13 @@ TEST(CudaAllocatorTest, DefaultCudaAllocatorRejectsOutOfRangeIndex) {
       << allocator.status().ToString();
 }
 
-TEST(CudaAllocatorTest, AllocateReturnsEngagedDeviceTaggedBuffer) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+// GPU tests on CudaTestFixture (M2-T09): the fixture supplies the skip
+// guard and device selection; the allocators under test are built locally,
+// and the fixture's own pool is deliberately unused.
+class CudaAllocatorGpuTest : public engine::testing::CudaTestFixture {};
+class CudaAllocatorGpuDeathTest : public engine::testing::CudaTestFixture {};
+
+TEST_F(CudaAllocatorGpuTest, AllocateReturnsEngagedDeviceTaggedBuffer) {
   CudaAllocator allocator = CudaAllocator::Create(0).value();
   EXPECT_TRUE(allocator.device() == Device::Cuda(0));
   const Buffer buffer = allocator.Allocate(1024, 256).value();
@@ -92,8 +97,7 @@ TEST(CudaAllocatorTest, AllocateReturnsEngagedDeviceTaggedBuffer) {
   EXPECT_TRUE(IsAligned(buffer.data(), CudaAllocator::kGuaranteedAlignment));
 }
 
-TEST(CudaAllocatorTest, ZeroByteAllocationIsEngagedAndNull) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaAllocatorGpuTest, ZeroByteAllocationIsEngagedAndNull) {
   CudaAllocator allocator = CudaAllocator::Create(0).value();
   const Buffer buffer = allocator.Allocate(0, 64).value();
   EXPECT_EQ(buffer.data(), nullptr);
@@ -104,8 +108,7 @@ TEST(CudaAllocatorTest, ZeroByteAllocationIsEngagedAndNull) {
 
 // The M2-T05 acceptance criterion: an impossible allocation is a Status, not
 // a crash — and the allocator stays usable afterward.
-TEST(CudaAllocatorTest, HugeAllocationIsResourceExhausted) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaAllocatorGpuTest, HugeAllocationIsResourceExhausted) {
   CudaAllocator allocator = CudaAllocator::Create(0).value();
   const StatusOr<Buffer> huge = allocator.Allocate(std::size_t{1} << 62U, 256);
   ASSERT_FALSE(huge.ok());
@@ -116,8 +119,7 @@ TEST(CudaAllocatorTest, HugeAllocationIsResourceExhausted) {
 
 // Deleters are self-contained (capture only the device index), so a Buffer
 // may outlive the allocator that produced it — the M1 Allocator contract.
-TEST(CudaAllocatorTest, BufferOutlivesAllocator) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaAllocatorGpuTest, BufferOutlivesAllocator) {
   Buffer buffer;
   {
     CudaAllocator allocator = CudaAllocator::Create(0).value();
@@ -128,8 +130,7 @@ TEST(CudaAllocatorTest, BufferOutlivesAllocator) {
   // `buffer` is destroyed after the allocator — the deleter must still free.
 }
 
-TEST(CudaAllocatorTest, DefaultCudaAllocatorIsPerDeviceSingleton) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaAllocatorGpuTest, DefaultCudaAllocatorIsPerDeviceSingleton) {
   Allocator* const first = DefaultCudaAllocator(0).value();
   Allocator* const second = DefaultCudaAllocator(0).value();
   EXPECT_EQ(first, second);
@@ -137,8 +138,7 @@ TEST(CudaAllocatorTest, DefaultCudaAllocatorIsPerDeviceSingleton) {
   EXPECT_TRUE(first->device() == Device::Cuda(0));
 }
 
-TEST(CudaAllocatorDeathTest, AlignmentMisuseAborts) {
-  ENGINE_SKIP_WITHOUT_CUDA();
+TEST_F(CudaAllocatorGpuDeathTest, AlignmentMisuseAborts) {
   CudaAllocator allocator = CudaAllocator::Create(0).value();
   EXPECT_DEATH((void)allocator.Allocate(16, 3), "power of two");
   EXPECT_DEATH((void)allocator.Allocate(16, 512), "exceeds");
