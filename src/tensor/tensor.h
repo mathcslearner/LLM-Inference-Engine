@@ -54,10 +54,12 @@ class Tensor {
 
   // Allocates uninitialized, contiguous, row-major storage. `allocator` may
   // be null → the process default for `device` (DefaultCpuAllocator for
-  // cpu); a non-null allocator whose device() differs from `device` is a
-  // programmer error (CHECK). Reserved dtypes (kInt4, kFP8E4M3) and CUDA
-  // devices return Unimplemented until their milestone (M12/M13, M2);
-  // allocation failure propagates as kOutOfMemory.
+  // cpu, per-device DefaultCudaAllocator for cuda); a non-null allocator
+  // whose device() differs from `device` is a programmer error (CHECK).
+  // Reserved dtypes (kInt4, kFP8E4M3) return Unimplemented until their
+  // milestone (M12/M13), as do CUDA devices on CPU-only builds; an
+  // out-of-range CUDA device index is InvalidArgument; allocation failure
+  // propagates (kOutOfMemory on cpu, kResourceExhausted on cuda).
   [[nodiscard]] static core::StatusOr<Tensor> empty(
       Shape shape, DataType dtype, Device device,
       memory::Allocator* allocator = nullptr);

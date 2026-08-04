@@ -49,7 +49,7 @@ plus the intra-layer edges listed explicitly):
 | 4 · orchestration | `runtime` | — |
 | 3 · execution | `engine`, `scheduler` | — (`engine` and `scheduler` never depend on each other; `runtime` mediates) |
 | 2 · domain | `model`, `tokenizer`, `kvcache`, `sampling`, `quant`, `spec`, `distributed` | none today; any future edge (e.g. `spec → model`) requires amending this ADR |
-| 1 · compute substrate | `memory`, `tensor`, `cuda`, `kernels`, `cpu` | `tensor → memory`; `cuda → memory`; `kernels → cuda, tensor`; `cpu → tensor`; `memory → tensor_base` (Amendment 1) |
+| 1 · compute substrate | `memory`, `tensor`, `cuda`, `kernels`, `cpu` | `tensor → memory`; `memory → cuda` (Amendment 2, was `cuda → memory`); `kernels → cuda, tensor`; `cpu → tensor`; `memory → tensor_base` (Amendment 1) |
 | 0 · foundation | `core` | — (depends on nothing but pinned third-party libs) |
 
 Cross-cutting exception: **`metrics`** may depend only on `core`, and any module
@@ -128,3 +128,28 @@ New allowed edge: **`memory → tensor_base`** (and `tensor_base` may be
 linked by any module that today may link `tensor`). `memory` still must not
 include `tensor.h`/`ops.h` — only the base value-type headers. No link or
 include cycle exists. Rationale and details: `docs/design/tensor.md` §2.1.
+
+### Amendment 2 (2026-08-04, with M2-T05): `memory → cuda`, replacing `cuda → memory`
+
+Implementing `CudaAllocator` (in `memory`, per the roadmap's file layout)
+surfaced that the intra-layer edge points the wrong way. The allocator needs
+three things from `cuda`: `device_count()` to validate device indices
+(cuda-backend design §5.2), `ScopedSetDevice` to allocate on the right
+device, and the `ToStatus` error mapping so device OOM becomes
+`kResourceExhausted` from exactly one code table (§4.2). Duplicating those
+inside `memory` — the only alternative that keeps the old edge — would fork
+the error-mapping table the design deliberately centralizes.
+
+The reverse edge was speculative: `cuda` links nothing from `memory` and
+its planned consumers of buffers (cuBLAS workspaces, M5/M11) can receive
+memory from `engine`, which links both modules. So the edge **flips**
+rather than growing a cycle:
+
+- Removed: `cuda → memory`.
+- Added: **`memory → cuda`**, PRIVATE in CMake — `memory`'s public headers
+  stay toolkit-free (cuda-backend design §2.2); only its CUDA-build `.cpp`
+  files include `cuda` headers.
+
+`cuda` keeps its `core` and `tensor_base` links (the latter reachable per
+Amendment 1). No link or include cycle exists. Rationale and details:
+`docs/design/cuda-backend.md` §2.1.

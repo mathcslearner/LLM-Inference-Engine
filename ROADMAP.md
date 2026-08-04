@@ -310,7 +310,7 @@ accessor.
 **Acceptance criteria:**
 - GPU tests: event ordering across two streams via `stream_wait_event`, elapsed time of a known-duration workload > 0, destruction order safety (event outliving stream misuse is documented).
 
-### M2-T05 · CUDA device allocator (naive)
+### M2-T05 · CUDA device allocator (naive) — ✅ DONE (2026-08-04)
 `CudaAllocator` implementing the M1-T05 `Allocator` interface over
 `cudaMalloc`/`cudaFree`, device-tagged `Buffer`s, and `Tensor::empty` support for
 `Device::kCUDA`.

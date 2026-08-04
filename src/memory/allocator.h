@@ -82,6 +82,14 @@ class Allocator {
   // The device whose memory this allocator hands out; every returned
   // Buffer's device() matches.
   [[nodiscard]] virtual tensor::Device device() const = 0;
+
+ protected:
+  // The base is stateless, so moving it is trivial; concrete allocators need
+  // it to be returned by value from StatusOr factories (CudaAllocator::Create,
+  // M2-T05). Protected so a derived object is never moved through a base
+  // reference (which would slice its state).
+  Allocator(Allocator&&) = default;
+  Allocator& operator=(Allocator&&) = default;
 };
 
 // Aligned host allocator; default alignment 64 bytes (cache line; also

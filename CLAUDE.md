@@ -402,4 +402,36 @@ yet: elapsed-of-known-duration > 0, FailedPrecondition before completion,
 cross-stream WaitEvent ordering via flag readback, destructor drains
 in-flight work). CPU-only path validated (286 tests green, GPU tests skip);
 CUDA-side sources await a toolkit machine, like M2-T02/T03).
-Next up: **M2-T05** (CUDA device allocator).
+M2-T05 done (CUDA device allocator per design §7.1:
+`src/memory/cuda_allocator.h` — toolkit-free public header; `CudaAllocator`
+final over cudaMalloc/cudaFree, private ctor + `Create(device_index) →
+StatusOr<CudaAllocator>` (out-of-range index → InvalidArgument naming index
+and count per §5.2 — which is every index on GPU-less CUDA builds; CPU-only
+builds → Unimplemented from the stub), `Allocate` CHECKs alignment
+power-of-two and ≤ `kGuaranteedAlignment` (256, cudaMalloc's guarantee),
+bytes==0 → engaged null buffer, device OOM → kResourceExhausted via
+`ToStatus` with the last-error slot cleared after a failed cudaMalloc;
+deleters self-contained (capture only the device index; raw
+cudaSetDevice/cudaFree with log-and-drop — a deleter can't return Status or
+abort, §7.1 refined) so Buffers may outlive the allocator; leaked
+mutex-guarded per-device `DefaultCudaAllocator(i)`; `Tensor::empty` now
+routes null-allocator kCUDA requests there (M1's blanket Unimplemented
+gone; ops factories on CUDA still CHECK in the fill until M2-T08 kernels).
+`Allocator` base gained protected defaulted moves (deleted copy had
+suppressed derived moves; needed for by-value Create). **ADR-002
+Amendment 2: the layer-1 edge flips to `memory → cuda`** (was the unused
+`cuda → memory`) — CudaAllocator links cuda's `device_count`/
+`ScopedSetDevice`/`ToStatus` rather than forking the §4.2 error table;
+PRIVATE link, memory's public headers stay toolkit-free; design §2.1's
+"no amendment needed" corrected. cuda_allocator.cpp vs
+cuda_allocator_stub.cpp source-list seam; tests: `cuda_allocator_test.cpp`
+(all configs: stub taxonomy; CUDA builds GPU-less: index validation;
+GPU-skipped: alloc basics + 256-alignment, zero-byte, huge-alloc →
+ResourceExhausted then still usable, buffer-outlives-allocator, default
+singleton identity, alignment death tests) + `cuda_allocator_cuda_test.cpp`
+(CUDA builds only: cudaMemGetInfo leak-delta over 64 cycles, memset/memcpy
+round-trip proves real device memory); tensor_test CUDA-empty tests forked
+per build (CPU-only → Unimplemented, CUDA → device-tagged tensor /
+InvalidArgument index). CPU-only path validated (288 tests green, GPU tests
+skip); CUDA-side sources await a toolkit machine, like M2-T02…T04).
+Next up: **M2-T06** (caching pool allocator).

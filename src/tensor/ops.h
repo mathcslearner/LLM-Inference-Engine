@@ -22,8 +22,12 @@
 //
 // Error split (per the design §7 table): dtype/shape/range problems in the
 // arguments are data-dependent → InvalidArgument; operating on an undefined
-// handle or a non-CPU tensor is a programmer error → CHECK; unsupported
-// devices and reserved dtypes surface as Unimplemented from Tensor::empty.
+// handle or a non-CPU tensor is a programmer error → CHECK; reserved dtypes
+// surface as Unimplemented from Tensor::empty. Since M2-T05, Tensor::empty
+// can allocate on CUDA devices — but these ops still CHECK is_cpu(), so a
+// factory asked for a CUDA tensor allocates and then aborts in the fill (GPU
+// fills arrive with the M2-T08 kernels; pass CUDA devices to Tensor::empty
+// directly until then).
 //
 // Determinism contract for the seeded fills (load-bearing for golden tests):
 // the engine is std::mt19937_64 (fully specified by the C++ standard), and
@@ -39,8 +43,9 @@ namespace engine::tensor::ops {
 //
 // All factories allocate a fresh contiguous row-major tensor via
 // Tensor::empty, so its policies apply unchanged: reserved dtypes (kInt4,
-// kFP8E4M3) and CUDA devices → Unimplemented, allocation failure →
-// kOutOfMemory, null allocator → the process default for `device`.
+// kFP8E4M3) → Unimplemented, allocation failure → kOutOfMemory, null
+// allocator → the process default for `device`. The subsequent fill CHECKs
+// is_cpu() (file comment above), so only CPU devices are usable here.
 
 // Tensor of `dtype` filled with zeros (false for kBool).
 [[nodiscard]] core::StatusOr<Tensor> zeros(

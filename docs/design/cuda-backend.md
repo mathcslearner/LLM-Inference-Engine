@@ -74,18 +74,30 @@ Components and files (all paths per ROADMAP tickets):
 
 ### 2.1 ADR-002 conformance
 
-Reviewed against the layer-1 edge list — **no amendment needed**:
+Reviewed against the layer-1 edge list. Originally concluded "no amendment
+needed"; **M2-T05 implementation proved that wrong** — see the second
+bullet. ADR-002 Amendment 2 records the fix.
 
-- `cuda → core` (Status, logging) and `cuda → memory` (listed): in practice
-  `cuda` also needs only the header-only `tensor_base` value types
-  (`Device`), which `memory` already re-exports transitively via its own
-  `tensor_base` link. `cuda` links `engine::core` and `engine::tensor_base`
-  directly (both reachable: `tensor_base` may be linked by anything that may
-  link `tensor`, ADR-002 Amendment 1; `cuda`'s listed `→ memory` edge
-  subsumes it anyway).
+- `cuda → core` (Status, logging): `cuda` links `engine::core` and
+  `engine::tensor_base` directly (the latter reachable: `tensor_base` may be
+  linked by anything that may link `tensor`, ADR-002 Amendment 1). The
+  originally listed `cuda → memory` edge was never used and is removed by
+  Amendment 2.
 - `memory`'s CUDA allocators: ADR-002 rule 3 already names `memory` as one
   of the four modules that may touch the CUDA toolkit behind
-  `ENGINE_ENABLE_CUDA`. `memory` still must not include `tensor.h`/`ops.h`.
+  `ENGINE_ENABLE_CUDA`. *Refined in M2-T05:* toolkit access is not enough —
+  `CudaAllocator` also links `cuda` module symbols (`device_count()` per
+  §5.2, `ScopedSetDevice`, and `ToStatus`/`CUDA_RETURN_IF_ERROR`, whose
+  definitions live in `engine_cuda`), which is a real module dependency
+  under ADR-002 rule 2, and both directions at once would be a cycle.
+  Resolution: **ADR-002 Amendment 2 flips the edge to `memory → cuda`**
+  (PRIVATE in CMake; `memory`'s public headers stay toolkit-free per §2.2).
+  The alternative — raw toolkit calls plus a local copy of the §4.2 error
+  mapping, the `tensor` seam pattern below — was rejected: it forks the one
+  code table this design centralizes, and `memory` lacks `tensor`'s reason
+  to avoid the edge (nothing above `memory` gains a `cuda` dependency it
+  wouldn't already have). `memory` still must not include
+  `tensor.h`/`ops.h`.
 - `kernels → cuda, tensor` (listed): launchers consume `Tensor` handles and
   streams. `kernels` never includes anything from layer 2+ (model,
   scheduler, runtime) — the acceptance-criteria review point.
@@ -523,6 +535,25 @@ class CudaAllocator final : public Allocator {
 - `Tensor::empty(shape, dtype, Device::Cuda(i))` routes to
   `DefaultCudaAllocator(i)`; M1's `Unimplemented` for kCUDA becomes real
   allocation (CUDA builds) or stays `Unimplemented` (CPU-only builds).
+
+*Refined in M2-T05 (implementation):*
+
+- **The `Allocator` base gained protected defaulted move operations** so
+  `Create` can return `StatusOr<CudaAllocator>` by value — the base's
+  deleted copy constructor had suppressed derived moves. Protected, so a
+  derived allocator is never moved through a base reference (slicing).
+- **The deleter uses raw `cudaSetDevice`/`cudaFree`, not `ScopedSetDevice`**:
+  `ScopedSetDevice` CHECKs on failure, but a deleter must neither return
+  Status nor abort from a destructor, so every deleter-path failure is
+  logged and dropped as this section already required. A failed
+  `cudaSetDevice` still attempts the free (`cudaFree` accepts pointers from
+  any device context). `Allocate` itself does use `ScopedSetDevice`.
+- **A failed `cudaMalloc` clears the last-error slot** (`cudaGetLastError()`)
+  so the non-sticky OOM is not misread by a later §4.3 launch-error check.
+- The alignment ceiling constant is `CudaAllocator::kGuaranteedAlignment`
+  (256); `Allocate` CHECKs both power-of-two and the ceiling.
+- The `memory → cuda` module edge this class needs is ADR-002 Amendment 2
+  (see §2.1).
 
 ### 7.2 `PinnedCpuAllocator` (M2-T07)
 

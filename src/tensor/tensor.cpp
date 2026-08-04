@@ -3,6 +3,7 @@
 #include "core/check.h"
 #include "core/status.h"
 #include "memory/allocator.h"
+#include "memory/cuda_allocator.h"
 #include "tensor/device.h"
 #include "tensor/dtype.h"
 #include "tensor/shape.h"
@@ -38,13 +39,15 @@ core::StatusOr<Tensor> Tensor::empty(Shape shape, DataType dtype, Device device,
         "dtype {} is reserved and not allocatable until its milestone",
         to_string(dtype));
   }
-  if (device.is_cuda()) {
-    return core::UnimplementedError(
-        "cannot allocate on {}: the CUDA backend lands in M2",
-        device.ToString());
-  }
   if (allocator == nullptr) {
-    allocator = memory::DefaultCpuAllocator();
+    if (device.is_cuda()) {
+      // CPU-only builds: Unimplemented from the stub; CUDA builds with an
+      // out-of-range index (including any index with no visible device):
+      // InvalidArgument (memory/cuda_allocator.h).
+      ASSIGN_OR_RETURN(allocator, memory::DefaultCudaAllocator(device.index()));
+    } else {
+      allocator = memory::DefaultCpuAllocator();
+    }
   }
   // Both arguments are call-site-authored; a mismatch is a bug, not data.
   CHECK(allocator->device() == device,

@@ -20,6 +20,13 @@ engine_add_tests(TREE unit SOURCES
   allocator_test.cpp
   DEPS engine::memory)
 
+# cuda_allocator_test.cpp compiles on every configuration (stub taxonomy on
+# CPU-only builds, index validation + GPU-skipped allocation tests on CUDA
+# builds); engine::cuda supplies device_count() for the index tests.
+engine_add_tests(TREE unit SOURCES
+  cuda_allocator_test.cpp
+  DEPS engine::memory engine::cuda)
+
 engine_add_tests(TREE unit SOURCES
   cuda_utils_test.cpp
   stream_test.cpp
@@ -29,15 +36,21 @@ engine_add_tests(TREE unit SOURCES
 # cuda/cuda_check.h and therefore the CUDA toolkit (most of it runs without
 # a GPU — ToStatus and the macros are pure host code); stream_cuda_test.cu
 # launches its own delay kernel (M2-T08's kernels don't exist yet), so it is
-# a .cu TU. GPU-dependent assertions use the shared skip predicate.
+# a .cu TU; cuda_allocator_cuda_test.cpp calls cudaMemGetInfo/cudaMemcpy for
+# the M2-T05 leak and round-trip checks. GPU-dependent assertions use the
+# shared skip predicate.
 if(ENGINE_ENABLE_CUDA)
   engine_add_tests(TREE unit SOURCES
     cuda_check_test.cpp
     stream_cuda_test.cu
     DEPS engine::cuda)
+  engine_add_tests(TREE unit SOURCES
+    cuda_allocator_cuda_test.cpp
+    DEPS engine::memory engine::cuda)
 endif()
 
+# engine::cuda supplies device_count() for tensor_test's CUDA-device cases.
 engine_add_tests(TREE unit SOURCES
   ops_test.cpp
   tensor_test.cpp
-  DEPS engine::tensor)
+  DEPS engine::tensor engine::cuda)
