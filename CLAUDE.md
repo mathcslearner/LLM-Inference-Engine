@@ -297,4 +297,32 @@ boundary/edge tests (rank-8 FromDims, numel INT64_MAX, cuda:INT_MAX,
 half→int & int64-rounding casts, rank-0 copy/cast, non-contiguous
 self-copy, print truncation), normal-fill goldens libm-tolerant; design
 doc §3–§7.1 synced.
-Next up: **M2-T01** (design doc: CUDA backend).
+M2-T01 done (`docs/design/cuda-backend.md` — CUDA backend design governing
+M2-T02…T09: error strategy (`CUDA_CHECK`/`CUDA_RETURN_IF_ERROR` + `ToStatus`
+code table, device OOM → kResourceExhausted; launch errors caught via
+`cudaGetLastError` after every launch, deferred execution errors surface as
+`Status` at sync points and are terminal-by-policy — sticky context); stream
+model (all streams explicit `cudaStreamNonBlocking`, legacy default stream
+banned, per-device leaked `DefaultStream`, RAII `CudaStream`/`CudaEvent`
+with drain-on-destruction, toolkit-free opaque `StreamHandle` for non-cuda
+modules, §6.4 sync-ownership rule: enqueuer ensures completion observed,
+launchers/allocators never sync); allocators (naive `CudaAllocator`,
+`PinnedCpuAllocator` with device()==cpu — pinnedness not a DeviceType,
+stream-agnostic `CachingAllocator` with power-of-two→1MiB size classes,
+exact-class free-list reuse, stats/`release_cached()`+OOM-retry, deleters
+capture the pool → pool-outlives-Buffers lifetime rule; `cudaMallocAsync`
+considered & deferred); transfers (contiguous-only `copy(dst,src,stream)` +
+`Tensor::to`, stream-less `to` synchronous by design, async-vs-pinned truth
+table; toolkit calls compiled into `engine_tensor` behind ENGINE_ENABLE_CUDA
+without a tensor→cuda module edge — ADR-002 reviewed, no amendment);
+kernel infra (`.h` toolkit-free Status launchers / `.cu` impls, `launch.h`
+grid-stride `CUDA_1D_KERNEL_LOOP`, `DISPATCH_FLOATING_TYPES`, 5-step
+launcher contract incl. mandatory `cudaGetLastError`, numel==0 guard,
+half↔`__half` bit-cast at kernel boundary only); CPU-only builds via
+stub-source split (no `#ifdef`-riddled bodies), `device_count()`==0 without
+GPU; sm_80/86/89/90 real binaries, CUDA 12.x floor, auto-detect downgrade
+to OFF; GPU testing (`HasCudaDevice` skip predicate, `CudaTestFixture` with
+per-test stream + caching allocator, `expect_tensors_close` sync+D2H+
+allclose, shape sweep incl. grid-stride wrap, `gpu` ctest label, dormant
+self-hosted workflow)).
+Next up: **M2-T02** (CMake CUDA integration).

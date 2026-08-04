@@ -272,7 +272,7 @@ correctness-vs-CPU testing pattern.
 
 **Architecture documents:** `docs/design/cuda-backend.md` (M2-T01).
 
-### M2-T01 · Design doc: CUDA backend
+### M2-T01 · Design doc: CUDA backend — ✅ DONE (2026-08-04)
 Write `docs/design/cuda-backend.md`: stream model (which streams exist, who owns
 them), error-handling strategy (CUDA errors → `Status`), allocator strategy (naive vs
 caching pool, stream-ordered semantics), kernel source organization (`src/kernels/`
