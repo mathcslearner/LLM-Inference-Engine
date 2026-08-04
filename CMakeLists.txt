@@ -18,8 +18,10 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     STRINGS Debug Release RelWithDebInfo MinSizeRel)
 endif()
 
-# Declared now so the documented `-DENGINE_ENABLE_CUDA=OFF` configure command
-# works from day one; the CUDA language and toolkit wiring land in M2.
+# When ON, cmake/cuda.cmake (included below) attempts toolkit detection and
+# downgrades to OFF with a status message if none is found — the documented
+# `-DENGINE_ENABLE_CUDA=OFF` configure command is never required just to
+# configure on a CUDA-less machine.
 option(ENGINE_ENABLE_CUDA "Build the CUDA backend (device runtime and kernels)" ON)
 option(ENGINE_BUILD_TESTS "Build unit and integration tests" ON)
 
@@ -40,8 +42,16 @@ set(ENGINE_WARNING_FLAGS
   -Wnon-virtual-dtor
   -Wold-style-cast
   -Werror)
+# Fenced to CXX compiles: $<CXX_COMPILER_ID> is true for CUDA sources too
+# (it names the compiler, not the source language), and nvcc rejects these
+# flags. Device-code warnings are added in cmake/cuda.cmake.
 target_compile_options(engine_warnings INTERFACE
-  $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:${ENGINE_WARNING_FLAGS}>)
+  $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:GNU,Clang,AppleClang>>:${ENGINE_WARNING_FLAGS}>)
+
+# CUDA toolkit detection, language enablement, and the engine::cuda_build
+# definition target (M2-T02; docs/design/cuda-backend.md §3). May downgrade
+# ENGINE_ENABLE_CUDA to OFF, so everything below sees the final value.
+include(cmake/cuda.cmake)
 
 add_subdirectory(src)
 

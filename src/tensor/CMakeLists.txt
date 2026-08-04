@@ -18,6 +18,9 @@ target_link_libraries(engine_tensor_base INTERFACE engine::core)
 add_library(engine_tensor STATIC ops.cpp tensor.cpp)
 add_library(engine::tensor ALIAS engine_tensor)
 target_include_directories(engine_tensor PUBLIC ${PROJECT_SOURCE_DIR}/src)
+# engine::cuda_build carries the ENGINE_ENABLE_CUDA compile definition
+# (tensor's device-aware transfer TU, M2-T07, is toolkit-touching per
+# docs/design/cuda-backend.md §2.1).
 target_link_libraries(engine_tensor
-  PUBLIC engine::tensor_base engine::memory
+  PUBLIC engine::tensor_base engine::memory engine::cuda_build
   PRIVATE engine_warnings)

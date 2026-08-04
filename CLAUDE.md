@@ -325,4 +325,20 @@ to OFF; GPU testing (`HasCudaDevice` skip predicate, `CudaTestFixture` with
 per-test stream + caching allocator, `expect_tensors_close` sync+D2H+
 allclose, shape sweep incl. grid-stride wrap, `gpu` ctest label, dormant
 self-hosted workflow)).
-Next up: **M2-T02** (CMake CUDA integration).
+M2-T02 done (CMake CUDA integration per design §3: `cmake/cuda.cmake` —
+`check_language(CUDA)` auto-detect that downgrades `ENGINE_ENABLE_CUDA` to
+OFF (status message, non-cache set) when no toolkit is found, CUDA 12.x
+floor enforced at configure time, `CMAKE_CUDA_ARCHITECTURES`
+80/86/89/90-real (SASS only, no forward-compat PTX — design §3 refined),
+device C++20, separable compilation off; `engine::cuda_build` INTERFACE
+target is the single source of the `ENGINE_ENABLE_CUDA` compile definition,
+linked PUBLIC by the four CUDA-touching modules (cuda, kernels, memory,
+tensor); `engine_warnings` host flags now fenced to
+`$<COMPILE_LANGUAGE:CXX>` plus a CUDA branch (`-Werror=all-warnings` +
+curated `-Xcompiler` host set — no `-Wpedantic`/`-Wold-style-cast`, design
+§3 refined); source-list seam in `src/cuda/` and `src/kernels/`: CUDA
+builds compile placeholder-kernel `.cu` anchors, CPU-only builds keep the
+`.cpp` anchors. CPU-only path fully validated (auto-detect downgrade +
+explicit OFF, build + 263 tests green); toolkit-present path awaits a GPU
+machine — first exercised by M2-T03+).
+Next up: **M2-T03** (CUDA error handling & device utilities).

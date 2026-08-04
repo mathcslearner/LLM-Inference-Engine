@@ -283,7 +283,7 @@ layout, header/impl split, dispatch conventions), supported architectures
 - Doc answers: how does a CUDA error inside a kernel surface to the caller? Who synchronizes and when? How do tests assert kernel correctness?
 - Reviewed against ADR-002 module rules (kernels may not depend on scheduler/runtime).
 
-### M2-T02 · CMake CUDA integration
+### M2-T02 · CMake CUDA integration — ✅ DONE (2026-08-04)
 Enable CUDA as a first-class language behind an `ENGINE_ENABLE_CUDA` option (default
 ON, auto-detect). Set `CMAKE_CUDA_ARCHITECTURES` (80;86;89;90), C++20 for device code,
 and make the CPU-only build (CI) compile cleanly with all CUDA targets excluded.

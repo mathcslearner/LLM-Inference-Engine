@@ -148,7 +148,10 @@ CUDA-touching modules:
   (no PTX-only entries): A100 (sm_80), consumer Ampere (sm_86), Ada/L4/L40
   (sm_89), Hopper H100 (sm_90). Newer arches (Blackwell) run sm_90 SASS-
   incompatible → revisit when hardware matters; adding an arch is a
-  one-line change and a rebuild.
+  one-line change and a rebuild. *Refined in M2-T02:* spelled
+  `80-real;86-real;89-real;90-real` in CMake — a plain `N` entry embeds
+  forward-compat PTX alongside the SASS, which would contradict the
+  no-silent-JIT intent above; `-real` is SASS only.
 - **Device code is C++20** (`CMAKE_CUDA_STANDARD 20`), matching host code;
   nvcc 12.x supports it.
 - **Warnings-as-errors extends to device code.** The `engine_warnings`
@@ -157,6 +160,11 @@ CUDA-touching modules:
   needed (each expt flag gets a comment justifying it). Host-side flags
   pass through via `-Xcompiler` only where nvcc doesn't accept them
   natively. Third-party headers stay warning-exempt as on the host side.
+  *Refined in M2-T02:* the host set forwarded through `-Xcompiler`
+  excludes `-Wpedantic` (fires on the `#line`-directive style of
+  nvcc-generated host code) and `-Wold-style-cast` (CUDA headers/macros
+  expand to C-style casts); host-only TUs keep the full set via a
+  `$<COMPILE_LANGUAGE:CXX>` fence.
 - **`.cu` files may exist only in** `src/cuda/`, `src/kernels/`,
   `src/memory/` (and `tests/`); `distributed` joins the list in its
   milestone. Greppable, reviewed, matches ADR-002 rule 3.
