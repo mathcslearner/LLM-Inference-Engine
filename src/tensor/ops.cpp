@@ -2,12 +2,14 @@
 
 #include "core/check.h"
 #include "core/status.h"
+#include "cuda/stream_handle.h"
 #include "memory/allocator.h"
 #include "tensor/device.h"
 #include "tensor/dtype.h"
 #include "tensor/half.h"
 #include "tensor/shape.h"
 #include "tensor/tensor.h"
+#include "tensor/transfer_detail.h"
 
 #include <fmt/format.h>
 
@@ -514,6 +516,48 @@ Status copy(const Tensor& dst, const Tensor& src) {
     });
   });
   return OkStatus();
+}
+
+Status copy(const Tensor& dst, const Tensor& src, cuda::StreamHandle stream) {
+  CHECK(dst.defined() && src.defined(), "copy: undefined Tensor");
+  if (dst.dtype() != src.dtype()) {
+    return InvalidArgumentError(
+        "copy: dtype mismatch: {} vs {} (dtype conversion is cast)",
+        to_string(dst.dtype()), to_string(src.dtype()));
+  }
+  if (dst.shape() != src.shape()) {
+    return InvalidArgumentError("copy: shape mismatch: {} vs {}", dst.shape(),
+                                src.shape());
+  }
+  if (!dst.is_contiguous() || !src.is_contiguous()) {
+    return InvalidArgumentError(
+        "copy: the stream overload requires contiguous tensors (dst strides "
+        "{}, src strides {}); strided device copy is not implemented",
+        dst.strides(), src.strides());
+  }
+  const bool dst_cuda = dst.device().is_cuda();
+  const bool src_cuda = src.device().is_cuda();
+  if (!dst_cuda && !src_cuda) {
+    return copy(dst, src);  // H2H: the host memcpy path, stream ignored
+  }
+  if (dst_cuda && src_cuda && dst.device() != src.device()) {
+    return core::UnimplementedError(
+        "copy: cross-device copy ({} -> {}) is not implemented until the "
+        "distributed milestone",
+        src.device().ToString(), dst.device().ToString());
+  }
+  if (dst.numel() == 0) {
+    return OkStatus();
+  }
+  // Equal pointers with matching shape/dtype and contiguity means identical
+  // views: a no-op (and a self-memcpy on the device would be UB). Comparing
+  // a host pointer with a device pointer here is sound because CUDA's
+  // unified virtual addressing (all 64-bit platforms we target) guarantees
+  // host and device allocations occupy disjoint address ranges.
+  if (dst.data() == src.data()) {
+    return OkStatus();
+  }
+  return detail::DeviceCopy(dst, src, stream, /*synchronize=*/false);
 }
 
 StatusOr<Tensor> cast(const Tensor& src, DataType dtype,

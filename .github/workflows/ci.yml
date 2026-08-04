@@ -1,5 +1,5 @@
 # Continuous integration, CPU only (M0-T05). GPU jobs are out of scope here;
-# they arrive later as manual/self-hosted runners.
+# the dormant, manually-triggered GPU workflow lives in gpu-ci.yml (M2-T09).
 #
 # Jobs:
 #   format      — scripts/check-format.sh with the pinned clang-format (LLVM 20).

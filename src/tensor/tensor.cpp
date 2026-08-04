@@ -2,10 +2,13 @@
 
 #include "core/check.h"
 #include "core/status.h"
+#include "cuda/stream_handle.h"
 #include "memory/allocator.h"
+#include "memory/cuda_allocator.h"
 #include "tensor/device.h"
 #include "tensor/dtype.h"
 #include "tensor/shape.h"
+#include "tensor/transfer_detail.h"
 
 #include <array>
 #include <cstddef>
@@ -38,13 +41,15 @@ core::StatusOr<Tensor> Tensor::empty(Shape shape, DataType dtype, Device device,
         "dtype {} is reserved and not allocatable until its milestone",
         to_string(dtype));
   }
-  if (device.is_cuda()) {
-    return core::UnimplementedError(
-        "cannot allocate on {}: the CUDA backend lands in M2",
-        device.ToString());
-  }
   if (allocator == nullptr) {
-    allocator = memory::DefaultCpuAllocator();
+    if (device.is_cuda()) {
+      // CPU-only builds: Unimplemented from the stub; CUDA builds with an
+      // out-of-range index (including any index with no visible device):
+      // InvalidArgument (memory/cuda_allocator.h).
+      ASSIGN_OR_RETURN(allocator, memory::DefaultCudaAllocator(device.index()));
+    } else {
+      allocator = memory::DefaultCpuAllocator();
+    }
   }
   // Both arguments are call-site-authored; a mismatch is a bug, not data.
   CHECK(allocator->device() == device,
@@ -109,6 +114,48 @@ core::StatusOr<Tensor> Tensor::reshape(Shape new_shape) const {
   }
   const Strides strides = RowMajorStrides(new_shape);
   return Tensor(buffer_, byte_offset_, new_shape, strides, dtype_, device_);
+}
+
+namespace {
+
+// Shared body of the two Tensor::to overloads; `synchronize` distinguishes
+// the stream-less (synchronous by design, §8.3) spelling from the stream one.
+core::StatusOr<Tensor> ToDevice(const Tensor& self, Device device,
+                                cuda::StreamHandle stream, bool synchronize) {
+  CHECK(self.defined(), "to() on an undefined Tensor");
+  if (!self.is_contiguous()) {
+    return core::InvalidArgumentError(
+        "to: tensor must be contiguous (shape {}, strides {}); strided device "
+        "copy is not implemented — make a contiguous copy first",
+        self.shape(), self.strides());
+  }
+  if (device == self.device()) {
+    return self;  // same shared handle; a deep copy is ops::copy
+  }
+  if (device.is_cuda() && self.device().is_cuda()) {
+    return core::UnimplementedError(
+        "to: cross-device copy ({} -> {}) is not implemented until the "
+        "distributed milestone",
+        self.device().ToString(), device.ToString());
+  }
+  ASSIGN_OR_RETURN(Tensor result,
+                   Tensor::empty(self.shape(), self.dtype(), device));
+  if (self.numel() == 0) {
+    return result;
+  }
+  RETURN_IF_ERROR(detail::DeviceCopy(result, self, stream, synchronize));
+  return result;
+}
+
+}  // namespace
+
+core::StatusOr<Tensor> Tensor::to(Device device) const {
+  return ToDevice(*this, device, cuda::StreamHandle(), /*synchronize=*/true);
+}
+
+core::StatusOr<Tensor> Tensor::to(Device device,
+                                  cuda::StreamHandle stream) const {
+  return ToDevice(*this, device, stream, /*synchronize=*/false);
 }
 
 core::StatusOr<Tensor> Tensor::view_as_dtype(DataType new_dtype) const {

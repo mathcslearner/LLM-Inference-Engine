@@ -1,6 +1,8 @@
 #include "tensor/tensor.h"
 
+#include "common/cuda.h"
 #include "core/status.h"
+#include "cuda/cuda_utils.h"
 #include "memory/allocator.h"
 #include "tensor/device.h"
 #include "tensor/dtype.h"
@@ -153,12 +155,41 @@ TEST(TensorTest, TypedAccessWithHalfPrecisionDtypes) {
   EXPECT_EQ(bf16.item<bfloat16>({0}), -2.0F);
 }
 
-TEST(TensorTest, EmptyCudaIsUnimplemented) {
+#ifndef ENGINE_ENABLE_CUDA
+// CPU-only builds: the CUDA allocator stub reports the build (M2-T05; the
+// message distinguishes "built without CUDA" from a bad device index).
+TEST(TensorTest, EmptyCudaIsUnimplementedOnCpuOnlyBuilds) {
   const StatusOr<Tensor> t =
       Tensor::empty(Shape{2, 2}, DataType::kFloat32, Device::Cuda(0));
   ASSERT_FALSE(t.ok());
   EXPECT_TRUE(IsUnimplemented(t.status())) << t.status().ToString();
 }
+#else
+// CUDA builds with a GPU: a real device tensor, tagged with the requested
+// device (the M2-T05 acceptance criterion). On CudaTestFixture (M2-T09) for
+// the skip guard; empty() routes through DefaultCudaAllocator itself.
+class TensorGpuTest : public engine::testing::CudaTestFixture {};
+
+TEST_F(TensorGpuTest, EmptyCudaAllocatesDeviceTensor) {
+  const Tensor t =
+      Unwrap(Tensor::empty(Shape{2, 3}, DataType::kFloat32, Device::Cuda(0)));
+  EXPECT_TRUE(t.device() == Device::Cuda(0));
+  EXPECT_EQ(t.dtype(), DataType::kFloat32);
+  EXPECT_EQ(t.numel(), 6);
+  EXPECT_TRUE(t.is_contiguous());
+  EXPECT_NE(t.data(), nullptr);
+}
+
+// CUDA builds with or without a GPU: an out-of-range device index is
+// InvalidArgument (design §5.2) — on a GPU-less machine that is every index.
+TEST(TensorTest, EmptyCudaOutOfRangeIndexIsInvalidArgument) {
+  const StatusOr<Tensor> t =
+      Tensor::empty(Shape{2, 2}, DataType::kFloat32,
+                    Device::Cuda(engine::cuda::device_count()));
+  ASSERT_FALSE(t.ok());
+  EXPECT_TRUE(IsInvalidArgument(t.status())) << t.status().ToString();
+}
+#endif  // ENGINE_ENABLE_CUDA
 
 TEST(TensorTest, EmptyUsesExplicitAllocator) {
   CountingAllocator allocator;

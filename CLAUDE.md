@@ -297,4 +297,302 @@ boundary/edge tests (rank-8 FromDims, numel INT64_MAX, cuda:INT_MAX,
 half→int & int64-rounding casts, rank-0 copy/cast, non-contiguous
 self-copy, print truncation), normal-fill goldens libm-tolerant; design
 doc §3–§7.1 synced.
-Next up: **M2-T01** (design doc: CUDA backend).
+M2-T01 done (`docs/design/cuda-backend.md` — CUDA backend design governing
+M2-T02…T09: error strategy (`CUDA_CHECK`/`CUDA_RETURN_IF_ERROR` + `ToStatus`
+code table, device OOM → kResourceExhausted; launch errors caught via
+`cudaGetLastError` after every launch, deferred execution errors surface as
+`Status` at sync points and are terminal-by-policy — sticky context); stream
+model (all streams explicit `cudaStreamNonBlocking`, legacy default stream
+banned, per-device leaked `DefaultStream`, RAII `CudaStream`/`CudaEvent`
+with drain-on-destruction, toolkit-free opaque `StreamHandle` for non-cuda
+modules, §6.4 sync-ownership rule: enqueuer ensures completion observed,
+launchers/allocators never sync); allocators (naive `CudaAllocator`,
+`PinnedCpuAllocator` with device()==cpu — pinnedness not a DeviceType,
+stream-agnostic `CachingAllocator` with power-of-two→1MiB size classes,
+exact-class free-list reuse, stats/`release_cached()`+OOM-retry, deleters
+capture the pool → pool-outlives-Buffers lifetime rule; `cudaMallocAsync`
+considered & deferred); transfers (contiguous-only `copy(dst,src,stream)` +
+`Tensor::to`, stream-less `to` synchronous by design, async-vs-pinned truth
+table; toolkit calls compiled into `engine_tensor` behind ENGINE_ENABLE_CUDA
+without a tensor→cuda module edge — ADR-002 reviewed, no amendment);
+kernel infra (`.h` toolkit-free Status launchers / `.cu` impls, `launch.h`
+grid-stride `CUDA_1D_KERNEL_LOOP`, `DISPATCH_FLOATING_TYPES`, 5-step
+launcher contract incl. mandatory `cudaGetLastError`, numel==0 guard,
+half↔`__half` bit-cast at kernel boundary only); CPU-only builds via
+stub-source split (no `#ifdef`-riddled bodies), `device_count()`==0 without
+GPU; sm_80/86/89/90 real binaries, CUDA 12.x floor, auto-detect downgrade
+to OFF; GPU testing (`HasCudaDevice` skip predicate, `CudaTestFixture` with
+per-test stream + caching allocator, `expect_tensors_close` sync+D2H+
+allclose, shape sweep incl. grid-stride wrap, `gpu` ctest label, dormant
+self-hosted workflow)).
+M2-T02 done (CMake CUDA integration per design §3: `cmake/cuda.cmake` —
+`check_language(CUDA)` auto-detect that downgrades `ENGINE_ENABLE_CUDA` to
+OFF (status message, non-cache set) when no toolkit is found, CUDA 12.x
+floor enforced at configure time, `CMAKE_CUDA_ARCHITECTURES`
+80/86/89/90-real (SASS only, no forward-compat PTX — design §3 refined),
+device C++20, separable compilation off; `engine::cuda_build` INTERFACE
+target is the single source of the `ENGINE_ENABLE_CUDA` compile definition,
+linked PUBLIC by the four CUDA-touching modules (cuda, kernels, memory,
+tensor); `engine_warnings` host flags now fenced to
+`$<COMPILE_LANGUAGE:CXX>` plus a CUDA branch (`-Werror=all-warnings` +
+curated `-Xcompiler` host set — no `-Wpedantic`/`-Wold-style-cast`, design
+§3 refined); source-list seam in `src/cuda/` and `src/kernels/`: CUDA
+builds compile placeholder-kernel `.cu` anchors, CPU-only builds keep the
+`.cpp` anchors. CPU-only path fully validated (auto-detect downgrade +
+explicit OFF, build + 263 tests green); toolkit-present path awaits a GPU
+machine — first exercised by M2-T03+).
+M2-T03 done (CUDA error handling & device utilities per design §4–§5:
+`src/cuda/cuda_utils.h` — toolkit-free public introspection API
+(`device_count()` memoized, never fails, 0 without GPU/toolkit and on
+CPU-only builds; `DeviceProperties` + `GetDeviceProperties` with
+out-of-range → InvalidArgument naming index and count; `ScopedSetDevice`
+RAII, CHECKing ctor, restores previous device); `src/cuda/cuda_check.h` —
+internal toolkit-including header (design §2.2 refined: the macro/ToStatus
+declarations inherently name toolkit types, so they split out of the
+public header; includable only from CUDA-compiled TUs) with
+`ToStatus(cudaError_t, what)` per the §4.2 code table (device OOM →
+kResourceExhausted, invalid device/value → kInvalidArgument, no
+device/driver/support → kUnavailable, else kInternal; message always
+embeds cudaGetErrorName/String, sticky context-poisoning errors marked
+terminal), `CUDA_CHECK` (fatal via CheckFailed) and `CUDA_RETURN_IF_ERROR`
+(→ Status with expression + file:line), both single-evaluation;
+implementation in `cuda_utils.cpp` (CUDA builds; first enumeration logs
+per-device info line — §4.4) vs `cuda_utils_stub.cpp` (CPU-only:
+GetDeviceProperties → Unimplemented "built without CUDA",
+ScopedSetDevice ctor CHECKs); `find_package(CUDAToolkit)` +
+`CUDA::cudart_static` linked PUBLIC on engine_cuda (host TUs including
+cuda_runtime.h need it — design §3 refined); top-level CMP0156 (guarded)
+dedups test link lines; shared GPU-skip predicate pulled forward from
+M2-T09: `tests/common/cuda.h` `HasCudaDevice()` +
+`ENGINE_SKIP_WITHOUT_CUDA()` — GPU tests skip, never fail, without a
+device; `cuda_utils_test.cpp` runs on every configuration (stub taxonomy
+via #ifdef, GPU sanity checks guarded, uniform ScopedSetDevice death
+test), `cuda_check_test.cpp` (CUDA builds only, mostly GPU-less: ToStatus
+golden table, macro single-evaluation/message tests, bad-cudaSetDevice
+acceptance test, CUDA_CHECK death test, ScopedSetDevice restore via
+cudaGetDevice). CPU-only path validated (271 tests green, 3 GPU tests
+skip); CUDA-side sources await a toolkit machine, like M2-T02).
+M2-T04 done (stream & event wrappers per design §6: `src/cuda/stream_handle.h`
+— toolkit-free trivially-copyable `StreamHandle` over a forward-declared
+`CUstream_st*` (null ≡ "engine default stream for the relevant device", no
+ownership/validation — §6.3's deliberately thin spot); `src/cuda/stream.h` —
+toolkit-free public header (CUDA handle types spelled as pointers to
+forward-declared `CUstream_st`/`CUevent_st`, identical to the toolkit
+typedefs in CUDA TUs — §6.2 refined): move-only RAII `CudaStream`
+(`Create()` → cudaStreamNonBlocking on the current device, `Synchronize`,
+`WaitEvent`, `get`/`handle`/`device_index`) and `CudaEvent` (`Timing()`/
+`Sync()` flavors, `Record`, `Synchronize`, `Query`, static `ElapsedMs` —
+flavor misuse → InvalidArgument, incomplete record pre-checked →
+FailedPrecondition so cudaErrorNotReady never maps to kInternal); both drain
+on destruction (sync then destroy, CHECK on failure — sticky/terminal §4.3)
+and on move-assign-over; moved-from members CHECK (Tensor's
+undefined-handle policy); never-recorded events count complete
+(Query true / WaitEvent no-op — CUDA semantics, documented); lifetime rule
+"event may outlive its stream" documented + tested; `DefaultStream(i)` —
+lazy, leaked, mutex-guarded per-device non-blocking stream, out-of-range
+index or creation failure fatal (§6.3 refined); stream.cpp vs
+stream_stub.cpp source-list seam (stub factories → Unimplemented "built
+without CUDA", DefaultStream CHECKs); tests: `stream_test.cpp` (all
+configs: stub taxonomy, StreamHandle static_asserts, uniform DefaultStream
+death test; GPU-skipped: create/sync, move semantics, moved-from death
+tests, event lifecycle, ElapsedMs taxonomy, event-outlives-stream,
+DefaultStream identity + concurrency) + `stream_cuda_test.cu` (CUDA builds
+only, brings its own clock64 delay kernel since M2-T08 kernels don't exist
+yet: elapsed-of-known-duration > 0, FailedPrecondition before completion,
+cross-stream WaitEvent ordering via flag readback, destructor drains
+in-flight work). CPU-only path validated (286 tests green, GPU tests skip);
+CUDA-side sources await a toolkit machine, like M2-T02/T03).
+M2-T05 done (CUDA device allocator per design §7.1:
+`src/memory/cuda_allocator.h` — toolkit-free public header; `CudaAllocator`
+final over cudaMalloc/cudaFree, private ctor + `Create(device_index) →
+StatusOr<CudaAllocator>` (out-of-range index → InvalidArgument naming index
+and count per §5.2 — which is every index on GPU-less CUDA builds; CPU-only
+builds → Unimplemented from the stub), `Allocate` CHECKs alignment
+power-of-two and ≤ `kGuaranteedAlignment` (256, cudaMalloc's guarantee),
+bytes==0 → engaged null buffer, device OOM → kResourceExhausted via
+`ToStatus` with the last-error slot cleared after a failed cudaMalloc;
+deleters self-contained (capture only the device index; raw
+cudaSetDevice/cudaFree with log-and-drop — a deleter can't return Status or
+abort, §7.1 refined) so Buffers may outlive the allocator; leaked
+mutex-guarded per-device `DefaultCudaAllocator(i)`; `Tensor::empty` now
+routes null-allocator kCUDA requests there (M1's blanket Unimplemented
+gone; ops factories on CUDA still CHECK in the fill until M2-T08 kernels).
+`Allocator` base gained protected defaulted moves (deleted copy had
+suppressed derived moves; needed for by-value Create). **ADR-002
+Amendment 2: the layer-1 edge flips to `memory → cuda`** (was the unused
+`cuda → memory`) — CudaAllocator links cuda's `device_count`/
+`ScopedSetDevice`/`ToStatus` rather than forking the §4.2 error table;
+PRIVATE link, memory's public headers stay toolkit-free; design §2.1's
+"no amendment needed" corrected. cuda_allocator.cpp vs
+cuda_allocator_stub.cpp source-list seam; tests: `cuda_allocator_test.cpp`
+(all configs: stub taxonomy; CUDA builds GPU-less: index validation;
+GPU-skipped: alloc basics + 256-alignment, zero-byte, huge-alloc →
+ResourceExhausted then still usable, buffer-outlives-allocator, default
+singleton identity, alignment death tests) + `cuda_allocator_cuda_test.cpp`
+(CUDA builds only: cudaMemGetInfo leak-delta over 64 cycles, memset/memcpy
+round-trip proves real device memory); tensor_test CUDA-empty tests forked
+per build (CPU-only → Unimplemented, CUDA → device-tagged tensor /
+InvalidArgument index). CPU-only path validated (288 tests green, GPU tests
+skip); CUDA-side sources await a toolkit machine, like M2-T02…T04).
+M2-T06 done (caching pool allocator per design §7.3–§7.4:
+`src/memory/caching_allocator.h`/`.cpp` — toolkit-free, compiled on every
+configuration (the pool is device-agnostic over any upstream `Allocator*`,
+no source-list seam needed); size classes 512B min / powers of two to 1MiB /
+1MiB steps above (constexpr `SizeClass` with overflow guard, static_asserts
+pin the table), per-class free lists with exact-class reuse, one mutex,
+exact `Stats{bytes_allocated, bytes_reserved, hit_count, miss_count}` in
+class-rounded bytes (`bytes_reserved` == upstream footprint; handed-out
+Buffers report the requested size), `release_cached()` (upstream deleters
+run outside the pool mutex), upstream-exhaustion → release + one retry
+(triggers on kResourceExhausted *or* kOutOfMemory — device-agnostic;
+miss_count counts once per request), zero-byte requests bypass cache and
+stats; deleters capture `this` (the documented Buffer-ownership exception:
+pool must outlive its Buffers, class non-movable, destructor CHECKs no live
+Buffers then returns cached blocks). Design §7.3 gained a "Refined in
+M2-T06" note: fixed pool-wide upstream alignment `kMaxAlignment` (256,
+CHECK-ceiling on requests) so free lists never need alignment keys, plus the
+stats denomination, zero-byte, retry-code, and lock-discipline decisions.
+Tests: `caching_allocator_test.cpp` (all configs — scriptable counting
+FakeUpstream: reuse/no-upstream-call, class-rounding table, exact scripted
+stats sequence, release_cached incl. live-buffers-unaffected and
+destructor-releases-cache, retry taxonomy incl. non-exhaustion-no-retry,
+zero-byte, real-CpuAllocator round-trip, death tests for alignment/null
+upstream/live-buffer-at-destruction, 8-thread stress with invariant checks;
+GPU-skipped: reuse-via-stats + scripted stats over `DefaultCudaAllocator`)
++ `caching_allocator_cuda_test.cpp` (CUDA builds only: cudaMemGetInfo
+cached-vs-released driver deltas, reused-block memset/D2H round-trip).
+CPU-only path validated (311 tests green, GPU tests skip); CUDA-side
+awaits a toolkit machine, like M2-T02…T05).
+M2-T07 done (pinned memory & host↔device transfer per design §7.2/§8:
+`src/memory/pinned_allocator.h` — toolkit-free public header; `PinnedCpuAllocator`
+final over cudaHostAlloc(Portable)/cudaFreeHost, `Create()` → StatusOr (no visible
+device → Unavailable — eager, cudaErrorNoDevice maps there anyway; CPU-only builds
+→ Unimplemented from the stub), same 256-byte `kGuaranteedAlignment` CHECK-ceiling
+as CudaAllocator (keeps the caching pool's fixed upstream alignment valid over
+either), exhaustion → kResourceExhausted (which the pool's OOM-retry already
+catches), **`device()` == `Device::Cpu()`** — pinnedness is a property of the
+allocation, not a DeviceType; deleters capture nothing (cudaFreeHost needs no
+device context); no default singleton (no consumer yet). Transfers:
+`ops::copy(dst, src, StreamHandle)` — same shape+dtype (InvalidArgument), both
+contiguous (InvalidArgument; strided device copy deferred), H2H delegates to the
+2-arg overload on every build (stream ignored), cross-device CUDA pair →
+Unimplemented, identical views no-op, numel==0 early-out; `Tensor::to(device[,
+stream])` — contiguity checked *before* the same-device fast path (uniform
+contract), same device → same handle, stream-less spelling enqueues on the engine
+default stream then synchronizes (§8.3 safe default), stream spelling enqueues and
+returns (§6.4 discipline). Structure refined from the design's letter: validation
+and H2H live in always-compiled ops.cpp/tensor.cpp (the InvalidArgument acceptance
+criterion runs on CPU-only CI); only `detail::DeviceCopy(dst, src, stream,
+synchronize)` (internal `transfer_detail.h`) sits behind the source seam —
+transfer.cpp (cudaMemcpyAsync with explicit kinds, null handle resolved to
+`DefaultStream(destination-relevant device)`, sync via cudaStreamSynchronize) vs
+transfer_stub.cpp (Unimplemented). **ADR-002 Amendment 3: `tensor → cuda`**
+(PRIVATE; public headers stay toolkit-free, only stream_handle.h is included) —
+the null-handle contract needs cuda's process-wide DefaultStream (a tensor-local
+stream would fork FIFO ordering) and the §4.2 error table; rule 3's toolkit list
+gains tensor's transfer TU. Tests: `pinned_allocator_test.cpp` (all configs: stub
+taxonomy; CUDA GPU-less: no-device Unavailable; GPU-skipped: 256-alignment +
+host-writability, zero-byte, huge → ResourceExhausted, buffer-outlives-allocator,
+pinned-tensor-is-ordinary-CPU-tensor via fill/item, alignment death tests) +
+`transfer_test.cpp` (all configs: dtype/shape-mismatch + non-contiguous
+InvalidArgument, H2H-with-stream value copy, identical-view no-op, same-device
+same-handle, contiguity-before-fast-path, undefined-handle death tests, CPU-only
+to(cuda) → Unimplemented / CUDA builds out-of-range index → InvalidArgument;
+GPU-skipped acceptance: byte-exact H2D→D2H round-trip across all non-reserved
+dtypes, D2D, cross-stream event ordering, pinned round-trip on a stream,
+to(stream)+event sync, zero-numel, 2-GPU cross-device Unimplemented). CPU-only
+path validated (330 tests green, GPU tests skip); CUDA-side sources await a
+toolkit machine, like M2-T02…T06).
+M2-T08 done (kernel launch infrastructure & first elementwise kernels per
+design §9: `src/kernels/launch.h` — toolkit-free, host-testable
+`LaunchConfig1D(n)` (constexpr; block 256, grid capped at 4096 so the
+grid-stride wrap is testable at ~1M elements, any config semantically
+equivalent; CHECKs n > 0) + the design-verbatim `CUDA_1D_KERNEL_LOOP`;
+`src/kernels/dispatch.h` — `DISPATCH_FLOATING_TYPES(dtype, op, alias,
+body...)` binding a caller-named alias (nesting for cast's src×dst) to the
+device type (fp32/fp16/bf16 → float/__half/__nv_bfloat16), other dtypes →
+Unimplemented naming the op; an **internal toolkit-including header**
+(cuda_check.h precedent — §9.1 refined); `src/kernels/elementwise.h` —
+public toolkit-free launchers `add`/`mul`/`scale` (double scalar, narrowed
+to float host-side)/`cast` ({fp32,fp16,bf16}² incl. the same-dtype
+diagonal), enqueue-only, null handle → device default stream, dst
+pre-allocated, exact-alias dst well-defined for the same-dtype kernels
+(cast aliasing UB). Structure mirrors the M2-T07 transfer split (§9.2
+refined): validation + numel==0 guard in always-compiled elementwise.cpp —
+order shape → dtype → contiguity → device so every rejection is testable
+with CPU tensors on CPU-only CI, non-CUDA operands → InvalidArgument on
+every build — with only the launches behind the `elementwise_detail.h`
+seam (elementwise.cu: ScopedSetDevice, resolve stream, widen-to-float
+grid-stride kernels, `cudaGetLastError` after every launch, never syncs;
+vs elementwise_stub.cpp: Unimplemented, unreachable through supported
+factories); placeholder kernels.cu/kernels.cpp anchors deleted;
+engine_kernels now links tensor PUBLIC + cuda PRIVATE (the ADR-002 edges,
+no amendment). Tests: `elementwise_test.cpp` (all configs:
+LaunchConfig1D constexpr static_asserts + golden table + death tests,
+full validation matrix incl. Unimplemented dtype taxonomy and
+undefined-handle deaths; GPU-skipped: each kernel vs a widen-to-float CPU
+reference via allclose per-dtype defaults across sizes
+{1, 255, 256, 257, 4096·256+7} × {fp32, fp16, bf16}, cast vs ops::cast
+bit-exact for all 9 pairs, null-handle default-stream path, dst-aliasing,
+mixed-device InvalidArgument, zero-numel OK) + `dispatch_test.cu` (CUDA
+builds, GPU-less: alias binding per dtype, Unimplemented default naming
+the op, body-Status propagation). CPU-only path validated (351 tests
+green, GPU tests skip); CUDA-side sources await a toolkit machine, like
+M2-T02…T07).
+M2-T09 done (GPU test infrastructure per design §10: `tests/common/cuda.h`
+gains `CudaTestFixture` — SetUp skips without a device (never fails),
+selects device 0 via `ScopedSetDevice`, provides a per-test `CudaStream`
+(`stream()`/`stream_handle()`) and per-test `CachingAllocator` over
+`DefaultCudaAllocator(0)` (`allocator()`); members are `std::optional`s
+engaged only past the skip guard so the TU compiles and skips cleanly on
+every configuration; TearDown syncs the stream then destroys the pool
+(§6.4/§7.4 order) — and free `ExpectTensorsClose(actual, expected,
+CudaStream&, rtol, atol)` — stream sync → D2H → `ops::allclose` with the
+per-dtype defaults, failures carry `Summary()`; takes `CudaStream&` not
+`StreamHandle` so tests/common stays toolkit-free (null-handle tests pass
+`DefaultStream(0)`); `engine_test_common` now links cuda/memory/tensor
+PUBLIC. **`gpu` ctest label** via a naming contract — suites deriving the
+fixture are `*GpuTest`/`*GpuDeathTest` — and dual `gtest_discover_tests`
+calls per target with complementary `TEST_FILTER`s; the GPU set gets the
+single label `<tree>-gpu` (not a `<tree>;gpu` list — the module flattens
+list-valued PROPERTIES at the CMake 3.26 floor; `-L` is a regex so
+`-L gpu` and `-L unit` both match; zero-match filters register nothing,
+without error). All 57 inline GPU tests across 12 TUs migrated onto
+fixture-derived suites (elementwise's `RunAndCompare` became a fixture
+member over `stream()`/`allocator()`/`ExpectTensorsClose`; stream/event/
+allocator suites derive the fixture for skip+device only, their subjects
+stay locally built; `PinnedCpuAllocatorTest.CreateWithoutDeviceIsUnavailable`
+deliberately stays unlabeled — it runs GPU-less). New
+`cuda_fixture_test.cpp` self-tests (fixture members, round-trip accept,
+`EXPECT_NONFATAL_FAILURE` mismatch report, pool-served tensors);
+`tests/README.md` gains the GPU section (naming contract, 5-step
+CPU-reference kernel-test recipe, tolerance stance, what-runs-where);
+dormant `.github/workflows/gpu-ci.yml` (workflow_dispatch-only,
+self-hosted `gpu` runner label, CUDA auto-detect Release build + full
+ctest + `-L gpu -N` listing, activation steps in-file); design §10 gained
+the M2-T09 refinement note. CPU-only path validated (fixture suites skip;
+labels verified via `ctest -N`); CUDA-side execution awaits a toolkit
+machine, like M2-T02…T08. **Milestone 2 complete.**
+Post-M2 hardening done (2026-08-04, audit follow-up; details in ROADMAP):
+fixed `stream.cpp` event factories calling `CudaEvent`'s private ctor from
+a free function (compile error on the first CUDA build; now a private
+static `CudaEvent::Create`) and the `ElapsedMs` taxonomy escape (a
+never-recorded `Timing()` event passed the completion pre-check then hit
+`cudaErrorInvalidResourceHandle` → opaque `kInternal`; events now track
+ever-recorded and pre-check it → `FailedPrecondition`, GPU-tested);
+`scripts/check-tidy.sh` no-arg sweep now skips TUs with no
+compile-database entry (CUDA-only `.cpp` sources on CPU-only builds were
+analyzed with guessed flags and failed on `<cuda_runtime.h>` — would have
+turned CI red; explicit args without an entry are rejected, an
+everything-filtered run fails); `transfer.cpp` clears the CUDA last-error
+slot on failure (allocator convention); cast GPU test runs the full size
+sweep incl. the grid-stride wrap; docs synced (phantom `cuda →
+tensor_base` link removed from design §2.1 + ADR-002 dated correction,
+`device_count()` memoize-on-failure and anon-namespace-`__global__`
+refinements recorded, `cuda.cu` anchor comment re-scoped, README sweep
+step fixed, load-bearing comments added: UVA pointer-compare, deleter
+error-slot clear, launch-error misattribution stance, skip-macro
+dangling-else); stale untracked placeholder leftovers deleted. Standing
+caveat: no CUDA toolkit has ever compiled/run the CUDA side — first GPU
+machine session must run full ctest incl. `-L gpu` before M3 builds on it.
+Next up: **M3-T01** (design doc: model loading & tokenization).

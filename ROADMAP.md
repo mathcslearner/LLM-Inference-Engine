@@ -272,7 +272,7 @@ correctness-vs-CPU testing pattern.
 
 **Architecture documents:** `docs/design/cuda-backend.md` (M2-T01).
 
-### M2-T01 · Design doc: CUDA backend
+### M2-T01 · Design doc: CUDA backend — ✅ DONE (2026-08-04)
 Write `docs/design/cuda-backend.md`: stream model (which streams exist, who owns
 them), error-handling strategy (CUDA errors → `Status`), allocator strategy (naive vs
 caching pool, stream-ordered semantics), kernel source organization (`src/kernels/`
@@ -283,7 +283,7 @@ layout, header/impl split, dispatch conventions), supported architectures
 - Doc answers: how does a CUDA error inside a kernel surface to the caller? Who synchronizes and when? How do tests assert kernel correctness?
 - Reviewed against ADR-002 module rules (kernels may not depend on scheduler/runtime).
 
-### M2-T02 · CMake CUDA integration
+### M2-T02 · CMake CUDA integration — ✅ DONE (2026-08-04)
 Enable CUDA as a first-class language behind an `ENGINE_ENABLE_CUDA` option (default
 ON, auto-detect). Set `CMAKE_CUDA_ARCHITECTURES` (80;86;89;90), C++20 for device code,
 and make the CPU-only build (CI) compile cleanly with all CUDA targets excluded.
@@ -292,7 +292,7 @@ and make the CPU-only build (CI) compile cleanly with all CUDA targets excluded.
 - With CUDA toolkit present: `.cu` files compile into `src/cuda/` and `src/kernels/` targets.
 - With `ENGINE_ENABLE_CUDA=OFF` (or no toolkit): full build + tests pass; `Device::kCUDA` operations return `Unimplemented`.
 
-### M2-T03 · CUDA error handling & device utilities
+### M2-T03 · CUDA error handling & device utilities — ✅ DONE (2026-08-04)
 `src/cuda/cuda_utils.h`: `CUDA_CHECK` (fatal) and `CUDA_RETURN_IF_ERROR` (→ `Status`)
 macros capturing file/line and error string; device introspection (`device_count()`,
 `DeviceProperties` with name, SM count, memory, compute capability); `ScopedSetDevice`
@@ -302,7 +302,7 @@ RAII.
 - GPU test: querying properties of device 0 returns sane values; deliberately bad call surfaces a `Status` with the CUDA error string embedded.
 - Tests are skipped (not failed) on machines without a GPU, via a shared test predicate.
 
-### M2-T04 · Stream & event wrappers
+### M2-T04 · Stream & event wrappers — ✅ DONE (2026-08-04)
 `src/cuda/stream.h`: RAII `CudaStream` (non-blocking), `CudaEvent` (timing and
 sync variants), `record/wait/synchronize/elapsed_ms`, and a per-device default stream
 accessor.
@@ -310,7 +310,7 @@ accessor.
 **Acceptance criteria:**
 - GPU tests: event ordering across two streams via `stream_wait_event`, elapsed time of a known-duration workload > 0, destruction order safety (event outliving stream misuse is documented).
 
-### M2-T05 · CUDA device allocator (naive)
+### M2-T05 · CUDA device allocator (naive) — ✅ DONE (2026-08-04)
 `CudaAllocator` implementing the M1-T05 `Allocator` interface over
 `cudaMalloc`/`cudaFree`, device-tagged `Buffer`s, and `Tensor::empty` support for
 `Device::kCUDA`.
@@ -318,7 +318,7 @@ accessor.
 **Acceptance criteria:**
 - GPU tests: allocate/free cycles leak-free (`cudaMemGetInfo` delta check), device tensors report correct device, huge-allocation failure returns `ResourceExhausted` (not crash).
 
-### M2-T06 · Caching pool allocator
+### M2-T06 · Caching pool allocator — ✅ DONE (2026-08-04)
 `src/memory/caching_allocator.h`: a caching allocator over the naive one — size-class
 binning, free-list reuse, stats (`bytes_allocated`, `bytes_reserved`, hit/miss
 counts), `release_cached()`. This is the memory-pooling foundation for the whole
@@ -328,7 +328,7 @@ engine.
 - GPU tests: alloc→free→alloc of same size reuses the block (no cudaMalloc call — verified via stats), stats accurate through a scripted sequence, `release_cached()` returns memory to the driver.
 - Concurrent allocation from multiple threads is safe (stress test).
 
-### M2-T07 · Pinned memory & host↔device transfer
+### M2-T07 · Pinned memory & host↔device transfer — ✅ DONE (2026-08-04)
 `PinnedCpuAllocator` for page-locked host memory; `copy(dst, src, stream)` supporting
 H2D/D2H/D2D async transfers; `Tensor::to(device, stream)` returning a new tensor.
 **Depends on:** M2-T06.
@@ -336,7 +336,7 @@ H2D/D2H/D2D async transfers; `Tensor::to(device, stream)` returning a new tensor
 - GPU tests: round-trip H2D→D2H preserves bytes for every dtype; async copy on a stream + event sync semantics verified; pinned round-trip works.
 - Copy between mismatched shapes/dtypes returns `InvalidArgument`.
 
-### M2-T08 · Kernel launch infrastructure & first elementwise kernels
+### M2-T08 · Kernel launch infrastructure & first elementwise kernels — ✅ DONE (2026-08-04)
 `src/kernels/`: launch-config helpers (grid/block calculation, `CUDA_1D_KERNEL_LOOP`),
 a dtype-dispatch macro (`DISPATCH_FLOATING_TYPES`), and elementwise kernels: `add`,
 `mul`, `scale`, and `cast` (fp32↔fp16↔bf16) operating on contiguous tensors.
@@ -345,7 +345,7 @@ a dtype-dispatch macro (`DISPATCH_FLOATING_TYPES`), and elementwise kernels: `ad
 - GPU tests: each kernel matches the CPU implementation via `allclose` across shapes (including non-multiple-of-blockDim sizes) and dtypes.
 - Kernels validate inputs (shape/dtype/device match) and return `Status` on violation.
 
-### M2-T09 · GPU test infrastructure
+### M2-T09 · GPU test infrastructure — ✅ DONE (2026-08-04)
 Shared `CudaTestFixture` (skips without GPU, sets device, provides stream +
 allocator), `expect_tensors_close(gpu_tensor, cpu_reference)` helper that handles the
 D2H copy, and documentation of the kernel-testing pattern in `tests/README.md`. Add an
@@ -354,6 +354,42 @@ optional CI workflow file for a self-hosted/manual GPU runner (may stay dormant)
 **Acceptance criteria:**
 - Existing GPU tests are migrated to the fixture; running the suite on a no-GPU machine reports skips, not failures.
 - `tests/README.md` documents how to write a kernel test (CPU-reference pattern).
+
+### Post-M2 hardening — ✅ DONE (2026-08-04)
+Audit-driven fixes before M3, in one change. Bugs: `stream.cpp`'s event
+factories routed through an anonymous-namespace free function calling
+`CudaEvent`'s private constructor — a guaranteed compile error on the first
+CUDA-enabled build (now a private static `CudaEvent::Create`);
+`CudaEvent::ElapsedMs` on a never-recorded `Timing()` event escaped the
+misuse taxonomy as an opaque `kInternal` (never-recorded counts complete
+for `Query()`, then `cudaEventElapsedTime` rejects the handle) — events now
+track whether `Record()` ever succeeded and `ElapsedMs` pre-checks it →
+`FailedPrecondition`, with a GPU test. Tooling: the no-arg
+`scripts/check-tidy.sh` sweep analyzed CUDA-only `.cpp` TUs that have no
+compile-database entry on a CPU-only build (clang-tidy guessed flags,
+failed on `<cuda_runtime.h>`, and would have turned CI red); it now skips
+TUs absent from the compile database (listing them), rejects explicit
+arguments without an entry, and fails if the filter drops everything.
+Consistency: `transfer.cpp` now clears the latched CUDA last-error slot on
+failure like both allocators (design §9.2's post-launch check must not
+inherit stale errors). Tests: the cast GPU test now runs the full size
+sweep (1 through the >1M grid-stride wrap) instead of one odd size. Docs
+synced to code: removed the phantom `cuda → tensor_base` link from design
+§2.1 and (as a dated correction) ADR-002 Amendment 2/3, recorded the
+`device_count()` memoize-on-failure and anonymous-namespace-`__global__`
+(nvcc rejects `static` on kernel templates) refinements, re-scoped the
+`cuda.cu` anchor's stated lifetime (M2-T08's kernels landed in `kernels`),
+fixed `tests/README.md`'s sweep-shapes step (0 is its own test), and added
+load-bearing comments (UVA assumption in `ops::copy`'s identical-view
+check, deleters' unconditional error-slot clear, post-launch
+`cudaGetLastError` misattribution stance, `ENGINE_SKIP_WITHOUT_CUDA`
+dangling-else hazard). Removed stale untracked leftovers of deleted
+placeholder anchors (`src/{core,cuda,kernels,memory}/<module>.cpp`,
+`docs/{adr,design}/.gitkeep`). Standing caveat, unchanged by this pass:
+every GPU-only acceptance criterion in M2 is still validated by inspection
+only — no CUDA toolkit has ever compiled or run this code; the first
+session on a GPU machine must run the full suite (`ctest` incl. `-L gpu`)
+before M3 work builds on it.
 
 ---
 
