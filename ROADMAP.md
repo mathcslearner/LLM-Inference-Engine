@@ -336,7 +336,7 @@ H2D/D2H/D2D async transfers; `Tensor::to(device, stream)` returning a new tensor
 - GPU tests: round-trip H2D→D2H preserves bytes for every dtype; async copy on a stream + event sync semantics verified; pinned round-trip works.
 - Copy between mismatched shapes/dtypes returns `InvalidArgument`.
 
-### M2-T08 · Kernel launch infrastructure & first elementwise kernels
+### M2-T08 · Kernel launch infrastructure & first elementwise kernels — ✅ DONE (2026-08-04)
 `src/kernels/`: launch-config helpers (grid/block calculation, `CUDA_1D_KERNEL_LOOP`),
 a dtype-dispatch macro (`DISPATCH_FLOATING_TYPES`), and elementwise kernels: `add`,
 `mul`, `scale`, and `cast` (fp32↔fp16↔bf16) operating on contiguous tensors.

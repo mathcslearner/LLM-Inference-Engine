@@ -503,4 +503,40 @@ dtypes, D2D, cross-stream event ordering, pinned round-trip on a stream,
 to(stream)+event sync, zero-numel, 2-GPU cross-device Unimplemented). CPU-only
 path validated (330 tests green, GPU tests skip); CUDA-side sources await a
 toolkit machine, like M2-T02…T06).
-Next up: **M2-T08** (kernel launch infrastructure & first elementwise kernels).
+M2-T08 done (kernel launch infrastructure & first elementwise kernels per
+design §9: `src/kernels/launch.h` — toolkit-free, host-testable
+`LaunchConfig1D(n)` (constexpr; block 256, grid capped at 4096 so the
+grid-stride wrap is testable at ~1M elements, any config semantically
+equivalent; CHECKs n > 0) + the design-verbatim `CUDA_1D_KERNEL_LOOP`;
+`src/kernels/dispatch.h` — `DISPATCH_FLOATING_TYPES(dtype, op, alias,
+body...)` binding a caller-named alias (nesting for cast's src×dst) to the
+device type (fp32/fp16/bf16 → float/__half/__nv_bfloat16), other dtypes →
+Unimplemented naming the op; an **internal toolkit-including header**
+(cuda_check.h precedent — §9.1 refined); `src/kernels/elementwise.h` —
+public toolkit-free launchers `add`/`mul`/`scale` (double scalar, narrowed
+to float host-side)/`cast` ({fp32,fp16,bf16}² incl. the same-dtype
+diagonal), enqueue-only, null handle → device default stream, dst
+pre-allocated, exact-alias dst well-defined for the same-dtype kernels
+(cast aliasing UB). Structure mirrors the M2-T07 transfer split (§9.2
+refined): validation + numel==0 guard in always-compiled elementwise.cpp —
+order shape → dtype → contiguity → device so every rejection is testable
+with CPU tensors on CPU-only CI, non-CUDA operands → InvalidArgument on
+every build — with only the launches behind the `elementwise_detail.h`
+seam (elementwise.cu: ScopedSetDevice, resolve stream, widen-to-float
+grid-stride kernels, `cudaGetLastError` after every launch, never syncs;
+vs elementwise_stub.cpp: Unimplemented, unreachable through supported
+factories); placeholder kernels.cu/kernels.cpp anchors deleted;
+engine_kernels now links tensor PUBLIC + cuda PRIVATE (the ADR-002 edges,
+no amendment). Tests: `elementwise_test.cpp` (all configs:
+LaunchConfig1D constexpr static_asserts + golden table + death tests,
+full validation matrix incl. Unimplemented dtype taxonomy and
+undefined-handle deaths; GPU-skipped: each kernel vs a widen-to-float CPU
+reference via allclose per-dtype defaults across sizes
+{1, 255, 256, 257, 4096·256+7} × {fp32, fp16, bf16}, cast vs ops::cast
+bit-exact for all 9 pairs, null-handle default-stream path, dst-aliasing,
+mixed-device InvalidArgument, zero-numel OK) + `dispatch_test.cu` (CUDA
+builds, GPU-less: alias binding per dtype, Unimplemented default naming
+the op, body-Status propagation). CPU-only path validated (351 tests
+green, GPU tests skip); CUDA-side sources await a toolkit machine, like
+M2-T02…T07).
+Next up: **M2-T09** (GPU test infrastructure).

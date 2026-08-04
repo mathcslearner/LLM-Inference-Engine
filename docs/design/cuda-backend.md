@@ -869,6 +869,26 @@ DISPATCH_FLOATING_TYPES(tensor.dtype(), "add", [&] { … launch<scalar_t>(…); 
   kernels are floating-only; `cast` on GPU covers fp32↔fp16↔bf16 per the
   ticket, integer casts stay CPU-only until needed).
 
+*Refined in M2-T08 (implementation):*
+
+- **`dispatch.h` is an internal, toolkit-including header** (the
+  `cuda_check.h` precedent, §2.2) — binding `scalar_t` to the device type
+  inherently names `__half`/`__nv_bfloat16`, so it is includable only from
+  CUDA-compiled TUs. The sketch above didn't classify it; the public
+  surface remains `<area>.h` only.
+- The macro signature gained two mechanical parameters:
+  `DISPATCH_FLOATING_TYPES(dtype, op_name, alias, body...)`. The bound
+  alias name is caller-chosen so `cast`'s src×dst dispatch can nest without
+  shadowing, and the body is a trailing variadic so top-level commas in the
+  lambda don't split macro arguments. Unsupported dtypes uniformly return
+  `Unimplemented` naming the op (the §9.2 policy; no call site wants
+  `InvalidArgument` yet).
+- `launch.h` constants: block 256 (`kDefaultBlockSize`), grid cap 4096
+  (`kMaxGridBlocks`). The cap is deliberately small so the grid-stride wrap
+  path is testable at ~1M elements; any value is semantically equivalent.
+  `LaunchConfig1D` CHECKs `n > 0` — the numel()==0 guard lives in the
+  launcher (§9.2), so a zero grid can never be requested.
+
 ### 9.2 Launcher contract
 
 Every host-side launcher, uniformly:
@@ -885,6 +905,29 @@ Every host-side launcher, uniformly:
 
 `numel() == 0` is valid and returns OK without launching (grid of 0 is an
 error in CUDA; the guard lives in the launcher, once).
+
+*Refined in M2-T08 (implementation):* steps 1 and the numel guard live in
+an **always-compiled** `elementwise.cpp`, with only the toolkit-touching
+steps 2–5 behind an internal seam (`elementwise_detail.h`, implemented by
+`elementwise.cu` on CUDA builds and `elementwise_stub.cpp` on CPU-only
+builds) — the same split M2-T07 made for transfers, and for the same
+reason: the "validate inputs and return Status" acceptance criterion runs
+on CPU-only CI. Two consequences, both tested:
+
+- Validation order is shape → dtype → contiguity → device, so every
+  data-driven rejection is exercisable with CPU tensors on any build.
+- Non-CUDA operands are `InvalidArgument` on **every** build (the device
+  check precedes the seam); the stub's "built without CUDA" `Unimplemented`
+  is unreachable through supported factories, exactly like the transfer
+  stub (§8.1).
+
+Aliasing, decided per-kernel here: for the same-dtype kernels
+(add/mul/scale) a dst *identical* to an input is well-defined — element i
+depends only on the inputs' element i. Partial overlap, and any dst/src
+aliasing for `cast` (element widths differ), are undefined behavior
+(ops::copy's memcpy rule). `cast` accepts the same-dtype diagonal (a device
+deep copy); `scale`'s double scalar is narrowed to float once, host-side,
+since per-element math is float anyway (§9.3).
 
 ### 9.3 Device half types
 

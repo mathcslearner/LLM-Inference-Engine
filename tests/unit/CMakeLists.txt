@@ -73,3 +73,20 @@ engine_add_tests(TREE unit SOURCES
   pinned_allocator_test.cpp
   transfer_test.cpp
   DEPS engine::tensor engine::cuda)
+
+# M2-T08: compiles on every configuration — the LaunchConfig1D goldens and
+# the launcher validation contract (always-compiled elementwise.cpp) run
+# everywhere; the kernel-vs-CPU-reference acceptance tests skip without a
+# device. engine::cuda supplies CudaStream for the GPU tests.
+engine_add_tests(TREE unit SOURCES
+  elementwise_test.cpp
+  DEPS engine::kernels engine::cuda)
+
+# Only buildable on CUDA builds: dispatch_test.cu includes
+# kernels/dispatch.h and therefore the CUDA toolkit (it runs without a GPU —
+# the macro's switch and Unimplemented default are pure host code).
+if(ENGINE_ENABLE_CUDA)
+  engine_add_tests(TREE unit SOURCES
+    dispatch_test.cu
+    DEPS engine::kernels)
+endif()
