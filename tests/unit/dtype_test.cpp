@@ -124,11 +124,15 @@ TEST(DTypeDeathTest, ItemsizeOnSubByteDtypeAborts) {
 }
 
 TEST(DTypeDeathTest, ItemsizeBitsOnInvalidValueAborts) {
+  // The out-of-range cast is deliberate: this test exists to pin the CHECK
+  // on values outside the enum.
+  // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
   EXPECT_DEATH((void)itemsize_bits(static_cast<DataType>(42)),
                "invalid DataType value 42");
 }
 
 TEST(DTypeDeathTest, ToStringOnInvalidValueAborts) {
+  // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
   EXPECT_DEATH((void)to_string(static_cast<DataType>(42)),
                "invalid DataType value 42");
 }

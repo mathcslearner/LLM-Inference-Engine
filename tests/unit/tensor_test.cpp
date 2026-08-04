@@ -293,8 +293,8 @@ TEST(TensorTest, SliceEmptyRange) {
   EXPECT_EQ(s.numel(), 0);
   // A zero-numel view of a non-empty tensor keeps a non-null pointer (base
   // plus offset); data() is null only for zero-sized buffers (tensor.h).
-  EXPECT_EQ(s.byte_offset(), 2U * 3U * sizeof(float));
-  EXPECT_EQ(s.data(), t.data_ptr<float>() + (2 * 3));
+  EXPECT_EQ(s.byte_offset(), 6U * sizeof(float));  // two skipped rows of 3
+  EXPECT_EQ(s.data(), t.data_ptr<float>() + 6);
 }
 
 TEST(TensorTest, SliceFullRangeIsIdentityMetadata) {

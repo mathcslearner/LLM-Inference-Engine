@@ -153,6 +153,9 @@ TEST(DeviceDeathTest, NegativeIndexAborts) {
 }
 
 TEST(DeviceDeathTest, ToStringOnInvalidDeviceTypeAborts) {
+  // The out-of-range cast is deliberate: this test exists to pin the CHECK
+  // on values outside the enum.
+  // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
   EXPECT_DEATH((void)to_string(static_cast<DeviceType>(9)),
                "invalid DeviceType value 9");
 }
