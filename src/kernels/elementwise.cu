@@ -7,6 +7,13 @@
 // (§9.1). Elementwise math widens each element to float and re-narrows to
 // the tensor dtype (§9.3); the device conversion intrinsics round to
 // nearest-even, matching the half.h host policy.
+//
+// The mandatory post-launch cudaGetLastError (§9.2) reads *and clears* the
+// thread's last-error slot, so an unharvested error latched by earlier
+// unrelated work would be misattributed to this launch. Accepted: every
+// engine call site harvests its errors immediately (the allocators and
+// transfers even clear the slot on their own failures), and anything that
+// slips through is sticky/terminal by policy anyway (§4.3).
 
 #include "core/status.h"
 #include "cuda/cuda_check.h"

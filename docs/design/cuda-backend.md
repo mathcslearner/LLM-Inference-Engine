@@ -78,9 +78,11 @@ Reviewed against the layer-1 edge list. Originally concluded "no amendment
 needed"; **M2-T05 implementation proved that wrong** — see the second
 bullet. ADR-002 Amendment 2 records the fix.
 
-- `cuda → core` (Status, logging): `cuda` links `engine::core` and
-  `engine::tensor_base` directly (the latter reachable: `tensor_base` may be
-  linked by anything that may link `tensor`, ADR-002 Amendment 1). The
+- `cuda → core` (Status, logging): `cuda` links `engine::core` directly.
+  (*Corrected post-M2:* this section — and ADR-002 Amendment 2 — originally
+  also claimed a direct `engine::tensor_base` link, but nothing in
+  `src/cuda/` uses tensor types and the link never existed in CMake. It
+  remains *allowed* per Amendment 1 should `cuda` ever need `Device`.) The
   originally listed `cuda → memory` edge was never used and is removed by
   Amendment 2.
 - `memory`'s CUDA allocators: ADR-002 rule 3 already names `memory` as one
@@ -334,9 +336,10 @@ class ScopedSetDevice { … };
 }  // namespace engine::cuda
 ```
 
-`device_count()` memoizes after first successful enumeration (device count
-does not change mid-process); it is the foundation of the test skip
-predicate (§10.1).
+`device_count()` memoizes its first enumeration — success *or* failure (a
+failed probe memoizes as zero devices; the count does not change
+mid-process, and a process whose first enumeration failed stays GPU-less).
+It is the foundation of the test skip predicate (§10.1).
 
 ### 5.2 Where `Device{kCUDA, i}` is finally validated
 
@@ -434,6 +437,13 @@ Lifetime rules (documented on the classes, tested in M2-T04):
 - **Never-recorded events count as complete** (CUDA semantics, documented
   on the members): `Query()` → true, `Synchronize()` → immediate success,
   and `WaitEvent` on one is a no-op.
+- *Refined post-M2 (hardening audit):* the two rules above interact badly
+  in `ElapsedMs` — a never-recorded event passes the completion pre-check
+  (it "counts as complete") and then `cudaEventElapsedTime` fails with
+  `cudaErrorInvalidResourceHandle` → the opaque `kInternal` the taxonomy
+  exists to prevent. `CudaEvent` therefore tracks whether `Record()` ever
+  succeeded, and `ElapsedMs` pre-checks it: a never-recorded argument →
+  `FailedPrecondition`, before the completion check.
 
 ### 6.3 The per-device default stream, and the opaque handle
 
@@ -841,7 +851,9 @@ The pattern every kernel milestone follows:
   host launcher declarations taking `Tensor`s and a `StreamHandle`.
   Consumers (`engine`, tests) include only these.
 - **`src/kernels/<area>.cu`** — `__global__` kernels + launcher
-  definitions. Kernels are `static` (internal linkage) unless shared;
+  definitions. Kernels get internal linkage via an anonymous namespace
+  (not `static` — nvcc rejects `static` on `__global__` function
+  templates) unless shared;
   cross-`.cu` sharing goes through an internal `detail/` header, not
   extern device symbols (separable compilation stays off, §3).
 - **`src/kernels/launch.h`** (internal, safe for host TUs) — launch-config

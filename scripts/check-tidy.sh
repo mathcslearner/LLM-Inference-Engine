@@ -11,9 +11,14 @@
 #   .clang-tidy analyzes them through it.
 #
 # Needs a compile database; configures ${ENGINE_BUILD_DIR:-build} if missing
-# (CMAKE_EXPORT_COMPILE_COMMANDS is ON project-wide). CUDA TUs (*.cu) are
-# excluded until the CUDA toolchain lands in M2 — clang-tidy needs the CUDA
-# headers from the compile database to parse them.
+# (CMAKE_EXPORT_COMPILE_COMMANDS is ON project-wide). Two exclusions follow
+# from it. CUDA TUs (*.cu) are never analyzed — clang-tidy needs the CUDA
+# headers a CUDA compile-database entry would supply to parse them. And any
+# TU without an entry in the configured build is skipped (no-arg mode) or
+# rejected (explicit-arg mode): without its real compile command clang-tidy
+# guesses flags and emits spurious diagnostics — e.g. the CUDA-only .cpp
+# sources behind the source-list seams, whose <cuda_runtime.h> includes
+# cannot even resolve on a CPU-only configuration.
 set -euo pipefail
 
 invocation_dir="$PWD"
@@ -54,6 +59,32 @@ if [[ ! -f "${build_dir}/compile_commands.json" ]]; then
   cmake -B "$build_dir" -DCMAKE_BUILD_TYPE=Release
 fi
 
+# Absolute source paths the configured build actually compiles, one per
+# line (a temp file + grep -Fxq lookup: macOS ships bash 3.2, so no
+# associative arrays). CMake writes exactly one "file" key per entry; the
+# BRE stays BSD-sed-compatible.
+db_paths="$(mktemp)"
+trap 'rm -f "$db_paths"' EXIT
+sed -n 's/^[[:space:]]*"file": "\(.*\)",\{0,1\}$/\1/p' \
+  "${build_dir}/compile_commands.json" >"$db_paths"
+
+in_compile_db() {
+  grep -Fxq "$1" "$db_paths"
+}
+
+if ((${#targets[@]} > 0)); then
+  for path in "${targets[@]}"; do
+    if ! in_compile_db "$path"; then
+      echo "error: ${path} has no compile-database entry in ${build_dir}." >&2
+      echo "  The configured build does not compile it (e.g. a CUDA-only" >&2
+      echo "  source on a CPU-only configuration); clang-tidy would guess" >&2
+      echo "  compile flags and emit spurious diagnostics. Configure a" >&2
+      echo "  build that compiles this TU, or pass one it does compile." >&2
+      exit 1
+    fi
+  done
+fi
+
 extra_args=()
 if [[ "$(uname -s)" == "Darwin" ]]; then
   # Homebrew clang-tidy does not know the Xcode SDK location; without this it
@@ -71,15 +102,37 @@ else
 fi
 
 # NUL-delimited TU list for xargs -0: the explicit arguments if given,
-# otherwise every project TU. engine_project_files scopes the full listing
-# to project source dirs (tracked plus untracked, minus .gitignore'd) — new
-# TUs are analyzed before they are staged, and non-project trees like the CI
-# FetchContent dir never are.
+# otherwise every project TU with a compile-database entry.
+# engine_project_files scopes the full listing to project source dirs
+# (tracked plus untracked, minus .gitignore'd) — new TUs are analyzed
+# before they are staged, and non-project trees like the CI FetchContent
+# dir never are. Skipped TUs are listed on stderr so a shrinking analysis
+# surface stays visible; if the filter drops *everything*, the database
+# does not match this checkout (wrong ENGINE_BUILD_DIR?) and the run
+# fails rather than trivially passing.
 list_targets() {
   if ((${#targets[@]} > 0)); then
     printf '%s\0' "${targets[@]}"
-  else
-    engine_project_files cc cpp cxx
+    return 0
+  fi
+  local file
+  local emitted=0
+  local skipped=()
+  while IFS= read -r -d '' file; do
+    if in_compile_db "${repo_root}/${file}"; then
+      printf '%s\0' "$file"
+      emitted=$((emitted + 1))
+    else
+      skipped+=("$file")
+    fi
+  done < <(engine_project_files cc cpp cxx)
+  if ((${#skipped[@]} > 0)); then
+    echo "note: ${#skipped[@]} TU(s) have no compile-database entry in this configuration; skipped:" >&2
+    printf '  %s\n' "${skipped[@]}" >&2
+  fi
+  if ((emitted == 0)); then
+    echo "error: no project TU has a compile-database entry in ${build_dir}." >&2
+    return 1
   fi
 }
 

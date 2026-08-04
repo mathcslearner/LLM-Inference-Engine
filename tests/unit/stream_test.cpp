@@ -22,6 +22,7 @@
 
 namespace {
 
+using engine::core::IsFailedPrecondition;
 using engine::core::IsInvalidArgument;
 using engine::core::StatusOr;
 using engine::cuda::CudaEvent;
@@ -185,6 +186,32 @@ TEST_F(CudaEventGpuTest, ElapsedMsRejectsSyncEvents) {
   const StatusOr<float> elapsed = CudaEvent::ElapsedMs(*timing, *sync);
   ASSERT_FALSE(elapsed.ok());
   EXPECT_TRUE(IsInvalidArgument(elapsed.status())) << elapsed.status();
+}
+
+// A never-recorded Timing() event counts as complete for Query() (CUDA
+// semantics, tested above), so without its own pre-check it would sail
+// through the completion check and make cudaEventElapsedTime fail with
+// cudaErrorInvalidResourceHandle → opaque kInternal. The taxonomy demands
+// FailedPrecondition instead.
+TEST_F(CudaEventGpuTest, ElapsedMsOfNeverRecordedEventIsFailedPrecondition) {
+  StatusOr<CudaEvent> start = CudaEvent::Timing();
+  ASSERT_TRUE(start.ok()) << start.status();
+  StatusOr<CudaEvent> stop = CudaEvent::Timing();
+  ASSERT_TRUE(stop.ok()) << stop.status();
+
+  const StatusOr<float> elapsed = CudaEvent::ElapsedMs(*start, *stop);
+  ASSERT_FALSE(elapsed.ok());
+  EXPECT_TRUE(IsFailedPrecondition(elapsed.status())) << elapsed.status();
+
+  // Recording only one of the pair is still FailedPrecondition.
+  StatusOr<CudaStream> stream = CudaStream::Create();
+  ASSERT_TRUE(stream.ok()) << stream.status();
+  ASSERT_TRUE(start->Record(*stream).ok());
+  ASSERT_TRUE(start->Synchronize().ok());
+  const StatusOr<float> half_recorded = CudaEvent::ElapsedMs(*start, *stop);
+  ASSERT_FALSE(half_recorded.ok());
+  EXPECT_TRUE(IsFailedPrecondition(half_recorded.status()))
+      << half_recorded.status();
 }
 
 TEST_F(CudaEventGpuDeathTest, MovedFromMembersCheck) {

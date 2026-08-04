@@ -51,6 +51,10 @@ void FreeOnDevice(int device_index, void* ptr) {
               device_index, cudaGetErrorName(err), cudaGetErrorString(err));
   }
   // Do not leave a pending error for an unrelated later launch-error check.
+  // Deliberately unconditional — it also swallows an error some earlier
+  // caller latched and never harvested, which is acceptable because the
+  // engine's convention is to harvest immediately (§9.2's post-launch
+  // check, the allocators' and transfers' clear-on-failure).
   (void)cudaGetLastError();
   if (have_previous) {
     (void)cudaSetDevice(previous);

@@ -98,8 +98,10 @@ values — it computes them with the CPU implementation:
 4. Compare with `engine::testing::ExpectTensorsClose(gpu_out, cpu_expected,
    stream())`: it synchronizes the stream, copies the result to the host,
    and runs `ops::allclose` — failures print the worst-mismatch report.
-5. Sweep shapes: 0, 1, a block multiple, a non-multiple, and more than one
-   grid's worth (so the grid-stride wrap path runs). See
+5. Sweep sizes: 1, a block multiple, a non-multiple, and more than one
+   grid's worth (so the grid-stride wrap path runs). Cover zero-numel in
+   its own test — launchers return OK without launching on an empty
+   tensor, so it needs no reference comparison. See
    `elementwise_test.cpp` for the canonical example.
 
 Tolerances are stated at the comparison site: `ExpectTensorsClose` defaults

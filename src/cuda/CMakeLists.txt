@@ -2,7 +2,8 @@
 # (docs/design/cuda-backend.md §2.2): CUDA builds compile the CUDA-touching
 # sources, CPU-only builds compile stub .cpp sources with the same symbols.
 # cuda.cu stays as a device-code anchor proving the pinned architectures
-# compile (M2-T02) until real .cu sources land (M2-T08).
+# compile (M2-T02) until this module gains a real .cu source (M2-T08's
+# kernels landed in `kernels`, not here).
 if(ENGINE_ENABLE_CUDA)
   set(ENGINE_CUDA_SOURCES cuda_utils.cpp stream.cpp cuda.cu)
 else()

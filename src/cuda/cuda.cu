@@ -1,7 +1,9 @@
 // Device-code anchor: proves .cu sources compile with the pinned
-// architectures, device C++20, and device warning flags (M2-T02). The
-// module's real sources are host .cpp so far (cuda_utils.cpp); this anchor
-// stays until real .cu sources land (M2-T08, see ROADMAP.md).
+// architectures, device C++20, and device warning flags (M2-T02). M2-T08's
+// real .cu sources landed in `kernels`, not here — this module's real
+// sources are still host .cpp — so the anchor stays until *this module*
+// gains a real .cu source (likely with the cuBLAS/graph work, see
+// ROADMAP.md).
 namespace engine::cuda {
 namespace {
 

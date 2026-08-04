@@ -90,6 +90,11 @@ void ExpectTensorsClose(const tensor::Tensor& actual,
 
 // In a fixture SetUp or test body: skip the test on machines where GPU work
 // is impossible (no device, no driver, or a CPU-only build).
+//
+// Deliberately a bare `if` (the usual gtest macro shape): GTEST_SKIP's
+// `return` must run in the *caller's* frame, so a do-while(0) wrapper
+// would not change behavior — but as with all such macros, don't use it
+// as the `if` branch of an outer if/else (the `else` would mis-bind).
 #define ENGINE_SKIP_WITHOUT_CUDA()              \
   if (!::engine::testing::HasCudaDevice()) {    \
     GTEST_SKIP() << "no CUDA device available"; \

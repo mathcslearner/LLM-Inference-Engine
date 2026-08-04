@@ -151,8 +151,11 @@ rather than growing a cycle:
   stay toolkit-free (cuda-backend design §2.2); only its CUDA-build `.cpp`
   files include `cuda` headers.
 
-`cuda` keeps its `core` and `tensor_base` links (the latter reachable per
-Amendment 1). No link or include cycle exists. Rationale and details:
+`cuda` keeps its `core` link. (*Correction 2026-08-04:* this amendment
+originally also said `cuda` keeps a `tensor_base` link — reachable per
+Amendment 1 — but nothing in `src/cuda/` uses tensor types and that link
+never existed in CMake; it remains allowed, just unused.) No link or
+include cycle exists. Rationale and details:
 `docs/design/cuda-backend.md` §2.1.
 
 ### Amendment 3 (2026-08-04, with M2-T07): `tensor → cuda`
@@ -189,6 +192,6 @@ So the edge is added rather than worked around:
 Consequence: every module above `tensor` now (transitively) may link the
 `cuda` module — in practice already true via `memory → cuda`, and harmless
 because both edges are PRIVATE and header-hygiene keeps the toolkit out of
-public surfaces. `cuda` links nothing from `tensor` (only `tensor_base`), so
-no cycle exists. Rationale and details: `docs/design/cuda-backend.md` §2.1
+public surfaces. `cuda` links nothing from `tensor` (nor, in practice,
+`tensor_base` — see the Amendment 2 correction), so no cycle exists. Rationale and details: `docs/design/cuda-backend.md` §2.1
 (refined in M2-T07) and §8.

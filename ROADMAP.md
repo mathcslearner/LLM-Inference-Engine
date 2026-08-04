@@ -355,6 +355,42 @@ optional CI workflow file for a self-hosted/manual GPU runner (may stay dormant)
 - Existing GPU tests are migrated to the fixture; running the suite on a no-GPU machine reports skips, not failures.
 - `tests/README.md` documents how to write a kernel test (CPU-reference pattern).
 
+### Post-M2 hardening — ✅ DONE (2026-08-04)
+Audit-driven fixes before M3, in one change. Bugs: `stream.cpp`'s event
+factories routed through an anonymous-namespace free function calling
+`CudaEvent`'s private constructor — a guaranteed compile error on the first
+CUDA-enabled build (now a private static `CudaEvent::Create`);
+`CudaEvent::ElapsedMs` on a never-recorded `Timing()` event escaped the
+misuse taxonomy as an opaque `kInternal` (never-recorded counts complete
+for `Query()`, then `cudaEventElapsedTime` rejects the handle) — events now
+track whether `Record()` ever succeeded and `ElapsedMs` pre-checks it →
+`FailedPrecondition`, with a GPU test. Tooling: the no-arg
+`scripts/check-tidy.sh` sweep analyzed CUDA-only `.cpp` TUs that have no
+compile-database entry on a CPU-only build (clang-tidy guessed flags,
+failed on `<cuda_runtime.h>`, and would have turned CI red); it now skips
+TUs absent from the compile database (listing them), rejects explicit
+arguments without an entry, and fails if the filter drops everything.
+Consistency: `transfer.cpp` now clears the latched CUDA last-error slot on
+failure like both allocators (design §9.2's post-launch check must not
+inherit stale errors). Tests: the cast GPU test now runs the full size
+sweep (1 through the >1M grid-stride wrap) instead of one odd size. Docs
+synced to code: removed the phantom `cuda → tensor_base` link from design
+§2.1 and (as a dated correction) ADR-002 Amendment 2/3, recorded the
+`device_count()` memoize-on-failure and anonymous-namespace-`__global__`
+(nvcc rejects `static` on kernel templates) refinements, re-scoped the
+`cuda.cu` anchor's stated lifetime (M2-T08's kernels landed in `kernels`),
+fixed `tests/README.md`'s sweep-shapes step (0 is its own test), and added
+load-bearing comments (UVA assumption in `ops::copy`'s identical-view
+check, deleters' unconditional error-slot clear, post-launch
+`cudaGetLastError` misattribution stance, `ENGINE_SKIP_WITHOUT_CUDA`
+dangling-else hazard). Removed stale untracked leftovers of deleted
+placeholder anchors (`src/{core,cuda,kernels,memory}/<module>.cpp`,
+`docs/{adr,design}/.gitkeep`). Standing caveat, unchanged by this pass:
+every GPU-only acceptance criterion in M2 is still validated by inspection
+only — no CUDA toolkit has ever compiled or run this code; the first
+session on a GPU machine must run the full suite (`ctest` incl. `-L gpu`)
+before M3 work builds on it.
+
 ---
 
 ## Milestone 3 — Model Loading & Tokenization

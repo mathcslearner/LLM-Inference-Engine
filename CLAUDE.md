@@ -573,4 +573,26 @@ ctest + `-L gpu -N` listing, activation steps in-file); design §10 gained
 the M2-T09 refinement note. CPU-only path validated (fixture suites skip;
 labels verified via `ctest -N`); CUDA-side execution awaits a toolkit
 machine, like M2-T02…T08. **Milestone 2 complete.**
+Post-M2 hardening done (2026-08-04, audit follow-up; details in ROADMAP):
+fixed `stream.cpp` event factories calling `CudaEvent`'s private ctor from
+a free function (compile error on the first CUDA build; now a private
+static `CudaEvent::Create`) and the `ElapsedMs` taxonomy escape (a
+never-recorded `Timing()` event passed the completion pre-check then hit
+`cudaErrorInvalidResourceHandle` → opaque `kInternal`; events now track
+ever-recorded and pre-check it → `FailedPrecondition`, GPU-tested);
+`scripts/check-tidy.sh` no-arg sweep now skips TUs with no
+compile-database entry (CUDA-only `.cpp` sources on CPU-only builds were
+analyzed with guessed flags and failed on `<cuda_runtime.h>` — would have
+turned CI red; explicit args without an entry are rejected, an
+everything-filtered run fails); `transfer.cpp` clears the CUDA last-error
+slot on failure (allocator convention); cast GPU test runs the full size
+sweep incl. the grid-stride wrap; docs synced (phantom `cuda →
+tensor_base` link removed from design §2.1 + ADR-002 dated correction,
+`device_count()` memoize-on-failure and anon-namespace-`__global__`
+refinements recorded, `cuda.cu` anchor comment re-scoped, README sweep
+step fixed, load-bearing comments added: UVA pointer-compare, deleter
+error-slot clear, launch-error misattribution stance, skip-macro
+dangling-else); stale untracked placeholder leftovers deleted. Standing
+caveat: no CUDA toolkit has ever compiled/run the CUDA side — first GPU
+machine session must run full ctest incl. `-L gpu` before M3 builds on it.
 Next up: **M3-T01** (design doc: model loading & tokenization).

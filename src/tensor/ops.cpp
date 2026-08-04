@@ -550,7 +550,10 @@ Status copy(const Tensor& dst, const Tensor& src, cuda::StreamHandle stream) {
     return OkStatus();
   }
   // Equal pointers with matching shape/dtype and contiguity means identical
-  // views: a no-op (and a self-memcpy on the device would be UB).
+  // views: a no-op (and a self-memcpy on the device would be UB). Comparing
+  // a host pointer with a device pointer here is sound because CUDA's
+  // unified virtual addressing (all 64-bit platforms we target) guarantees
+  // host and device allocations occupy disjoint address ranges.
   if (dst.data() == src.data()) {
     return OkStatus();
   }

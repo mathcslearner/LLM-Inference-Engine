@@ -53,23 +53,18 @@ core::Status CudaStream::WaitEvent(const CudaEvent& event) {
   return core::OkStatus();
 }
 
-namespace {
-
-[[nodiscard]] core::StatusOr<CudaEvent> CreateEvent(unsigned int flags,
-                                                    bool timing) {
+core::StatusOr<CudaEvent> CudaEvent::Create(unsigned int flags, bool timing) {
   cudaEvent_t event = nullptr;
   CUDA_RETURN_IF_ERROR(cudaEventCreateWithFlags(&event, flags));
   return CudaEvent(event, timing);
 }
 
-}  // namespace
-
 core::StatusOr<CudaEvent> CudaEvent::Timing() {
-  return CreateEvent(cudaEventDefault, /*timing=*/true);
+  return Create(cudaEventDefault, /*timing=*/true);
 }
 
 core::StatusOr<CudaEvent> CudaEvent::Sync() {
-  return CreateEvent(cudaEventDisableTiming, /*timing=*/false);
+  return Create(cudaEventDisableTiming, /*timing=*/false);
 }
 
 void CudaEvent::Destroy() noexcept {
@@ -86,6 +81,7 @@ void CudaEvent::Destroy() noexcept {
 core::Status CudaEvent::Record(const CudaStream& stream) {
   CHECK(event_ != nullptr, "Record() on a moved-from CudaEvent");
   CUDA_RETURN_IF_ERROR(cudaEventRecord(event_, stream.get()));
+  recorded_ = true;
   return core::OkStatus();
 }
 
@@ -114,6 +110,17 @@ core::StatusOr<float> CudaEvent::ElapsedMs(const CudaEvent& start,
         "ElapsedMs requires Timing() events, got start: {}, stop: {}",
         start.is_timing() ? "Timing" : "Sync",
         stop.is_timing() ? "Timing" : "Sync");
+  }
+  // Pre-check that both events were ever recorded: a never-recorded event
+  // counts as complete for Query()/WaitEvent() (CUDA semantics), so it
+  // would pass the completion pre-check below and then make
+  // cudaEventElapsedTime fail with cudaErrorInvalidResourceHandle → an
+  // opaque kInternal, the exact escape this taxonomy exists to prevent.
+  if (!start.recorded_ || !stop.recorded_) {
+    return core::FailedPreconditionError(
+        "ElapsedMs: event never recorded (start recorded: {}, stop "
+        "recorded: {})",
+        start.recorded_, stop.recorded_);
   }
   // Pre-check completion so the caller sees FailedPrecondition rather than
   // cudaErrorNotReady mapped to an opaque kInternal (design §4.2 table).

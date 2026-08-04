@@ -39,6 +39,7 @@ void FreePinned(void* ptr) {
               cudaGetErrorName(err), cudaGetErrorString(err));
   }
   // Do not leave a pending error for an unrelated later launch-error check.
+  // Deliberately unconditional; see the matching note in cuda_allocator.cpp.
   (void)cudaGetLastError();
 }
 

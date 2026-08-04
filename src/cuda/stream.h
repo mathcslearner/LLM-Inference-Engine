@@ -120,13 +120,16 @@ class CudaEvent {
   CudaEvent& operator=(const CudaEvent&) = delete;
 
   CudaEvent(CudaEvent&& other) noexcept
-      : event_(std::exchange(other.event_, nullptr)), timing_(other.timing_) {}
+      : event_(std::exchange(other.event_, nullptr)),
+        timing_(other.timing_),
+        recorded_(other.recorded_) {}
 
   CudaEvent& operator=(CudaEvent&& other) noexcept {
     if (this != &other) {
       Destroy();
       event_ = std::exchange(other.event_, nullptr);
       timing_ = other.timing_;
+      recorded_ = other.recorded_;
     }
     return *this;
   }
@@ -145,9 +148,12 @@ class CudaEvent {
   [[nodiscard]] core::StatusOr<bool> Query() const;
 
   // Milliseconds between the two events' completed records. Both events
-  // must be Timing() flavor (else InvalidArgument) and completed (else
-  // FailedPrecondition — pre-checked so cudaErrorNotReady never surfaces as
-  // an opaque kInternal).
+  // must be Timing() flavor (else InvalidArgument), recorded at least once,
+  // and completed (else FailedPrecondition). Both conditions are
+  // pre-checked so no misuse reaches cudaEventElapsedTime and surfaces as
+  // an opaque kInternal: an incomplete record would return
+  // cudaErrorNotReady, and a never-recorded event — which Query() counts as
+  // complete — would return cudaErrorInvalidResourceHandle.
   [[nodiscard]] static core::StatusOr<float> ElapsedMs(const CudaEvent& start,
                                                        const CudaEvent& stop);
 
@@ -166,11 +172,22 @@ class CudaEvent {
  private:
   CudaEvent(CUevent_st* event, bool timing) : event_(event), timing_(timing) {}
 
+  // Shared body of the Timing()/Sync() factories. A member (not a free
+  // function in stream.cpp) because it needs this private constructor;
+  // `flags` is a cudaEventCreateWithFlags flag set, spelled unsigned int to
+  // keep this header toolkit-free.
+  [[nodiscard]] static core::StatusOr<CudaEvent> Create(unsigned int flags,
+                                                        bool timing);
+
   // Synchronizes and destroys the event if engaged; disengages.
   void Destroy() noexcept;
 
   CUevent_st* event_ = nullptr;
   bool timing_ = false;
+  // Whether Record() has ever succeeded on this event. Distinguishes
+  // "never recorded" (Query() reports complete, but cudaEventElapsedTime
+  // would reject the event) from "recorded and completed" in ElapsedMs.
+  bool recorded_ = false;
 };
 
 // The engine default stream for `device_index`: engine-owned, lazily

@@ -341,25 +341,32 @@ TEST_F(ElementwiseGpuTest, ScaleMatchesCpuReferenceAcrossShapesAndDtypes) {
 }
 
 TEST_F(ElementwiseGpuTest, CastMatchesCpuCastForAllFloatingPairs) {
-  const Shape shape({4099});  // non-multiple of the block size
+  // CastKernel is a distinct template from the binary/unary kernels, so it
+  // gets the same size sweep — including size 1 and the grid-stride wrap —
+  // not just one odd size.
   for (const DataType src_dtype : kKernelDtypes) {
     for (const DataType dst_dtype : kKernelDtypes) {
-      SCOPED_TRACE(testing::Message()
-                   << to_string(src_dtype) << " -> " << to_string(dst_dtype));
-      const Tensor src = MakeCpu(shape, src_dtype, 600);
-      const Tensor expected = ops::cast(src, dst_dtype).value();
-      const Tensor src_gpu = src.to(Device::Cuda(0)).value();
-      const Tensor dst =
-          Tensor::empty(shape, dst_dtype, Device::Cuda(0), allocator()).value();
-      const Status status =
-          engine::kernels::cast(dst, src_gpu, stream_handle());
-      ASSERT_TRUE(status.ok()) << status.ToString();
-      // Exact tolerances: kernel and ops::cast both widen to float and
-      // narrow round-to-nearest-even (§9.3 / half.h), so every pair —
-      // including the same-dtype deep copy — must agree bit-for-bit on
-      // these fill_uniform values (finite, no signaling-NaN quieting
-      // involved).
-      ExpectTensorsClose(dst, expected, stream(), 0.0, 0.0);
+      for (const std::int64_t n : kSizeSweep) {
+        SCOPED_TRACE(testing::Message() << to_string(src_dtype) << " -> "
+                                        << to_string(dst_dtype) << ", n " << n);
+        const Shape shape({n});
+        const Tensor src =
+            MakeCpu(shape, src_dtype, static_cast<std::uint64_t>(600 + n));
+        const Tensor expected = ops::cast(src, dst_dtype).value();
+        const Tensor src_gpu = src.to(Device::Cuda(0)).value();
+        const Tensor dst =
+            Tensor::empty(shape, dst_dtype, Device::Cuda(0), allocator())
+                .value();
+        const Status status =
+            engine::kernels::cast(dst, src_gpu, stream_handle());
+        ASSERT_TRUE(status.ok()) << status.ToString();
+        // Exact tolerances: kernel and ops::cast both widen to float and
+        // narrow round-to-nearest-even (§9.3 / half.h), so every pair —
+        // including the same-dtype deep copy — must agree bit-for-bit on
+        // these fill_uniform values (finite, no signaling-NaN quieting
+        // involved).
+        ExpectTensorsClose(dst, expected, stream(), 0.0, 0.0);
+      }
     }
   }
 }

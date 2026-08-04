@@ -15,6 +15,8 @@
 #include "tensor/tensor.h"
 #include "tensor/transfer_detail.h"
 
+#include <fmt/format.h>
+
 #include <cuda_runtime.h>
 
 #include <cstddef>
@@ -41,10 +43,25 @@ core::Status DeviceCopy(const Tensor& dst, const Tensor& src,
                               : stream.get();
   const std::size_t bytes = static_cast<std::size_t>(dst.numel()) *
                             static_cast<std::size_t>(itemsize(dst.dtype()));
-  CUDA_RETURN_IF_ERROR(
-      cudaMemcpyAsync(dst.data(), src.data(), bytes, kind, resolved));
+  // On failure, clear the latched last-error slot before returning — the
+  // allocator convention (cuda_allocator.cpp, M2-T05 refinement): a
+  // non-sticky failure left in the slot would be misattributed by the next
+  // kernel launcher's mandatory cudaGetLastError (design §9.2). Sticky
+  // errors re-latch on every call, so clearing loses nothing for them.
+  if (const cudaError_t err =
+          cudaMemcpyAsync(dst.data(), src.data(), bytes, kind, resolved);
+      err != cudaSuccess) {
+    (void)cudaGetLastError();
+    return cuda::ToStatus(
+        err, fmt::format("cudaMemcpyAsync of {} bytes ({} -> {})", bytes,
+                         src.device().ToString(), dst.device().ToString()));
+  }
   if (synchronize) {
-    CUDA_RETURN_IF_ERROR(cudaStreamSynchronize(resolved));
+    if (const cudaError_t err = cudaStreamSynchronize(resolved);
+        err != cudaSuccess) {
+      (void)cudaGetLastError();
+      return cuda::ToStatus(err, "cudaStreamSynchronize after transfer");
+    }
   }
   return core::OkStatus();
 }
