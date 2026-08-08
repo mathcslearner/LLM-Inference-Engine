@@ -151,12 +151,11 @@ C++ until the CLT is reinstalled.
 
 ## Current status
 
-**History (pre-pivot):** M0 (foundation & tooling), M1 (CPU tensor library),
-and M2 (CUDA backend) were built and audited as a CUDA engine, 2026-08-03/04;
-on 2026-08-07 the project pivoted to CPU-first (ADR-004) because no CUDA
-hardware ever compiled or ran the device code. Details:
-`docs/archive/ROADMAP-v1.md`, `docs/design/retired/cuda-backend.md`, git
-history.
+**History (pre-pivot):** M0 (foundation), M1 (CPU tensor library), and M2
+(CUDA backend) were built as a CUDA engine (2026-08-03/04); on 2026-08-07
+the project pivoted to CPU-first (ADR-004) — no CUDA hardware ever compiled
+the device code. Details: `docs/archive/ROADMAP-v1.md`,
+`docs/design/retired/cuda-backend.md`, git history.
 
 What survives from M0–M2 and remains load-bearing: the build/test/CI/tooling
 discipline (M0), the complete tensor library — dtypes incl. reserved
@@ -178,5 +177,97 @@ kernel infrastructure, `cmake/cuda.cmake` + the `ENGINE_ENABLE_CUDA` option,
 placeholder anchor; test harness gpu-label machinery removed —
 285 tests, all green; `engine_project_files` now skips deleted-but-unstaged
 ghosts).
-Next up: **M3-T03** (design doc: CPU backend — threading model, SIMD dispatch
-strategy, dtype policy, kernel validation methodology).
+M3-T03 done (2026-08-07: `docs/design/cpu-backend.md` — threading model
+(persistent pool at physical cores, deterministic static partitioning,
+fixed-tree `parallel_reduce`, no nested parallelism, OpenMP rejected with
+rationale); SIMD dispatch (runtime `SelectedIsa()` over scalar/NEON/AVX2,
+per-ISA TUs with per-TU flags, `ENGINE_FORCE_ISA` fatal on bad values,
+kernel-table registry + add-a-kernel recipe); dtype policy (fp32
+accumulation, half.h-exact conversions, F16C folded into the AVX2 gate);
+validation methodology (oracle chain re-rooted on `src/cpu/`, platform
+matrix answering how ISAs absent from CI are proven, numerics classes E/R/T
+incl. the fixed 16-lane Class-R convention); alignment/weight-layout
+conventions; CI additions (forced-scalar ctest pass, TSAN job for
+`parallel`, macOS arm64 CI job decided *against* — private-repo 10× minute
+multiplier — with revisit triggers). Flagged: `cpu → parallel` will need an
+ADR-002 amendment at M5-T02).
+M3-T04 done (2026-08-07: `src/parallel/` — `ThreadPool` (persistent
+fixed-size pool, condvar-parked workers, static round-robin chunk
+assignment, one region in flight, caller executes no chunks),
+`DefaultPool()` sized by `ENGINE_NUM_THREADS` (non-numeric fatal, <1 clamps;
+design doc §3.1 note) else `physical_core_count()` (sysctl/sysfs, SMT
+collapsed); `parallel_for` with (n, grain)-only static partitioning and
+inline path when num_chunks <= 1; `parallel_reduce` with chunk-id-indexed
+cache-line-padded partials + fixed pairwise halving fold — bit-identical at
+thread counts {1,2,8}, tested against an independent serial tree; nesting
+CHECK via thread_local flag; `FunctionRef` spelled as const std::function&
+for v1. Build/CI: `ENGINE_SANITIZE=thread` CMake option (global flags so
+gtest is instrumented too), new `tsan` CI job running `ctest -L parallel`
+(clang Debug), `engine_add_tests` gained LABELS. 309 tests green incl. 24
+new `parallel`-labeled; TSAN-clean locally).
+M3-T05 done (2026-08-07: `src/kernels/` SIMD dispatch — `Isa` enum +
+`SelectedIsa()` (memoized once per process; arm64 → NEON unconditionally,
+x86-64 → AVX2 iff cpuid AVX2+FMA+F16C+AVX+OSXSAVE and xgetbv confirms YMM
+state, else scalar), `KernelTable<Fn>`/`Select` registry with silent
+per-kernel scalar fallback for null slots (+ explicit-ISA overload for
+tests), `ENGINE_FORCE_ISA={scalar,neon,avx2}` fatal on unknown/unavailable
+values via testable `detail::ResolveIsa` seam; `DispatchProbe()` probe
+kernel instantiating the per-ISA TU layout (`scalar|neon|avx2/probe.cpp`,
+arch-guarded `internal/probe_impl.h`); CMake: PUBLIC `ENGINE_ARCH_ARM64`/
+`ENGINE_ARCH_X86_64` from `CMAKE_SYSTEM_PROCESSOR`, per-ISA sources with
+per-source `-mavx2;-mfma;-mf16c` (never target-wide), placeholder anchor
+removed; `engine_add_tests` gained `SCALAR_PASS` (same binary re-registered
+as `<tree>-scalar/` with `ENGINE_FORCE_ISA=scalar`, label `scalar`) —
+design doc §4.2/§8.1 implementation notes added. 337 tests green
+(dispatch suite runs twice: NEON + forced-scalar)).
+M3-T06 done (2026-08-08: first vectorized kernels — `src/kernels/`
+`elementwise.h` (AddF32/MulF32/ScaleF32), `reduce.h` (SumF32/MaxF32,
+`kReduceGrain` exposed as part of the bit-exact spec), `convert.h`
+(fp16/bf16 ↔ fp32 on `tensor::float16`/`bfloat16` pointers), each with
+scalar+NEON+AVX2 variants in per-ISA TUs behind KernelTables, threaded via
+`DefaultPool()` `parallel_for`/`parallel_reduce` (variants are
+single-threaded chunk bodies). Numerics decisions recorded as design-doc §5
+/ §6.3 implementation notes: vector fp16 conversions blend NaN lanes rebuilt
+with half.h's integer ops (hardware FCVT/F16C quiets every SNaN — verified
+on M2 — where half.h preserves surviving payloads); Class-R sum lanes
+initialize to +0.0f (spec'd; all-(-0) sums are +0) and the grain is part of
+the spec; MaxF32 ±0 ties sharpened to total-order -0 < +0 (NEON FMAX
+native, AVX2 cmp-eq/AND blend, scalar signbit tie-break; NaN-free
+precondition documented for both reductions). Tests: 23 new tests × both
+ISA passes — size sweep {0,1,15,16,17,4096,2^20+3} × offsets {0..3}
+bit-compared against the scalar variants, independent serial
+re-implementation of the full sum spec (33-chunk odd-carry case),
+exhaustive 2^16-pattern widening and narrowing round-trips, half.h probe
+goldens incl. SNaN payload classes, aliasing/no-op/death cases — 383 tests
+green. `benchmarks/` scaffold: `kernels_bench` (hand-rolled best-of-N,
+`ENGINE_BUILD_BENCHMARKS` option) + first `BASELINES.md` entry — M2 NEON
+vs scalar: fp16 conversions 4.06×/2.86× (≥2× advisory target met),
+sum/max 6.7×/8.0×, memory-bound ops ~1×).
+M3 audit fixes done (2026-08-08: post-milestone audit of M3 against its
+acceptance criteria, fixes in one change. Kernels: `detail::<Kernel>Variant
+(Isa)` test seams + per-suite wiring asserts pin every vector table slot by
+pointer identity, closing the silent-scalar-fallback vacuous-pass hole;
+ENGINE_FORCE_ISA failure modes now exercised end-to-end via two `sh -c`
+ctest registrations asserting the fatal message (CTest fails signal-deaths
+even under PASS_REGULAR_EXPRESSION, hence the shell wrapper); convert sweep
+gained the 2^20+3 size and output-side offsets (was input-only, capped at
+4096). Parallel: `ThreadPool::Run` CHECKs the region flag (was a silent
+self-deadlock; flag moved to `thread_pool.h` detail), body/combine
+exceptions terminate via noexcept frames on the inline path too (was
+propagate-vs-terminate depending on n vs grain), `parallel_reduce`'s slot
+allocation converts bad_alloc to CHECK (ADR-003), `ReferenceTreeSum`
+rewritten structurally independent (fresh-vector rounds vs in-place fold),
++2 death tests. Hygiene: `is_standard_layout` static_asserts in half.h
+(convert.cpp's comment now true), FPCR.FZ16 precondition documented in
+neon/convert.cpp, dispatch.h "fatal at startup" corrected to lazy
+first-dispatch. Docs: CUDA-era leftovers purged from living surfaces —
+dependencies.md toolkit/NCCL exemption retired, tensor.md "until M2"
+phrasings + broken cuda-backend link fixed, ROADMAP future-directions paths
+repointed to archive/retired, scripts' C++/CUDA wording and `cu cuh` globs
+dropped, check-tidy's stale example replaced; M3-T02's removed-test
+enumeration recorded as a ROADMAP audit note; CLAUDE.md history trimmed to
+5 lines; design doc §3.4 + §4.2 audit implementation notes added. 393 tests
+green. Known gap, deliberately not closed here: the milestone3 branch has
+no CI run yet, so the AVX2 TUs have never been compiled and the TSAN job
+has never executed — push before treating M3 as fully validated).
+Next up: **M4-T01** (design doc: model loading & tokenization).

@@ -4,6 +4,10 @@
 #   format      — scripts/check-format.sh with the pinned clang-format (LLVM 20).
 #   build-test  — GCC + Clang × Debug + Release: configure, build, ctest.
 #   tidy        — scripts/check-tidy.sh with the pinned clang-tidy (LLVM 20).
+#   tsan        — Clang Debug with ENGINE_SANITIZE=thread, running the
+#                 `parallel`-labeled tests (M3-T04; design:
+#                 docs/design/cpu-backend.md §8.2). Scoped by label because
+#                 TSAN's 5–15× slowdown is spent where the threads are.
 #   ci          — aggregate gate. Branch protection requires this one check,
 #                 so the matrix can change without touching repository settings.
 #
@@ -136,11 +140,57 @@ jobs:
       - name: Run clang-tidy
         run: scripts/check-tidy.sh
 
+  tsan:
+    name: tsan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ninja and ccache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build ccache
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-tsan-${{ github.sha }}
+          restore-keys: |
+            ccache-tsan-
+      # Separate deps key: the tree holds compiled artifacts, and TSAN
+      # instrumentation must cover third-party code too (GoogleTest), so it
+      # cannot share the uninstrumented builds' caches.
+      - name: Restore dependencies
+        uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-tsan-${{ hashFiles('cmake/dependencies.cmake') }}
+      - name: Configure
+        run: |
+          ccache -z
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DENGINE_SANITIZE=thread \
+            -DFETCHCONTENT_BASE_DIR="${{ github.workspace }}/.deps"
+      - name: Build
+        run: cmake --build build
+      - name: Test (parallel suites under TSAN)
+        run: ctest --test-dir build -L parallel --output-on-failure
+      - name: ccache stats
+        if: always()
+        run: ccache -s
+
   ci:
     name: ci
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: [format, build-test, tidy]
+    needs: [format, build-test, tidy, tsan]
     if: always()
     steps:
       - name: Fail if any required job did not succeed

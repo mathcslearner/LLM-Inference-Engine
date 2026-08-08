@@ -491,7 +491,18 @@ edges retired, rule-3 toolkit list emptied.
 - Removed tests are enumerated in the commit message; surviving test count is stated and every surviving test passes unchanged.
 - ADR-002 amendment records the retirement; the module dependency diagram matches the actual CMake link graph.
 
-### M3-T03 · Design doc: CPU backend
+> **Audit note (2026-08-08):** the excision commit (`ff2b5db`) did not enumerate
+> the removed tests in its message as the second criterion requires; recorded
+> here instead, since `main` history is immutable. Removed test TUs (12):
+> `caching_allocator_cuda_test.cpp`, `cuda_allocator_cuda_test.cpp`,
+> `cuda_allocator_test.cpp`, `cuda_check_test.cpp`, `cuda_fixture_test.cpp`,
+> `cuda_utils_test.cpp`, `dispatch_test.cu`, `elementwise_test.cpp` (the CUDA
+> kernel suite — the name was later reused by M3-T06's CPU suite),
+> `pinned_allocator_test.cpp`, `stream_cuda_test.cu`, `stream_test.cpp`,
+> `transfer_test.cpp` — plus the `tests/common/cuda.*` fixture helpers.
+> 285 tests survived, all passing unchanged.
+
+### M3-T03 · Design doc: CPU backend — ✅ DONE (2026-08-07)
 Write `docs/design/cpu-backend.md`: threading model (persistent pool sized to
 physical cores, `parallel_for` with deterministic static partitioning, reduction
 ordering rules so results are bitwise reproducible at any thread count; OpenMP
@@ -509,7 +520,7 @@ arm64 CI job is added if GitHub runner minutes allow — decided here).
 - Doc answers: how is a kernel proven correct on an ISA the CI runner lacks? Who owns threads (no nested parallelism v1)? How is determinism guaranteed across thread counts?
 - Reviewed against ADR-002 module rules; the `parallel` module's position in the layer diagram is recorded.
 
-### M3-T04 · Thread pool & parallel_for
+### M3-T04 · Thread pool & parallel_for — ✅ DONE (2026-08-07)
 `src/parallel/`: fixed-size worker pool (default: physical core count, configurable),
 `parallel_for(range, body)` with static chunking, and a deterministic
 `parallel_reduce` (fixed tree order independent of thread count). No exceptions
@@ -520,7 +531,7 @@ across the boundary (Status/CHECK policy); no nested parallelism (CHECK-enforced
 - Determinism test: `parallel_reduce` over adversarial fp32 inputs yields bit-identical results at thread counts {1, 2, 8}.
 - TSAN job added to CI for `parallel` tests; stress test (many small parallel_fors from a loop) races clean.
 
-### M3-T05 · SIMD dispatch infrastructure
+### M3-T05 · SIMD dispatch infrastructure — ✅ DONE (2026-08-07)
 `src/kernels/`: CPU feature detection (arm64: NEON baseline; x86-64: cpuid for
 AVX2/FMA), a kernel registry binding per-ISA implementations behind one function
 pointer per kernel, `ENGINE_FORCE_ISA={scalar,neon,avx2}` env override (unknown or
@@ -532,7 +543,7 @@ target-wide arch flags, so illegal-instruction bugs are structurally impossible)
 - Unit tests: dispatch selects the expected ISA per platform; forced-scalar override verified; forcing an ISA the host lacks fails with an actionable error.
 - The registry pattern is documented in the design doc with the recipe for adding a kernel (used by every kernel ticket after this).
 
-### M3-T06 · First vectorized kernels
+### M3-T06 · First vectorized kernels — ✅ DONE (2026-08-08)
 Elementwise `add`/`mul`/`scale`, reductions (`sum`, `max`), and fp16/bf16 ↔ fp32
 conversion kernels in scalar + NEON + AVX2 variants, dispatched per M3-T05,
 threaded per M3-T04 above a size threshold. Scalar variants double as the
@@ -1713,8 +1724,9 @@ doc and milestone breakdown when scheduled:
 - **Metal/MLX backend** — the dev machine's own GPU; the backend seams (reference vs
   optimized, ADR-002 layering) are designed to admit a third implementation.
 - **CUDA backend revival** — the retired M2 foundation plus v1's M5/M11/M13 plans
-  remain in history (`ROADMAP.md`, `docs/design/cuda-backend.md`) as the starting
-  point if NVIDIA hardware enters the picture.
+  remain in history (`docs/archive/ROADMAP-v1.md`,
+  `docs/design/retired/cuda-backend.md`) as the starting point if NVIDIA hardware
+  enters the picture.
 - **AVX-512 / ARM SVE kernel variants** — the per-ISA TU pattern (M3-T05) makes new
   ISAs additive.
 - **Structured/guided decoding** — JSON-schema/grammar-constrained generation (logit

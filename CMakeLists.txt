@@ -28,6 +28,22 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(ENGINE_BUILD_TESTS "Build unit and integration tests" ON)
+option(ENGINE_BUILD_BENCHMARKS "Build microbenchmarks" ON)
+
+# Sanitizer instrumentation (M3-T04; design: docs/design/cpu-backend.md §8.2).
+# Applied globally — compile and link, third-party included — on purpose:
+# under TSAN, mixing instrumented and uninstrumented code produces false
+# positives, so GoogleTest must be instrumented too. That is why this is not
+# on engine_warnings (which is scoped to project targets only). Must be set
+# before dependencies are added so the FetchContent targets pick it up.
+set(ENGINE_SANITIZE "" CACHE STRING "Sanitizer instrumentation (\"\" or \"thread\")")
+if(ENGINE_SANITIZE STREQUAL "thread")
+  add_compile_options(-fsanitize=thread -g)
+  add_link_options(-fsanitize=thread)
+elseif(NOT ENGINE_SANITIZE STREQUAL "")
+  message(FATAL_ERROR
+    "Unknown ENGINE_SANITIZE value \"${ENGINE_SANITIZE}\" (supported: \"\", \"thread\")")
+endif()
 
 # Third-party dependencies (pinned; policy in docs/dependencies.md).
 include(cmake/dependencies.cmake)
@@ -56,4 +72,8 @@ add_subdirectory(src)
 if(ENGINE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(ENGINE_BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks)
 endif()

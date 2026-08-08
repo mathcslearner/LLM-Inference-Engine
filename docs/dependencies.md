@@ -2,9 +2,8 @@
 
 All dependencies are fetched at configure time by CMake `FetchContent` from
 [`cmake/dependencies.cmake`](../cmake/dependencies.cmake). A clean clone builds
-with nothing installed beyond the compiler toolchain (and, from M2 on, the CUDA
-toolkit). There are no `find_package` fallbacks: every build uses exactly the
-pinned versions below.
+with nothing installed beyond the compiler toolchain. There are no
+`find_package` fallbacks: every build uses exactly the pinned versions below.
 
 ## Current dependencies
 
@@ -24,8 +23,9 @@ SHA256 hashes. The versions above must stay in sync with that file.
    `URL_HASH SHA256=…`. Git tags are not acceptable pins on their own — they
    can be moved; a hash cannot.
 2. **No system libraries.** Nothing may rely on a system-installed package
-   beyond the compiler toolchain and the CUDA toolkit/NCCL (which are treated
-   as toolchain components). No `find_package` fallback paths.
+   beyond the compiler toolchain. No `find_package` fallback paths. (The
+   CUDA toolkit/NCCL exemption this rule once carried was retired with the
+   CPU-first pivot — ADR-004, ADR-002 Amendment 4.)
 3. **Permissive licenses only** (MIT / BSD / Apache-2.0 class). Record the
    license in the table above. No copyleft in the engine or anything it links.
 4. **Warnings stay ours.** Declare every dependency `SYSTEM` so the project
@@ -33,8 +33,8 @@ SHA256 hashes. The versions above must stay in sync with that file.
    targets must never link `engine_warnings`.
 5. **Justify it here.** Every dependency gets a row in the table: version,
    license, role, and why it was chosen over alternatives. A dependency with
-   architectural weight (e.g. an HTTP server library, an NCCL alternative)
-   additionally needs an ADR in `docs/adr/`.
+   architectural weight (e.g. an HTTP server library) additionally needs an
+   ADR in `docs/adr/`.
 6. **Upgrades are atomic.** Changing a pin means updating the URL, the SHA256,
    and this document in the same commit, and building + running the full test
    suite before merging.

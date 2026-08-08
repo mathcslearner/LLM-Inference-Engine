@@ -187,6 +187,11 @@ static_assert(sizeof(float16) == 2 && alignof(float16) == 2);
 static_assert(sizeof(bfloat16) == 2 && alignof(bfloat16) == 2);
 static_assert(std::is_trivially_copyable_v<float16> &&
               std::is_trivially_copyable_v<bfloat16>);
+// The conversion kernels (src/kernels/convert.cpp) reinterpret these as raw
+// std::uint16_t arrays; standard layout is what makes the object
+// representations coincide.
+static_assert(std::is_standard_layout_v<float16> &&
+              std::is_standard_layout_v<bfloat16>);
 
 // dtype.h's compile-time mapping (specialized here because dtype.h is also a
 // leaf header and cannot include this one).
