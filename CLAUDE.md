@@ -361,4 +361,35 @@ invisible to arm64-local tidy (x86-64-only block) where const would not
 even compile — suppressed with a reasoned NOLINTBEGIN/END. check-tidy.sh
 header + cpu-backend.md §8 amendment + ci-signal-workflow memory updated;
 423 tests green, format clean, scoped tidy on dispatch.cpp clean).
-Next up: **M4-T04** (safetensors file parser).
+M4-T04 done (2026-08-08: safetensors file parser — `Tensor::from_buffer`
+public factory added to `src/tensor/` (validated front door for wrapping
+external storage as a contiguous view: overflow-checked window bounds →
+InvalidArgument, reserved dtypes → Unimplemented, device from the buffer,
+null buffer CHECK; tensor.md §7 "Extended in M4-T04" note); `src/model/
+mapped_file.h/.cpp` `MapFileReadOnly` (PROT_READ/MAP_PRIVATE mmap wrapped
+as a shared `memory::Buffer` whose deleter munmaps — the file stays mapped
+while any tensor view is alive with no new lifetime machinery; empty file →
+engaged zero-size Buffer; ENOENT → NotFound, non-regular file rejected);
+`src/model/safetensors.h/.cpp` `SafetensorsFile`
+(Open/names/contains/tensor/metadata; little-endian `static_assert`;
+validation per design §3.4 checks 1–5: all framing arithmetic in uint64 +
+256 MiB header cap, exception-free nlohmann parse, entries with exactly
+{dtype, shape, data_offsets}, container dtype table
+F32/F16/BF16/I8/U8/I32/I64/BOOL/F8_E4M3 loaded + F64/I16/U16/U32/U64/
+F8_E5M2 → Unimplemented + unrecognized → InvalidArgument, `end − begin ==
+numel × itemsize` overflow-checked, `begin % itemsize == 0`, sorted cursor
+walk rejecting overlap/gap/uncovered tail — zero-length ranges must sit
+exactly on a boundary; F8_E4M3 entries parse but `tensor()` returns
+Unimplemented via from_buffer's reserved-dtype rule; every error carries
+the file path and tensor name). `engine_model` gained the two TUs and now
+links PUBLIC `engine::tensor` + `engine::memory`. Tests: 36 new —
+from_buffer suite (incl. uint64-overflow windows, zero-size buffers,
+null-buffer death), mapped_file suite (NUL-byte round-trip, directory
+rejection, mapping outlives the original handle), safetensors suite
+(synthetic round-trip, scalar + zero-numel, tensor-free files, tiny-llama
+21-tensor name/shape/dtype spot checks, activations `input_ids` vs
+meta.json ground truth, tensor bytes vs independent ifstream read, lifetime
+test reading through a Tensor after the SafetensorsFile is destroyed, and
+~25 fuzz-ish negatives asserting status code + message names the
+file/tensor/field). 459 tests green; format + scoped tidy clean).
+Next up: **M4-T05** (sharded checkpoint support).

@@ -9,9 +9,12 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <memory>
+#include <string>
 #include <utility>
 
 namespace {
@@ -450,6 +453,114 @@ TEST(TensorTest, ViewAsDtypeReservedIsUnimplemented) {
   EXPECT_TRUE(IsUnimplemented(i8.view_as_dtype(DataType::kInt4).status()));
 }
 
+// --- from_buffer (M4-T04): wrapping externally produced storage ---
+
+// Allocates `count` floats via the default CPU allocator, fills them
+// 0, 1, 2, ... and hands back the shared Buffer a caller would wrap.
+[[nodiscard]] std::shared_ptr<Buffer> MakeFloatBuffer(std::size_t count) {
+  StatusOr<Buffer> buffer = engine::memory::DefaultCpuAllocator()->Allocate(
+      count * sizeof(float), 64);
+  EXPECT_TRUE(buffer.ok()) << buffer.status().ToString();
+  auto shared = std::make_shared<Buffer>(*std::move(buffer));
+  auto* data = static_cast<float*>(shared->data());
+  for (std::size_t i = 0; i < count; ++i) {
+    data[i] = static_cast<float>(i);
+  }
+  return shared;
+}
+
+TEST(TensorFromBufferTest, WrapsStorageAtOffset) {
+  const auto buffer = MakeFloatBuffer(6);
+  const Tensor t =
+      Unwrap(Tensor::from_buffer(buffer, /*byte_offset=*/2 * sizeof(float),
+                                 Shape{2, 2}, DataType::kFloat32));
+  EXPECT_TRUE(t.defined());
+  EXPECT_EQ(t.shape(), (Shape{2, 2}));
+  EXPECT_EQ(t.strides(), (Strides{2, 1}));
+  EXPECT_EQ(t.dtype(), DataType::kFloat32);
+  EXPECT_EQ(t.device(), Device::Cpu());
+  EXPECT_EQ(t.byte_offset(), 2 * sizeof(float));
+  EXPECT_TRUE(t.is_contiguous());
+  EXPECT_EQ(t.data(), static_cast<std::byte*>(buffer->data()) + 8);
+  EXPECT_EQ(t.item<float>({0, 0}), 2.0F);
+  EXPECT_EQ(t.item<float>({1, 1}), 5.0F);
+}
+
+TEST(TensorFromBufferTest, SharesOwnership) {
+  auto buffer = MakeFloatBuffer(4);
+  const Tensor t = Unwrap(Tensor::from_buffer(buffer, /*byte_offset=*/0,
+                                              Shape{4}, DataType::kFloat32));
+  buffer.reset();  // the tensor's handle keeps the storage alive
+  EXPECT_EQ(t.item<float>({3}), 3.0F);
+}
+
+TEST(TensorFromBufferTest, WindowMustFitBuffer) {
+  const auto buffer = MakeFloatBuffer(4);  // 16 bytes
+  // One byte past the end.
+  const StatusOr<Tensor> past = Tensor::from_buffer(
+      buffer, /*byte_offset=*/4, Shape{4}, DataType::kFloat32);
+  ASSERT_FALSE(past.ok());
+  EXPECT_TRUE(IsInvalidArgument(past.status())) << past.status().ToString();
+  EXPECT_NE(past.status().message().find("exceeds buffer size"),
+            std::string::npos)
+      << past.status().ToString();
+  // byte_offset + view size overflowing uint64 must be caught, not wrap.
+  const StatusOr<Tensor> wrap =
+      Tensor::from_buffer(buffer, std::numeric_limits<std::size_t>::max(),
+                          Shape{1}, DataType::kFloat32);
+  ASSERT_FALSE(wrap.ok());
+  EXPECT_TRUE(IsInvalidArgument(wrap.status())) << wrap.status().ToString();
+  // A zero-numel view may sit exactly at the end, but not beyond it.
+  EXPECT_TRUE(Tensor::from_buffer(buffer, /*byte_offset=*/16, Shape{0},
+                                  DataType::kFloat32)
+                  .ok());
+  EXPECT_TRUE(IsInvalidArgument(
+      Tensor::from_buffer(buffer,
+                          /*byte_offset=*/17, Shape{0}, DataType::kFloat32)
+          .status()));
+}
+
+TEST(TensorFromBufferTest, ViewSizeOverflowIsInvalidArgument) {
+  const auto buffer = MakeFloatBuffer(4);
+  // numel is representable in int64, but numel × itemsize overflows uint64.
+  const StatusOr<Tensor> t = Tensor::from_buffer(
+      buffer, /*byte_offset=*/0,
+      Shape{std::numeric_limits<std::int64_t>::max()}, DataType::kFloat32);
+  ASSERT_FALSE(t.ok());
+  EXPECT_TRUE(IsInvalidArgument(t.status())) << t.status().ToString();
+  EXPECT_NE(t.status().message().find("overflows"), std::string::npos)
+      << t.status().ToString();
+}
+
+TEST(TensorFromBufferTest, ReservedDtypesAreUnimplemented) {
+  const auto buffer = MakeFloatBuffer(4);
+  EXPECT_TRUE(IsUnimplemented(
+      Tensor::from_buffer(buffer, 0, Shape{4}, DataType::kFP8E4M3).status()));
+  EXPECT_TRUE(IsUnimplemented(
+      Tensor::from_buffer(buffer, 0, Shape{4}, DataType::kInt4).status()));
+}
+
+TEST(TensorFromBufferTest, ScalarAndZeroNumel) {
+  const auto buffer = MakeFloatBuffer(2);
+  const Tensor scalar = Unwrap(Tensor::from_buffer(
+      buffer, /*byte_offset=*/sizeof(float), Shape{}, DataType::kFloat32));
+  EXPECT_EQ(scalar.shape().rank(), 0);
+  EXPECT_EQ(scalar.numel(), 1);
+  EXPECT_EQ(scalar.item<float>({}), 1.0F);
+
+  // An engaged zero-size buffer wraps as a zero-numel tensor whose data()
+  // is nullptr (the empty() convention).
+  StatusOr<Buffer> zero =
+      engine::memory::DefaultCpuAllocator()->Allocate(0, 64);
+  ASSERT_TRUE(zero.ok()) << zero.status().ToString();
+  const Tensor t = Unwrap(
+      Tensor::from_buffer(std::make_shared<Buffer>(*std::move(zero)),
+                          /*byte_offset=*/0, Shape{0}, DataType::kFloat32));
+  EXPECT_TRUE(t.defined());
+  EXPECT_EQ(t.numel(), 0);
+  EXPECT_EQ(t.data(), nullptr);
+}
+
 // --- Typed access: failure is loud (acceptance criterion) ---
 
 TEST(TensorDeathTest, DataPtrDtypeMismatchAborts) {
@@ -473,6 +584,12 @@ TEST(TensorDeathTest, UndefinedHandleAborts) {
   EXPECT_DEATH((void)t.slice(0, 0, 1), "undefined Tensor");
   EXPECT_DEATH((void)t.reshape(Shape{1}), "undefined Tensor");
   EXPECT_DEATH((void)t.view_as_dtype(DataType::kInt32), "undefined Tensor");
+}
+
+TEST(TensorDeathTest, FromBufferNullBufferAborts) {
+  EXPECT_DEATH(
+      (void)Tensor::from_buffer(nullptr, 0, Shape{1}, DataType::kFloat32),
+      "non-null");
 }
 
 TEST(TensorDeathTest, AllocatorDeviceMismatchAborts) {

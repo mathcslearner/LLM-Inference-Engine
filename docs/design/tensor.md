@@ -542,6 +542,24 @@ implementation):
 - Calling a view op (or `data()`) on an undefined handle is a CHECK,
   following the moved-from contract below.
 
+**Extended in M4-T04** (model-loading.md §3.5): a public factory
+
+```cpp
+[[nodiscard]] static core::StatusOr<Tensor> from_buffer(
+    std::shared_ptr<memory::Buffer> buffer, std::size_t byte_offset,
+    Shape shape, DataType dtype);
+```
+
+wraps existing storage as a contiguous row-major view sharing ownership of
+`buffer` — the general facility for externally produced storage (its first
+consumer is the zero-copy safetensors loader). The buffer-wrapping
+constructor stays private; this is the validated front door: the window
+`[byte_offset, byte_offset + numel×itemsize)` must lie within the buffer
+(`InvalidArgument`, computed overflow-checked in `uint64`), reserved dtypes
+are `Unimplemented` (consistent with `empty`), the device comes from the
+buffer, and a null `buffer` is a CHECK (call-site-authored, like `empty`'s
+allocator/device mismatch).
+
 **Error-handling boundary** (per ADR-003; this table is the contract for
 M1-T02 … M1-T09, so individual tickets don't decide ad hoc):
 

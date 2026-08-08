@@ -34,6 +34,8 @@ engine_add_tests(TREE unit SOURCES
 # `kernels`: `ctest -L model` selects the loading suites alone.
 engine_add_tests(TREE unit SOURCES
   config_test.cpp
+  mapped_file_test.cpp
+  safetensors_test.cpp
   DEPS engine::model
   LABELS model)
 

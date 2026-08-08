@@ -67,6 +67,38 @@ core::StatusOr<Tensor> Tensor::empty(Shape shape, DataType dtype, Device device,
                 /*byte_offset=*/0, shape, strides, dtype, device);
 }
 
+core::StatusOr<Tensor> Tensor::from_buffer(
+    std::shared_ptr<memory::Buffer> buffer, std::size_t byte_offset,
+    Shape shape, DataType dtype) {
+  CHECK(buffer != nullptr, "from_buffer: buffer must be non-null");
+  if (IsReservedDataType(dtype)) {
+    return core::UnimplementedError(
+        "dtype {} is reserved and not viewable until its milestone",
+        to_string(dtype));
+  }
+  // Window arithmetic in uint64: numel is bounded by int64_t max, so
+  // numel × itemsize (≤ 8) and the offset sum can each overflow.
+  std::uint64_t view_bytes = 0;
+  if (__builtin_mul_overflow(static_cast<std::uint64_t>(shape.numel()),
+                             static_cast<std::uint64_t>(itemsize(dtype)),
+                             &view_bytes)) {
+    return core::InvalidArgumentError(
+        "from_buffer: view size overflows uint64_t: {} elements of {}",
+        shape.numel(), to_string(dtype));
+  }
+  std::uint64_t view_end = 0;
+  if (__builtin_add_overflow(static_cast<std::uint64_t>(byte_offset),
+                             view_bytes, &view_end) ||
+      view_end > buffer->size_bytes()) {
+    return core::InvalidArgumentError(
+        "from_buffer: view of {} bytes at offset {} exceeds buffer size {}",
+        view_bytes, byte_offset, buffer->size_bytes());
+  }
+  const Device device = buffer->device();
+  const Strides strides = RowMajorStrides(shape);
+  return Tensor(std::move(buffer), byte_offset, shape, strides, dtype, device);
+}
+
 core::StatusOr<Tensor> Tensor::slice(int dim, std::int64_t start,
                                      std::int64_t end) const {
   CHECK(defined(), "slice() on an undefined Tensor");

@@ -601,7 +601,7 @@ validation and unknown-field tolerance.
 **Acceptance criteria:**
 - Unit tests parse committed real config.json files (Llama-3-style, Qwen2-style) and assert every field; malformed/missing-required-field cases return `InvalidArgument` with the field name.
 
-### M4-T04 · Safetensors file parser
+### M4-T04 · Safetensors file parser — ✅ DONE (2026-08-08)
 `src/model/safetensors.h`: mmap a `.safetensors` file, parse the JSON header, expose
 `{name → (dtype, shape, data span)}` with zero-copy views into the mapping. Handle
 alignment, bounds validation, and dtype string mapping (F32/F16/BF16/I8/…).

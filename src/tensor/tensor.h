@@ -63,6 +63,18 @@ class Tensor {
       Shape shape, DataType dtype, Device device,
       memory::Allocator* allocator = nullptr);
 
+  // Wraps existing storage as a contiguous, row-major Tensor view. The
+  // Tensor shares ownership of `buffer`: storage lives until the last
+  // handle dies (the general facility behind zero-copy checkpoint loading,
+  // M4-T04 — model-loading.md §3.5 — but not a safetensors special case).
+  // The window [byte_offset, byte_offset + numel×itemsize) must lie within
+  // the buffer (InvalidArgument, overflow-checked); reserved dtypes (kInt4,
+  // kFP8E4M3) return Unimplemented, consistent with empty(). Device comes
+  // from the buffer. A null `buffer` is a programmer error (CHECK).
+  [[nodiscard]] static core::StatusOr<Tensor> from_buffer(
+      std::shared_ptr<memory::Buffer> buffer, std::size_t byte_offset,
+      Shape shape, DataType dtype);
+
   // --- Metadata ---
 
   [[nodiscard]] const Shape& shape() const { return shape_; }
