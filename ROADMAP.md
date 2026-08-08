@@ -491,7 +491,7 @@ edges retired, rule-3 toolkit list emptied.
 - Removed tests are enumerated in the commit message; surviving test count is stated and every surviving test passes unchanged.
 - ADR-002 amendment records the retirement; the module dependency diagram matches the actual CMake link graph.
 
-### M3-T03 · Design doc: CPU backend
+### M3-T03 · Design doc: CPU backend — ✅ DONE (2026-08-07)
 Write `docs/design/cpu-backend.md`: threading model (persistent pool sized to
 physical cores, `parallel_for` with deterministic static partitioning, reduction
 ordering rules so results are bitwise reproducible at any thread count; OpenMP

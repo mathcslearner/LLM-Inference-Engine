@@ -178,5 +178,19 @@ kernel infrastructure, `cmake/cuda.cmake` + the `ENGINE_ENABLE_CUDA` option,
 placeholder anchor; test harness gpu-label machinery removed —
 285 tests, all green; `engine_project_files` now skips deleted-but-unstaged
 ghosts).
-Next up: **M3-T03** (design doc: CPU backend — threading model, SIMD dispatch
-strategy, dtype policy, kernel validation methodology).
+M3-T03 done (2026-08-07: `docs/design/cpu-backend.md` — threading model
+(persistent pool at physical cores, deterministic static partitioning,
+fixed-tree `parallel_reduce`, no nested parallelism, OpenMP rejected with
+rationale); SIMD dispatch (runtime `SelectedIsa()` over scalar/NEON/AVX2,
+per-ISA TUs with per-TU flags, `ENGINE_FORCE_ISA` fatal on bad values,
+kernel-table registry + add-a-kernel recipe); dtype policy (fp32
+accumulation, half.h-exact conversions, F16C folded into the AVX2 gate);
+validation methodology (oracle chain re-rooted on `src/cpu/`, platform
+matrix answering how ISAs absent from CI are proven, numerics classes E/R/T
+incl. the fixed 16-lane Class-R convention); alignment/weight-layout
+conventions; CI additions (forced-scalar ctest pass, TSAN job for
+`parallel`, macOS arm64 CI job decided *against* — private-repo 10× minute
+multiplier — with revisit triggers). Flagged: `cpu → parallel` will need an
+ADR-002 amendment at M5-T02).
+Next up: **M3-T04** (thread pool & parallel_for/parallel_reduce, per the
+new design doc).
