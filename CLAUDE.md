@@ -132,8 +132,14 @@ results — no blanket full sweep needed):
   everywhere (`core/status.h`, `core/check.h`) → run the full no-arg sweep;
   the includer set is the whole tree anyway.
 
-CI runs the full sweep regardless (same pinned LLVM 20), so a missed edge
-case surfaces as a red Actions run rather than slipping through.
+**clang-tidy is local-only** (2026-08-08): CI's full-sweep tidy job outgrew
+its 15-minute timeout and was removed — the scoped rules above are the
+whole tidy gate now, so apply them diligently before handoff. Known
+accepted gap: TUs absent from the arm64 dev machine's compile database
+(the x86-64 cpuid path in `src/kernels/dispatch.cpp`, the `avx2/` per-ISA
+TUs) are tidy-checked nowhere; CI's x86-64 build jobs still compile them
+warnings-as-errors. When editing that code, review against `.clang-tidy`
+by hand (e.g. the asm-output false-positive NOLINT in dispatch.cpp).
 
 **On the macOS dev machine, always build with Homebrew LLVM 20, not Apple
 clang**:
@@ -269,7 +275,9 @@ enumeration recorded as a ROADMAP audit note; CLAUDE.md history trimmed to
 5 lines; design doc §3.4 + §4.2 audit implementation notes added. 393 tests
 green. Known gap, deliberately not closed here: the milestone3 branch has
 no CI run yet, so the AVX2 TUs have never been compiled and the TSAN job
-has never executed — push before treating M3 as fully validated).
+has never executed — push before treating M3 as fully validated. [Gap
+closed 2026-08-08: main's CI runs compile the AVX2 TUs green under
+GCC+Clang warnings-as-errors and the TSAN job executes green.]).
 M4-T01 done (2026-08-08: `docs/design/model-loading.md` — load pipeline
 (HF snapshot dir → config parse/arch registry {Llama, Qwen2} → weight
 discovery → read-only mmap as shared `memory::Buffer` → safetensors header
@@ -342,4 +350,15 @@ both real configs + tiny-llama, defaults/explicit-wins, missing-field
 loop, wrong-type table, positivity table, GQA divisibility, overflow,
 unknown arch/dtype, NotFound + path-prefixed parse errors. 423 tests
 green; format + scoped tidy clean).
+CI tidy retirement done (2026-08-08: the full-sweep tidy job exceeded its
+15-minute timeout on every M4 push (runs cancelled, `ci` gate red despite
+all other jobs green) — job removed from ci.yml (`needs` updated, header
+comment records the rationale + accepted x86-64 coverage gap); tidy is
+local-only now per the Build & test section above. The one finding CI
+surfaced before timing out — misc-const-correctness on `Xgetbv0()`'s
+eax/edx in src/kernels/dispatch.cpp, an asm-output false positive
+invisible to arm64-local tidy (x86-64-only block) where const would not
+even compile — suppressed with a reasoned NOLINTBEGIN/END. check-tidy.sh
+header + cpu-backend.md §8 amendment + ci-signal-workflow memory updated;
+423 tests green, format clean, scoped tidy on dispatch.cpp clean).
 Next up: **M4-T04** (safetensors file parser).

@@ -35,8 +35,12 @@ constexpr std::string_view HostIsaList(Isa best_host) {
 // compiled without arch flags like every non-per-ISA TU (§4.4 rule 1). Only
 // called after cpuid confirmed OSXSAVE, so the instruction is executable.
 std::uint64_t Xgetbv0() {
+  // Not const: both are written by the asm's output operands below, which
+  // misc-const-correctness does not model (and const would not compile).
+  // NOLINTBEGIN(misc-const-correctness)
   std::uint32_t eax = 0;
   std::uint32_t edx = 0;
+  // NOLINTEND(misc-const-correctness)
   __asm__ volatile("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0U));
   return (static_cast<std::uint64_t>(edx) << 32U) | eax;
 }

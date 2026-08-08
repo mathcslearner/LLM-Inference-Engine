@@ -3,13 +3,19 @@
 # Jobs:
 #   format      — scripts/check-format.sh with the pinned clang-format (LLVM 20).
 #   build-test  — GCC + Clang × Debug + Release: configure, build, ctest.
-#   tidy        — scripts/check-tidy.sh with the pinned clang-tidy (LLVM 20).
 #   tsan        — Clang Debug with ENGINE_SANITIZE=thread, running the
 #                 `parallel`-labeled tests (M3-T04; design:
 #                 docs/design/cpu-backend.md §8.2). Scoped by label because
 #                 TSAN's 5–15× slowdown is spent where the threads are.
 #   ci          — aggregate gate. Branch protection requires this one check,
 #                 so the matrix can change without touching repository settings.
+#
+# clang-tidy is a local-only check (scripts/check-tidy.sh; per-ticket scoping
+# rules in CLAUDE.md). The CI job was removed 2026-08-08: the full-tree sweep
+# outgrew the 15-minute job timeout and was cancelled on every run, gating
+# merges on a check that never finished. Known coverage gap accepted with
+# that removal: TUs outside the arm64 dev machine's compile database (the
+# x86-64 cpuid path, the avx2/ per-ISA TUs) are now tidy-checked nowhere.
 #
 # Style checks run through the same scripts/ entry points developers use, with
 # the same LLVM 20 pin (resolved by scripts/clang-tools.sh); bumping
@@ -110,36 +116,6 @@ jobs:
         if: always()
         run: ccache -s
 
-  tidy:
-    name: tidy
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install clang-tidy (pinned LLVM 20) and ninja
-        run: |
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key |
-            sudo tee /etc/apt/trusted.gpg.d/apt-llvm-org.asc >/dev/null
-          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" |
-            sudo tee /etc/apt/sources.list.d/apt-llvm-org.list
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang-tidy-20 ninja-build
-      - name: Restore dependencies
-        uses: actions/cache@v4
-        with:
-          path: .deps
-          key: deps-tidy-${{ hashFiles('cmake/dependencies.cmake') }}
-      # clang-tidy only needs the compile database (plus the fetched dependency
-      # headers it references), so configure without building.
-      - name: Configure (compile database)
-        run: |
-          cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_COMPILER=clang++-18 \
-            -DFETCHCONTENT_BASE_DIR="${{ github.workspace }}/.deps"
-      - name: Run clang-tidy
-        run: scripts/check-tidy.sh
-
   tsan:
     name: tsan
     runs-on: ubuntu-24.04
@@ -190,7 +166,7 @@ jobs:
     name: ci
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: [format, build-test, tidy, tsan]
+    needs: [format, build-test, tsan]
     if: always()
     steps:
       - name: Fail if any required job did not succeed

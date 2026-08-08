@@ -681,8 +681,16 @@ authoritative statement):*
 
 ## 8. CI
 
-The existing matrix (format; GCC/Clang × Debug/Release build+test; tidy;
+The existing matrix (format; GCC/Clang × Debug/Release build+test;
 aggregate `ci` gate) is unchanged. M3 adds:
+
+> *Amendment (2026-08-08, post-M4-T03):* the matrix above originally
+> included a full-sweep clang-tidy job; it outgrew the 15-minute job
+> timeout and was removed. clang-tidy is a local-only check now (scoped
+> per-ticket rules in CLAUDE.md §Build & test), with the accepted gap that
+> TUs outside the arm64 dev machine's compile database — the x86-64 cpuid
+> path and the `avx2/` per-ISA TUs — are tidy-checked nowhere; CI's x86-64
+> build jobs still compile them warnings-as-errors.
 
 ### 8.1 The forced-scalar test pass
 

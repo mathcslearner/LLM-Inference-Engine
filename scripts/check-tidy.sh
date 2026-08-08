@@ -4,11 +4,14 @@
 #
 # Usage: scripts/check-tidy.sh [tu...]
 #   Without arguments: all project TUs (tracked or not, minus .gitignore'd)
-#   — the CI mode. With arguments: only the listed TUs (.cc/.cpp/.cxx), for
-#   fast scoped runs while iterating on a ticket. Headers cannot be passed
-#   directly — they have no compile-database entry; pass a TU that includes
-#   them (usually the ticket's test file) and HeaderFilterRegex in
-#   .clang-tidy analyzes them through it.
+#   — the full-sweep mode. With arguments: only the listed TUs
+#   (.cc/.cpp/.cxx), for fast scoped runs while iterating on a ticket.
+#   Headers cannot be passed directly — they have no compile-database
+#   entry; pass a TU that includes them (usually the ticket's test file)
+#   and HeaderFilterRegex in .clang-tidy analyzes them through it.
+#
+# tidy is a local-only gate (CI's sweep job was removed 2026-08-08 after
+# outgrowing its 15-minute timeout; scoping discipline: CLAUDE.md).
 #
 # Needs a compile database; configures ${ENGINE_BUILD_DIR:-build} if missing
 # (CMAKE_EXPORT_COMPILE_COMMANDS is ON project-wide). Any TU without an
