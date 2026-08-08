@@ -610,7 +610,7 @@ alignment, bounds validation, and dtype string mapping (F32/F16/BF16/I8/…).
 - Unit tests against a fixture file: metadata correct, tensor bytes match expected values, truncated/corrupt header cases return errors (fuzz-ish negative tests).
 - File stays mapped while any tensor view is alive (lifetime tested).
 
-### M4-T05 · Sharded checkpoint support
+### M4-T05 · Sharded checkpoint support — ✅ DONE (2026-08-08)
 Support `model.safetensors.index.json`: resolve tensor→shard mapping, open shards
 lazily, present a unified `{name → tensor view}` interface identical to the
 single-file case.

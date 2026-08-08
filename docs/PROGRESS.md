@@ -239,3 +239,35 @@ meta.json ground truth, tensor bytes vs independent ifstream read, lifetime
 test reading through a Tensor after the SafetensorsFile is destroyed, and
 ~25 fuzz-ish negatives asserting status code + message names the
 file/tensor/field). 459 tests green; format + scoped tidy clean).
+M4-T05 done (2026-08-08: sharded checkpoint support —
+`src/model/checkpoint.h/.cpp` `Checkpoint` (Open/names/contains/tensor),
+the unified weights interface the rest of the loader consumes; single-file
+and sharded are indistinguishable behind it (design §3.1/§3.6). `Open`
+takes the model *directory* and resolves discovery: index wins when both
+spellings are present (HF loading order — tested with a deliberately
+corrupt model.safetensors alongside a valid sharded set), neither →
+NotFound naming both. Index parse is eager and exception-free; only
+"weight_map" is interpreted — "metadata"/unknown top-level keys tolerated
+(HF-tooling output, additive fields must not break loading — a reasoned
+contrast to safetensors.cpp's strictness, noted in a comment). Shard
+filenames must be bare (no separators, not ".."/empty — hostile index
+must not escape the model dir) and are existence-checked eagerly so
+"missing shard" fails at Open listing every absent shard; mapping +
+header validation stay lazy per shard on first tensor() touch (tested:
+a corrupt untouched shard doesn't block reading the healthy one), then
+cached. First-map consistency check: shard tensor set must equal the set
+the index maps to it — catches index-names-absent-tensor,
+shard-tensor-not-in-index, and cross-shard duplicates (reported as "the
+index maps it to <other shard>"), all offenders listed in one message.
+Single-file case wraps SafetensorsFile as shard 0, names copied into the
+unified index. Non-obvious: `tensor()` is non-const (lazy cache), and the
+sketch's `StatusOr<const SafetensorsFile*>` internal accessor keeps
+ASSIGN_OR_RETURN usable. Tests: 17 in `tests/unit/checkpoint_test.cpp`
+(label `model`) — synthetic two-shard round-trip, tensor-outlives-
+checkpoint, index-wins, lazy mapping, empty weight_map valid, metadata
+tolerance, missing dir/neither-spelling/missing-shards NotFound cases,
+malformed-index + non-bare-filename tables, all three inconsistency
+shapes, unknown-name NotFound, and the acceptance criterion: the
+committed 2-shard tiny-llama fixture resolves every tensor with metadata
+and bytes memcmp-identical to the single-file fixture. 476 tests green;
+format + scoped tidy clean).

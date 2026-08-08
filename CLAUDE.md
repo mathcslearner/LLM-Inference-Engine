@@ -190,6 +190,8 @@ behind an existing subsystem):
   `docs/design/model-loading.md`; T02 `tools/gen_fixtures/` + ~16 MB
   committed fixtures; T03 `src/model/config.h` (ModelConfig parser); T04
   safetensors parser (`Tensor::from_buffer`, `src/model/mapped_file`,
-  `src/model/safetensors`). 459 tests green.
+  `src/model/safetensors`); T05 sharded checkpoints
+  (`src/model/checkpoint` — unified single-file/sharded interface, lazy
+  shard mapping, index↔shard consistency checks). 476 tests green.
 
-Next up: **M4-T05** (sharded checkpoint support).
+Next up: **M4-T06** (weight-name mapping).

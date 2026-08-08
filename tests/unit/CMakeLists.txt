@@ -33,6 +33,7 @@ engine_add_tests(TREE unit SOURCES
 # (docs/design/model-loading.md §8). The `model` label mirrors `parallel`/
 # `kernels`: `ctest -L model` selects the loading suites alone.
 engine_add_tests(TREE unit SOURCES
+  checkpoint_test.cpp
   config_test.cpp
   mapped_file_test.cpp
   safetensors_test.cpp
