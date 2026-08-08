@@ -318,4 +318,28 @@ provably agree); decode side is true HF golden. ~16 MB fixtures committed
 under budget; `tools/README.md` + `tests/fixtures/README.md` (regen
 discipline, provenance/licensing incl. committed Llama LICENSE); CI
 untouched — no Python in the test path).
-Next up: **M4-T03** (model config parser).
+M4-T03 done (2026-08-08: `src/model/config.h/.cpp` — `ModelConfig`/
+`RopeScaling`/`Architecture` + `ParseModelConfig`/`LoadModelConfig` per
+design §3.2 (nlohmann PRIVATE, non-throwing parse, exception-free
+accessors); registry {LlamaForCausalLM, Qwen2ForCausalLM} → else
+Unimplemented listing supported; required {architectures, hidden_size,
+intermediate_size, num_hidden_layers, num_attention_heads, vocab_size} +
+max_position_embeddings (design-doc §3.2 note: no universal HF default,
+always serialized); HF-semantics defaults incl. per-arch attention_bias
+(Llama false / Qwen2 true, explicit wins), head_dim derived with
+divisibility check when absent, rope_scaling null→nullopt with legacy
+"type" key fallback (§3.2 note), torch_dtype via tensor::from_string;
+validation: strict positivity, kv-heads divide heads, int narrowing
+checks — all errors name the field (tested). Parse split into per-stage
+helpers (clang-tidy cognitive-complexity 25). New fixtures
+`tests/fixtures/models/configs/{llama3,qwen2}/config.json` — byte-copied
+real configs via new `gen_fixtures model-configs` subcommand; Llama side is
+the **3.1** mirror (NousResearch, pinned; upstream LICENSE committed) for
+its rope_scaling block, Qwen2 exercises absence + omitted attention_bias;
+design §7.1 layout + fixtures/tools READMEs updated. Tests: 30 in
+`tests/unit/config_test.cpp` (label `model`) — every field asserted on
+both real configs + tiny-llama, defaults/explicit-wins, missing-field
+loop, wrong-type table, positivity table, GQA divisibility, overflow,
+unknown arch/dtype, NotFound + path-prefixed parse errors. 423 tests
+green; format + scoped tidy clean).
+Next up: **M4-T04** (safetensors file parser).

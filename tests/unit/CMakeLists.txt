@@ -29,6 +29,14 @@ engine_add_tests(TREE unit SOURCES
   tensor_test.cpp
   DEPS engine::tensor)
 
+# Ordinary portable-C++ tests — nothing ISA-dependent, no SCALAR_PASS
+# (docs/design/model-loading.md §8). The `model` label mirrors `parallel`/
+# `kernels`: `ctest -L model` selects the loading suites alone.
+engine_add_tests(TREE unit SOURCES
+  config_test.cpp
+  DEPS engine::model
+  LABELS model)
+
 # The extra `parallel` label lets the tsan CI job (and local TSAN builds)
 # select these suites with `ctest -L parallel` — TSAN's slowdown is spent
 # where the threads are (design: docs/design/cpu-backend.md §8.2).

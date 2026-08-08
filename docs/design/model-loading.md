@@ -226,6 +226,25 @@ Rules:
   rejection would couple config parsing to execution capability; the
   executor rejects what it can't honor.
 
+*Implementation notes (M4-T03):*
+
+- `max_position_embeddings` is **required** (it was in neither list above).
+  It has no universal default — HF's class-level defaults differ per
+  architecture (2048 for Llama, 32768 for Qwen2) — and both target families
+  always serialize it, so a proper "missing field" error beats a
+  per-arch default table or a confusing strictly-positive failure on 0.
+- `rope_scaling`'s type key is read as `rope_type` falling back to the
+  legacy spelling `type` (configs written before transformers 4.43, e.g.
+  `{"type": "linear", ...}`) — transformers itself accepts both and
+  normalizes to `rope_type`.
+- When `head_dim` is *derived*, `hidden_size % num_heads != 0` is an error
+  (truncating the definition would be silent nonsense); when explicit, no
+  divisibility or product constraint applies, per the rule above.
+- The committed config fixtures live under `tests/fixtures/models/configs/`
+  (§7.1): the Llama side is deliberately **Llama-3.1** — its `rope_scaling`
+  block exercises the presence path — and the Qwen2 side exercises absence
+  plus the omitted-`attention_bias` default.
+
 ### 3.3 Weight discovery & mmap (M4-T04)
 
 Files are mapped read-only and wrapped in the existing ownership vocabulary
@@ -756,6 +775,9 @@ tests/fixtures/
         activations.safetensors   # per-layer + end-to-end outputs (M5 consumes)
         meta.json                 # input ids, seed, generator versions
     qwen2-weight-names.json       # name inventory only — weight-map tests
+    configs/                      # real config.json files — M4-T03 goldens
+      llama3/  { config.json, LICENSE }   # Llama-3.1 (rope_scaling presence)
+      qwen2/   { config.json }            # rope_scaling absence, bias default
   tokenizers/
     llama3/  { tokenizer.json, vectors.json }
     qwen2/   { tokenizer.json, vectors.json }

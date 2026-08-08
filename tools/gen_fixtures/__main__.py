@@ -2,7 +2,7 @@
 
 import argparse
 
-from . import qwen2_names, tiny_llama, tokenizer_vectors
+from . import model_configs, qwen2_names, tiny_llama, tokenizer_vectors
 
 
 def main() -> None:
@@ -15,6 +15,7 @@ def main() -> None:
     tiny_llama.register(subparsers)
     qwen2_names.register(subparsers)
     tokenizer_vectors.register(subparsers)
+    model_configs.register(subparsers)
     args = parser.parse_args()
     args.func(args)
 

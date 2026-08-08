@@ -34,6 +34,8 @@ echo "== qwen2-names =="
 "$PYTHON" -m gen_fixtures qwen2-names --out "$OUT_DIR"
 echo "== tokenizer-vectors =="
 "$PYTHON" -m gen_fixtures tokenizer-vectors --out "$OUT_DIR"
+echo "== model-configs =="
+"$PYTHON" -m gen_fixtures model-configs --out "$OUT_DIR"
 
 if [[ "$VERIFY" == 1 ]]; then
   # README.md is hand-written, not generated.

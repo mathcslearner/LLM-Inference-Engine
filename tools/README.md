@@ -44,6 +44,8 @@ cd tools
                                                     #   no weight download)
 .venv/bin/python -m gen_fixtures tokenizer-vectors  # real tokenizer.json files +
                                                     #   encode/decode golden vectors
+.venv/bin/python -m gen_fixtures model-configs      # real config.json files for
+                                                    #   the config-parser goldens
 ```
 
 ### Review discipline

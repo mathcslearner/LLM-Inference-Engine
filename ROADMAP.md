@@ -592,7 +592,7 @@ fixed input. Deterministic via fixed seeds.
 - A tiny-Llama-style fixture (2 layers, small dims) + tokenizer vectors for one Llama-family and one Qwen-family tokenizer are committed under `tests/fixtures/` (small enough for git).
 - `tools/README.md` documents usage; CI does not require Python (fixtures are committed).
 
-### M4-T03 · Model config parser
+### M4-T03 · Model config parser — ✅ DONE (2026-08-08)
 `src/model/config.h`: parse HF `config.json` into `ModelConfig` (architecture string,
 hidden/intermediate size, layer/head/kv-head counts, head dim, vocab size, RoPE theta
 & scaling, norm epsilon, max position, tie-word-embeddings, torch_dtype), with

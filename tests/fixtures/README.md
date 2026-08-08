@@ -28,6 +28,10 @@ models/
   qwen2-weight-names.json       # real Qwen2 checkpoint name/shape inventory
                                 #   (no bytes) + the config fields the
                                 #   weight-map tests need
+  configs/                      # real, unmodified config.json files —
+    llama3/  { config.json,     #   config-parser goldens (M4-T03); Llama
+               LICENSE }        #   side is 3.1 for its rope_scaling block
+    qwen2/   { config.json }
 tokenizers/
   llama3/  { tokenizer.json, vectors.json, LICENSE }
   qwen2/   { tokenizer.json, vectors.json, LICENSE }
@@ -41,6 +45,11 @@ tokenizers/
   pinned upstream revision, never re-serialized. Trimming vocabularies was
   considered and rejected (model-loading.md §7.1): merges and vocab are
   interdependent, and byte-identity against the real artifact is the point.
+- **models/configs/** (`tools/gen_fixtures/model_configs.py`): real
+  config.json files, byte-copied like the tokenizers. Llama is deliberately
+  the **3.1** checkpoint — its `rope_scaling` block (`"rope_type": "llama3"`)
+  exercises the presence side of the config parser, while the Qwen2 config
+  exercises absence plus the omitted-`attention_bias` per-arch default.
 
 ## vectors.json conventions
 
@@ -72,3 +81,5 @@ as-shipped tokenizer.json files. Generators assert the per-model ceiling.
 | `models/qwen2-weight-names.json` | `Qwen/Qwen2-0.5B-Instruct` @ `c540970f9e29518b1d8f06ab8b24cba66ad77b6d` (safetensors header metadata + config fields only) | Apache-2.0 |
 | `tokenizers/qwen2/` | `Qwen/Qwen2-0.5B-Instruct` @ `c540970f9e29518b1d8f06ab8b24cba66ad77b6d` | Apache-2.0 (upstream `LICENSE` committed alongside) |
 | `tokenizers/llama3/` | `NousResearch/Meta-Llama-3-8B-Instruct` @ `53346005fb0ef11d3b6a83b12c895cca40156b6c` — ungated byte-exact mirror of the gated `meta-llama/Meta-Llama-3-8B-Instruct` | Llama 3 Community License; redistribution with notice permitted — the upstream `LICENSE` is committed alongside |
+| `models/configs/llama3/` | `NousResearch/Meta-Llama-3.1-8B-Instruct` @ `d10aef7999a2b5ba950ab3974312feeedbfe0b77` — ungated byte-exact mirror of the gated `meta-llama/Llama-3.1-8B-Instruct` (config.json only) | Llama 3.1 Community License; the upstream `LICENSE` is committed alongside |
+| `models/configs/qwen2/` | `Qwen/Qwen2-0.5B-Instruct` @ `c540970f9e29518b1d8f06ab8b24cba66ad77b6d` (config.json only) | Apache-2.0 |

@@ -15,6 +15,11 @@ QWEN2_REVISION = "c540970f9e29518b1d8f06ab8b24cba66ad77b6d"
 # alongside the tokenizer per the Llama 3 Community License notice terms.
 LLAMA3_REPO = "NousResearch/Meta-Llama-3-8B-Instruct"
 LLAMA3_REVISION = "53346005fb0ef11d3b6a83b12c895cca40156b6c"
+# Ungated byte-exact mirror of meta-llama/Llama-3.1-8B-Instruct, for the
+# config-parser goldens (M4-T03): the 3.1 config carries the llama3-type
+# rope_scaling block that 3.0 configs lack. Ships the upstream LICENSE.
+LLAMA31_REPO = "NousResearch/Meta-Llama-3.1-8B-Instruct"
+LLAMA31_REVISION = "d10aef7999a2b5ba950ab3974312feeedbfe0b77"
 
 
 def dump_json(obj, path: pathlib.Path) -> None:
