@@ -186,7 +186,7 @@ behind an existing subsystem):
   (elementwise/reductions/fp16-bf16 conversions) + `benchmarks/` scaffold
   and first BASELINES.md entries; post-milestone audit fixes. CI's
   full-sweep tidy job was later retired (2026-08-08; see Build & test).
-- **M4 (model loading & tokenization) — in progress**: T01
+- **M4 (model loading & tokenization) — complete** (2026-08-08): T01
   `docs/design/model-loading.md`; T02 `tools/gen_fixtures/` + ~16 MB
   committed fixtures; T03 `src/model/config.h` (ModelConfig parser); T04
   safetensors parser (`Tensor::from_buffer`, `src/model/mapped_file`,
@@ -213,6 +213,14 @@ behind an existing subsystem):
   selected at parse, rejected by name otherwise) → byte-level map →
   merge loop (`bpe_split`, leftmost-lowest-rank) → template inserts;
   invalid UTF-8 encodes as own pre-tokens per the encode_synthetic
-  vectors; decode still stubbed until T10). 576 tests green.
+  vectors); T10 decoding & incremental detokenization (`decode` — token
+  bytes concatenated, specials dropped when skipping, then U+FFFD
+  maximal-subpart lossy conversion matching HF's Rust
+  `from_utf8_lossy`, pinned by the malformed-tail goldens; strict
+  `classify_utf8_prefix`/`append_utf8_lossy` in unicode.h alongside the
+  lenient encode-side codec; `src/tokenizer/detokenize` —
+  `DetokenizerStream` push/finish over a ≤3-byte carry, streaming
+  output bit-identical to batch decode, every emission valid UTF-8).
+  591 tests green.
 
-Next up: **M4-T10** (decoding & incremental detokenization).
+Next up: **M5-T01** (design doc: model execution).

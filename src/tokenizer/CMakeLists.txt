@@ -5,6 +5,7 @@
 # includes the generated unicode_data.inc tables (tools/gen_unicode, §6.3).
 add_library(engine_tokenizer STATIC
   bpe.cpp
+  detokenize.cpp
   pretokenize.cpp
   tokenizer.cpp
   unicode.cpp)

@@ -20,11 +20,14 @@
 namespace {
 
 using engine::tokenizer::append_utf8;
+using engine::tokenizer::append_utf8_lossy;
+using engine::tokenizer::classify_utf8_prefix;
 using engine::tokenizer::decode_utf8;
 using engine::tokenizer::is_letter;
 using engine::tokenizer::is_number;
 using engine::tokenizer::is_whitespace;
 using engine::tokenizer::nfc_normalize;
+using engine::tokenizer::Utf8Prefix;
 
 // --- categories -------------------------------------------------------------
 
@@ -94,6 +97,92 @@ TEST(Utf8CodecTest, RejectsMalformedSequencesWithoutAdvancing) {
     EXPECT_EQ(decode_utf8(bad, pos), std::nullopt) << bad;
     EXPECT_EQ(pos, 0U);
   }
+}
+
+// --- strict classification / lossy conversion (M4-T10) ----------------------
+//
+// Unlike decode_utf8 above, the classifier is strict UTF-8 with the WHATWG
+// maximal-subpart policy; every expectation below was cross-checked against
+// Rust's String::from_utf8_lossy (which HF `tokenizers` decodes through).
+
+void ExpectClassified(std::string_view bytes, Utf8Prefix kind,
+                      std::size_t length) {
+  const auto part = classify_utf8_prefix(bytes);
+  EXPECT_EQ(static_cast<int>(part.kind), static_cast<int>(kind)) << bytes;
+  EXPECT_EQ(part.length, length) << bytes;
+}
+
+TEST(Utf8ClassifyTest, CompleteSequencesAtEveryLength) {
+  ExpectClassified("A", Utf8Prefix::kComplete, 1);
+  ExpectClassified("\x7F", Utf8Prefix::kComplete, 1);
+  ExpectClassified("\xC2\x80", Utf8Prefix::kComplete, 2);          // U+0080
+  ExpectClassified("\xDF\xBF", Utf8Prefix::kComplete, 2);          // U+07FF
+  ExpectClassified("\xE0\xA0\x80", Utf8Prefix::kComplete, 3);      // U+0800
+  ExpectClassified("\xED\x9F\xBF", Utf8Prefix::kComplete, 3);      // U+D7FF
+  ExpectClassified("\xEE\x80\x80", Utf8Prefix::kComplete, 3);      // U+E000
+  ExpectClassified("\xF0\x90\x80\x80", Utf8Prefix::kComplete, 4);  // U+10000
+  ExpectClassified("\xF4\x8F\xBF\xBF", Utf8Prefix::kComplete, 4);  // U+10FFFF
+  // Only the leading sequence is classified; trailing garbage is ignored.
+  ExpectClassified("\xC3\xA9\xFF", Utf8Prefix::kComplete, 2);
+}
+
+TEST(Utf8ClassifyTest, IncompletePrefixesConsumeTheWholeWindow) {
+  ExpectClassified("\xC3", Utf8Prefix::kIncomplete, 1);
+  ExpectClassified("\xE2", Utf8Prefix::kIncomplete, 1);
+  ExpectClassified("\xE2\x82", Utf8Prefix::kIncomplete, 2);
+  ExpectClassified("\xF0", Utf8Prefix::kIncomplete, 1);
+  ExpectClassified("\xF0\x9F", Utf8Prefix::kIncomplete, 2);
+  ExpectClassified("\xF0\x9F\x91", Utf8Prefix::kIncomplete, 3);
+  // The restricted second-byte ranges still gate what counts as a prefix.
+  ExpectClassified("\xE0\xA0", Utf8Prefix::kIncomplete, 2);
+  ExpectClassified("\xF4\x8F", Utf8Prefix::kIncomplete, 2);
+}
+
+TEST(Utf8ClassifyTest, InvalidMaximalSubparts) {
+  // No lead byte at all: one-byte subparts.
+  ExpectClassified("\x80", Utf8Prefix::kInvalid, 1);  // lone continuation
+  ExpectClassified("\xC0", Utf8Prefix::kInvalid, 1);  // overlong lead
+  ExpectClassified("\xC1", Utf8Prefix::kInvalid, 1);
+  ExpectClassified("\xF5", Utf8Prefix::kInvalid, 1);  // > U+10FFFF lead
+  ExpectClassified("\xFF", Utf8Prefix::kInvalid, 1);
+  // Second byte outside its restricted range: the subpart is the lead
+  // alone and the offending byte is reclassified on its own.
+  ExpectClassified("\xE0\x80", Utf8Prefix::kInvalid, 1);      // overlong 3-byte
+  ExpectClassified("\xED\xA0", Utf8Prefix::kInvalid, 1);      // surrogate
+  ExpectClassified("\xED\xA0\x80", Utf8Prefix::kInvalid, 1);  // U+D800
+  ExpectClassified("\xF0\x80", Utf8Prefix::kInvalid, 1);      // overlong 4-byte
+  ExpectClassified("\xF4\x90", Utf8Prefix::kInvalid, 1);      // > U+10FFFF
+  // Broken mid-sequence: the subpart is every continuation seen so far.
+  ExpectClassified("\xE2\x82\x41", Utf8Prefix::kInvalid, 2);
+  ExpectClassified("\xF0\x9F\x91\x41", Utf8Prefix::kInvalid, 3);
+  ExpectClassified("\xC2\xC2\x80", Utf8Prefix::kInvalid, 1);
+}
+
+TEST(Utf8LossyTest, MatchesFromUtf8LossySemantics) {
+  const auto lossy = [](std::string_view bytes) {
+    std::string out;
+    append_utf8_lossy(out, bytes);
+    return out;
+  };
+  // Valid text passes through untouched.
+  EXPECT_EQ(lossy(""), "");
+  EXPECT_EQ(lossy("plain"), "plain");
+  EXPECT_EQ(lossy("caf\u00E9 \u4E16\u754C \U0001F680"),
+            "caf\u00E9 \u4E16\u754C \U0001F680");
+  // Each invalid byte with no valid continuation is its own subpart.
+  EXPECT_EQ(lossy("\xFF\xFE\xFD"), "\uFFFD\uFFFD\uFFFD");
+  EXPECT_EQ(lossy("A\x80\x80Z"), "A\uFFFD\uFFFDZ");
+  // A truncated tail is one subpart, however many bytes it carried.
+  EXPECT_EQ(lossy("hi\xE2\x82"), "hi\uFFFD");
+  EXPECT_EQ(lossy("\xF0\x9F\x91"), "\uFFFD");
+  EXPECT_EQ(lossy("\xC2"), "\uFFFD");
+  // Overlong forms and surrogates: lead and each continuation separately.
+  EXPECT_EQ(lossy("\xE0\x80"), "\uFFFD\uFFFD");
+  EXPECT_EQ(lossy("\xED\xA0\x80"), "\uFFFD\uFFFD\uFFFD");
+  EXPECT_EQ(lossy("\xF4\x90\x80\x80"), "\uFFFD\uFFFD\uFFFD\uFFFD");
+  // Broken mid-sequence resumes cleanly at the offending byte.
+  EXPECT_EQ(lossy("\xE2\x82Z"), "\uFFFDZ");
+  EXPECT_EQ(lossy("\xF0\x9F\x91Z"), "\uFFFDZ");
 }
 
 // --- NFC --------------------------------------------------------------------

@@ -60,8 +60,10 @@ engine_add_tests(TREE unit SOURCES
 
 # tokenizer_encode_test replays vectors.json (the committed HF goldens)
 # through encode, hence the test-only nlohmann_json dependency — same
-# pattern as weight_map_test.
+# pattern as weight_map_test. tokenizer_decode_test replays the same
+# vectors through decode and the streaming detokenizer (M4-T10).
 engine_add_tests(TREE unit SOURCES
+  tokenizer_decode_test.cpp
   tokenizer_encode_test.cpp
   DEPS engine::tokenizer nlohmann_json::nlohmann_json
   LABELS tokenizer)

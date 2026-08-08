@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -46,5 +47,38 @@ void append_utf8(std::string& out, char32_t codepoint);
 // treats them like any other bytes and the callers' table lookups miss.
 [[nodiscard]] std::optional<char32_t> decode_utf8(std::string_view text,
                                                   std::size_t& pos);
+
+// --- strict UTF-8 classification (decode side, M4-T10) ---------------------
+//
+// decode_utf8 above is deliberately lenient; decode output must instead
+// match HF exactly: `tokenizers` materializes the concatenated token bytes
+// as a Rust String via from_utf8_lossy — strict well-formedness (RFC 3629:
+// overlong forms, surrogates, and > U+10FFFF are all invalid) with the
+// WHATWG "maximal subpart" policy, where each longest prefix of a valid
+// sequence that cannot be completed becomes exactly one U+FFFD. The
+// malformed-tail decode goldens pin this (design §6.5 amendment).
+// classify_utf8_prefix is the incremental primitive (DetokenizerStream
+// buffers on kIncomplete); append_utf8_lossy is the batch loop over it.
+
+enum class Utf8Prefix : std::uint8_t {
+  kComplete,    // bytes[0..length) is one well-formed sequence
+  kIncomplete,  // all of `bytes` is a proper prefix of some well-formed
+                // sequence — further bytes could still complete it
+  kInvalid,     // bytes[0..length) is a maximal subpart: replace it with
+                // one U+FFFD and rescan at `length`
+};
+
+struct Utf8Classification {
+  Utf8Prefix kind;
+  std::size_t length;  // bytes consumed (kIncomplete: bytes.size())
+};
+
+// Classifies the leading UTF-8 sequence of `bytes` (must be non-empty).
+[[nodiscard]] Utf8Classification classify_utf8_prefix(std::string_view bytes);
+
+// Appends `bytes` to `out` with every maximal invalid subpart replaced by
+// U+FFFD (Rust String::from_utf8_lossy semantics). A trailing incomplete
+// sequence is invalid here — batch conversion has no more bytes coming.
+void append_utf8_lossy(std::string& out, std::string_view bytes);
 
 }  // namespace engine::tokenizer

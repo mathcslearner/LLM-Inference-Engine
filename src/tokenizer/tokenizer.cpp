@@ -1032,12 +1032,26 @@ core::StatusOr<std::vector<std::int32_t>> Tokenizer::encode(
   return ids;
 }
 
-// Stub until M4-T10, whose implementation reads the tokenizer's state.
-// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
-core::StatusOr<std::string> Tokenizer::decode(
-    std::span<const std::int32_t> /*ids*/, bool /*skip_special_tokens*/) const {
-  return core::UnimplementedError(
-      "Tokenizer::decode is not implemented yet (M4-T10)");
+core::StatusOr<std::string> Tokenizer::decode(std::span<const std::int32_t> ids,
+                                              bool skip_special_tokens) const {
+  std::string bytes;
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    const std::int32_t id = ids[i];
+    const auto token = token_bytes(id);
+    if (!token.has_value()) {
+      return core::InvalidArgumentError(
+          "id {} (at position {}) is out of range [0, {})", id, i,
+          vocab_size());
+    }
+    if (skip_special_tokens && is_special(id)) {
+      continue;
+    }
+    bytes.append(*token);
+  }
+  std::string text;
+  text.reserve(bytes.size());
+  append_utf8_lossy(text, bytes);
+  return text;
 }
 
 std::int64_t Tokenizer::vocab_size() const {

@@ -426,3 +426,36 @@ the real Qwen-2 pattern and asserts unknown-pattern rejection). 576
 tests green; format + scoped tidy clean (tidy: generated .inc wrapped
 in NOLINT for designated-initializers; MatchAt split into helpers to
 pass cognitive-complexity).
+M4-T10 done (2026-08-08: decoding & incremental detokenization — M4
+complete. `Tokenizer::decode(ids, skip_special_tokens)` replaces the T09
+stub: per-id range check (`InvalidArgument` naming id and position),
+added tokens decode to raw content and are dropped only when skipping
+*and* `special`, byte concatenation, then a lossy UTF-8 pass. The
+non-obvious finding driving the design: the goldens show HF's decode is
+NOT raw byte concatenation — `tokenizers` materializes the bytes via
+Rust's `String::from_utf8_lossy`, i.e. strict UTF-8 (overlong/surrogate/
+>U+10FFFF invalid) with the WHATWG maximal-subpart policy, one U+FFFD
+per maximal subpart (`FF FE FD` → 3 replacements, truncated `E2 82` tail
+→ 1). unicode.h gains that strict classifier (`classify_utf8_prefix`:
+kComplete/kIncomplete/kInvalid + subpart length; `append_utf8_lossy`),
+coexisting with the deliberately-lenient encode-side `decode_utf8`. New
+`detokenize.h/.cpp`: `DetokenizerStream` (§6.5 API — push/finish over a
+≤3-byte carried prefix) drains via the same classifier, so streaming
+output is bit-identical to batch decode (the design's "up to the U+FFFD
+policy" hedge proved unnecessary — tests assert exact equality);
+finish() turns a truncated carry into one U+FFFD and resets (stream
+reusable); a rejected push leaves state untouched. Golden pairing
+pinned: `decoded` ↔ (ids, skip=false), `decoded_skip_special` ↔
+(ids_with_special, skip=true) — recorded with the rest in a §6.5
+amendment block. Tests: +16/−1 (tokenizer_decode_test 11 — both
+families' 24-vector golden decode + encode↔decode round-trip +
+token-by-token streaming with a test-local independent UTF-8 validator
+asserting every emission valid and concat == batch; multi-token-emoji
+buffering pinned on llama3's 3-token U+1F469; truncated-tail finish
+policy vs batch agreement; out-of-range errors batch and stream incl.
+state-preserved-after-error; mini-tokenizer non-special added token
+survives skip_special_tokens; unicode_test +4 — classifier
+complete/incomplete/maximal-subpart shapes incl. overlong, surrogate,
+broken-mid-sequence, and from_utf8_lossy-parity cases; the
+DecodeIsUnimplementedUntilT10 stub test removed). 591 tests green;
+format + scoped tidy clean.

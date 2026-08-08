@@ -290,4 +290,65 @@ std::optional<char32_t> decode_utf8(std::string_view text, std::size_t& pos) {
   return codepoint;
 }
 
+Utf8Classification classify_utf8_prefix(std::string_view bytes) {
+  const auto lead = static_cast<unsigned char>(bytes[0]);
+  if (lead < 0x80) {
+    return {.kind = Utf8Prefix::kComplete, .length = 1};
+  }
+  // Continuation range of the *second* byte per lead (WHATWG utf-8 decode
+  // table): the restrictions reject overlong forms (E0/F0), surrogates
+  // (ED), and > U+10FFFF (F4); later continuations are always 80–BF.
+  std::size_t length = 0;
+  unsigned char second_lo = 0x80;
+  unsigned char second_hi = 0xBF;
+  if (lead >= 0xC2 && lead <= 0xDF) {
+    length = 2;
+  } else if (lead >= 0xE0 && lead <= 0xEF) {
+    length = 3;
+    if (lead == 0xE0) {
+      second_lo = 0xA0;
+    } else if (lead == 0xED) {
+      second_hi = 0x9F;
+    }
+  } else if (lead >= 0xF0 && lead <= 0xF4) {
+    length = 4;
+    if (lead == 0xF0) {
+      second_lo = 0x90;
+    } else if (lead == 0xF4) {
+      second_hi = 0x8F;
+    }
+  } else {
+    // Continuation byte with no lead (80–BF), overlong lead (C0/C1), or
+    // out-of-range lead (F5–FF): a one-byte maximal subpart.
+    return {.kind = Utf8Prefix::kInvalid, .length = 1};
+  }
+  for (std::size_t i = 1; i < length; ++i) {
+    if (i >= bytes.size()) {
+      return {.kind = Utf8Prefix::kIncomplete, .length = bytes.size()};
+    }
+    const auto cont = static_cast<unsigned char>(bytes[i]);
+    const unsigned char lo = i == 1 ? second_lo : 0x80;
+    const unsigned char hi = i == 1 ? second_hi : 0xBF;
+    if (cont < lo || cont > hi) {
+      // The maximal subpart ends before the offending byte, which is
+      // reclassified on its own at the next scan position.
+      return {.kind = Utf8Prefix::kInvalid, .length = i};
+    }
+  }
+  return {.kind = Utf8Prefix::kComplete, .length = length};
+}
+
+void append_utf8_lossy(std::string& out, std::string_view bytes) {
+  std::size_t pos = 0;
+  while (pos < bytes.size()) {
+    const auto part = classify_utf8_prefix(bytes.substr(pos));
+    if (part.kind == Utf8Prefix::kComplete) {
+      out.append(bytes.substr(pos, part.length));
+    } else {
+      append_utf8(out, 0xFFFD);
+    }
+    pos += part.length;  // kIncomplete consumes the whole remainder
+  }
+}
+
 }  // namespace engine::tokenizer

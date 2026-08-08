@@ -809,6 +809,29 @@ current incomplete sequence (≤ 3 bytes carried), so streaming adds O(1)
 state per sequence — this type is what M9's streaming generation holds
 per request.
 
+> **Amendment (M4-T10, 2026-08-08).** Decisions recorded as implemented:
+>
+> - **Batch `decode` is not raw byte concatenation at its boundary.** HF
+>   materializes the concatenated token bytes as a Rust `String` via
+>   `from_utf8_lossy`: strict UTF-8 (overlong forms, surrogates, and
+>   > U+10FFFF are invalid) with the WHATWG *maximal subpart* policy —
+>   each longest prefix of a well-formed sequence that cannot be
+>   completed becomes exactly one U+FFFD. The malformed-tail goldens pin
+>   it (`FF FE FD` → three replacements; a truncated `E2 82` tail → one),
+>   so `decode` concatenates and then applies that lossy conversion; its
+>   output is always valid UTF-8. The classifier
+>   (`classify_utf8_prefix`/`append_utf8_lossy`, unicode.h) is strict —
+>   deliberately unlike the lenient `decode_utf8` the encode side uses —
+>   and is shared with `DetokenizerStream`, which makes streaming output
+>   *bit-identical* to batch decode: the "up to the U+FFFD policy" hedge
+>   above turned out unnecessary, and the tests assert exact equality.
+> - **Golden pairing:** `decoded` ↔ (`ids`, skip=false);
+>   `decoded_skip_special` ↔ (`ids_with_special`, skip=true) — exactly
+>   what the generator recorded.
+> - **`finish` resets the carry**: a second `finish` returns `""` and the
+>   stream is reusable for a fresh id sequence. A rejected (out-of-range)
+>   `push` leaves the carried state untouched.
+
 ---
 
 ## 7. Golden fixtures

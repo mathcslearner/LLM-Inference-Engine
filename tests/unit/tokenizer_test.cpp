@@ -317,14 +317,6 @@ TEST(TokenizerParseTest, AddedTokenMayShadowVocabEntry) {
   EXPECT_TRUE(tok->is_special(0));
 }
 
-TEST(TokenizerParseTest, DecodeIsUnimplementedUntilT10) {
-  const auto tok = Tokenizer::from_json(TokenizerJson());
-  ASSERT_TRUE(tok.ok()) << tok.status();
-  const std::vector<std::int32_t> ids = {0, 1};
-  const auto decoded = tok->decode(ids, /*skip_special_tokens=*/false);
-  EXPECT_TRUE(IsUnimplemented(decoded.status()));
-}
-
 TEST(TokenizerRejectTest, UnknownSplitPatternIsUnimplemented) {
   // M4-T09: the Split regex must be one of the known GPT-2/cl100k-family
   // pattern strings the hand-written matcher was validated against.

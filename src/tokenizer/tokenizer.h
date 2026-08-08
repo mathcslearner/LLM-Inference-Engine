@@ -17,10 +17,11 @@
 // Byte-level BPE tokenizer over the HF `tokenizer.json` format (M4-T08/T09;
 // design: docs/design/model-loading.md §6). Parsing builds the in-memory
 // structures — token↔id maps, merge ranks, the added-token registry,
-// per-id raw bytes via the byte-level alphabet (bpe.h) — and encode
-// (M4-T09) runs the §6.4 pipeline over them: added-token split →
-// normalize → pre-tokenize (pretokenize.h) → byte-level map → merge loop
-// → template insertions. decode lands in M4-T10.
+// per-id raw bytes via the byte-level alphabet (bpe.h) — encode (M4-T09)
+// runs the §6.4 pipeline over them: added-token split → normalize →
+// pre-tokenize (pretokenize.h) → byte-level map → merge loop → template
+// insertions; decode (M4-T10) inverts it per §6.5 (the incremental
+// streaming variant is DetokenizerStream, detokenize.h).
 //
 // The format is a pipeline description (`normalizer` → `pre_tokenizer` →
 // `model` → `post_processor`, plus `decoder` and `added_tokens`); we
@@ -84,7 +85,12 @@ class Tokenizer {
   [[nodiscard]] core::StatusOr<std::vector<std::int32_t>> encode(
       std::string_view text, bool add_special_tokens) const;
 
-  // decode lands in M4-T10; until then it returns `Unimplemented`.
+  // Decodes ids per §6.5: token bytes concatenated (added tokens their raw
+  // content; dropped when `skip_special_tokens` and `special`), then every
+  // maximal invalid UTF-8 subpart replaced with one U+FFFD — HF materializes
+  // the bytes via Rust's String::from_utf8_lossy and the malformed-tail
+  // goldens pin that policy, so the result is always valid UTF-8. An
+  // out-of-range id is `InvalidArgument` naming the id and its position.
   [[nodiscard]] core::StatusOr<std::string> decode(
       std::span<const std::int32_t> ids, bool skip_special_tokens) const;
 

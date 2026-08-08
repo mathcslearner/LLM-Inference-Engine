@@ -653,7 +653,7 @@ vector<int32>`.
 **Acceptance criteria:**
 - Golden tests: encodings byte-identical to HF `tokenizers` for the committed test vectors (ASCII, Unicode incl. CJK + emoji, whitespace edge cases, special tokens embedded in text) for both tokenizer fixtures.
 
-### M4-T10 · Decoding & incremental detokenization
+### M4-T10 · Decoding & incremental detokenization — ✅ DONE (2026-08-08)
 Implement `decode(ids, skip_special_tokens)` and an incremental
 `DetokenizerStream` that emits valid UTF-8 as tokens arrive (buffering incomplete
 multi-byte sequences) — required later for streaming generation.
