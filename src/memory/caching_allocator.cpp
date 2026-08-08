@@ -141,7 +141,7 @@ std::size_t CachingAllocator::release_cached() {
     released = ReleaseCachedLocked(victims);
   }
   // Destroy outside the lock: no reason to hold the pool mutex across
-  // upstream frees (e.g. cudaFree).
+  // upstream frees.
   victims.clear();
   return released;
 }

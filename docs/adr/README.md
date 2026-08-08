@@ -35,6 +35,7 @@ never contradict one.
 
 | ADR | Title | Status |
 |---|---|---|
-| [ADR-001](ADR-001-language-and-toolchain.md) | Language & toolchain: C++20 + CUDA | Accepted |
-| [ADR-002](ADR-002-repository-layout-and-module-boundaries.md) | Repository layout & module dependency rules | Accepted |
+| [ADR-001](ADR-001-language-and-toolchain.md) | Language & toolchain: C++20 + CUDA | Accepted (CUDA half superseded by ADR-004) |
+| [ADR-002](ADR-002-repository-layout-and-module-boundaries.md) | Repository layout & module dependency rules | Accepted (current through Amendment 4) |
 | [ADR-003](ADR-003-error-handling.md) | Error handling: Status/StatusOr, CHECK, no exceptions | Accepted |
+| [ADR-004](ADR-004-cpu-first-pivot.md) | CPU-first pivot: SIMD engine, CUDA backend retired | Accepted |

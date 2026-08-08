@@ -17,7 +17,6 @@ GoogleTest + CTest. Built by default; disable with `-DENGINE_BUILD_TESTS=OFF`.
 ctest --test-dir build                      # everything
 ctest --test-dir build -j 8                 # parallel across test binaries
 ctest --test-dir build -L unit              # one tree only (labels: unit, integration)
-ctest --test-dir build -L gpu               # only the GPU tests (see below)
 ctest --test-dir build -R FixturesDir       # by name regex
 ctest --test-dir build --output-on-failure  # print failing tests' output
 ```
@@ -56,63 +55,15 @@ in the same file for tests needing different dependencies.
 - Numerical tests state their tolerance explicitly at the comparison site.
 - Fixture-driven tests locate golden data via `engine::testing::FixturesDir()`
   (`common/paths.h`) — never via relative paths or the working directory.
-- GPU tests auto-skip when no CUDA device is present, so CPU-only runs and
-  CI stay green — skips, never failures. See below.
 
-## GPU tests (design: docs/design/cuda-backend.md §10)
+## SIMD kernel tests (CPU-first, ADR-004)
 
-GPU tests live in the same `tests/unit/*_test.cpp` files and targets as
-everything else — there is no separate GPU suite to forget to run. A test
-that needs a device goes in a suite derived from
-`engine::testing::CudaTestFixture` (`common/cuda.h`) and named
-`<Thing>GpuTest` (or `<Thing>GpuDeathTest`). That naming is load-bearing:
-CTest discovery (`engine_add_tests`, tests/CMakeLists.txt) labels exactly
-those suites `<tree>-gpu`, which `ctest -L gpu` and `ctest -L <tree>` both
-match (`-L` is a regex). Everything the fixture provides:
-
-- **Skip guard** — `SetUp` skips (never fails) without a device, on every
-  build. One-off GPU checks inside an otherwise CPU test can still use
-  `ENGINE_SKIP_WITHOUT_CUDA()` directly, but then live in an ordinary suite
-  and don't carry the gpu label — prefer a `*GpuTest` fixture suite.
-- **Device selection** — device 0 is current for the whole test
-  (`ScopedSetDevice`).
-- **`stream()` / `stream_handle()`** — a per-test `CudaStream` to enqueue
-  on; `TearDown` synchronizes it, surfacing deferred execution errors.
-- **`allocator()`** — a per-test `CachingAllocator` over the device-0
-  default allocator, for `Tensor::empty`. Its destructor CHECKs that no
-  Buffer is live, so don't stash device tensors beyond the test body.
-
-### Writing a kernel test (the CPU-reference pattern)
-
-The correctness ladder (CLAUDE.md): HuggingFace fixtures validate the CPU
-reference; the CPU reference validates every GPU kernel; naive kernels
-validate optimized ones. A kernel test therefore never invents expected
-values — it computes them with the CPU implementation:
-
-1. Build inputs on the CPU with the seeded fills (`ops::fill_uniform` with
-   an explicit seed — deterministic everywhere).
-2. Compute the expected result with the CPU reference (`cpu/` or tensor
-   ops), mirroring the kernel's documented arithmetic (e.g. widen-to-float).
-3. Upload with `Tensor::to(Device::Cuda(0))` and run the kernel launcher on
-   `stream_handle()`.
-4. Compare with `engine::testing::ExpectTensorsClose(gpu_out, cpu_expected,
-   stream())`: it synchronizes the stream, copies the result to the host,
-   and runs `ops::allclose` — failures print the worst-mismatch report.
-5. Sweep sizes: 1, a block multiple, a non-multiple, and more than one
-   grid's worth (so the grid-stride wrap path runs). Cover zero-numel in
-   its own test — launchers return OK without launching on an empty
-   tensor, so it needs no reference comparison. See
-   `elementwise_test.cpp` for the canonical example.
-
-Tolerances are stated at the comparison site: `ExpectTensorsClose` defaults
-to the per-dtype `default_allclose_tolerance` (accepting the default is
-still stating one); pass explicit `rtol`/`atol` — `0.0, 0.0` for bit-exact
-kernels — and document why when a kernel needs looser bounds.
-
-### Where things run
-
-| Environment | What runs |
-|---|---|
-| CPU-only CI (GitHub Actions) | everything except GPU tests, which skip; CUDA modules build their stub paths |
-| GPU dev machine | full suite; `ctest -L gpu` for the GPU subset |
-| Optional GPU CI | `.github/workflows/gpu-ci.yml`, a dormant manually-triggered workflow for a self-hosted GPU runner |
+The correctness ladder (CLAUDE.md): HuggingFace fixtures validate the scalar
+reference implementations; the scalar reference validates every vectorized
+(NEON/AVX2) and optimized kernel. A kernel test therefore never invents
+expected values — it computes them with the reference implementation. The
+suite runs the best ISA the host offers plus a forced-scalar pass
+(`ENGINE_FORCE_ISA=scalar`), so CI on x86-64 and the arm64 dev machine
+together cover every backend and no test is skipped for lack of hardware.
+The concrete fixture and helper patterns land with the SIMD dispatch
+infrastructure (ROADMAP.md M3-T05/T06) and will be documented here.

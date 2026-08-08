@@ -1,4 +1,11 @@
-# CUDA backend
+# CUDA backend (RETIRED)
+
+> **Retired 2026-08-07 (M3-T01/T02, ADR-004).** The engine pivoted to
+> CPU-first; the code this document governed was removed in M3-T02 (it
+> survives in git history through the `post-M2 hardening` commits). Kept as
+> the starting point for any future GPU backend. Nothing below is updated
+> for the current tree — the device-agnostic caching pool allocator (§7.3)
+> is the one piece that lives on, in `src/memory/`.
 
 **Milestone:** M2 (design doc: M2-T01; implementation: M2-T02 … M2-T09)
 **Governs:** `src/cuda/`, `src/kernels/`, and the CUDA-facing parts of

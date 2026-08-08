@@ -14,14 +14,14 @@
 //
 // This is a tensor_base header (ADR-002 Amendment 1): header-only, includes
 // nothing from memory or the rest of tensor, may include core. It is also
-// backend-agnostic: no CUDA headers, ever — a CUDA Device is *representable*
-// on any build, but allocating on one returns Unimplemented until M2 (and
-// Unavailable-style failures after, on non-CUDA builds).
+// backend-agnostic: kCUDA is a *reserved* device type — representable and
+// parseable on any build, but allocating on one returns Unimplemented (the
+// engine is CPU-first, ADR-004; the value is kept so a future GPU backend
+// is additive, not an API break).
 //
-// `Device` is just an address. The device *registry* (how many CUDA devices
-// exist, their properties) is M2's problem (`src/cuda/`); nothing here
-// validates `index` against hardware — validation happens where a device is
-// *used* (allocation, transfer), where a `Status` can carry real context.
+// `Device` is just an address: nothing here validates `index` against
+// hardware — validation happens where a device is *used* (allocation),
+// where a `Status` can carry real context.
 
 namespace engine::tensor {
 

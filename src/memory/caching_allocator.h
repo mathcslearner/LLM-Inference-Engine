@@ -11,10 +11,9 @@
 #include <vector>
 
 // CachingAllocator — size-class caching pool over any upstream Allocator
-// (M2-T06; design: docs/design/cuda-backend.md §7.3–§7.4). The engine's
-// memory-pooling backbone: in practice the upstream is a CudaAllocator, but
-// the pool is device-agnostic and works over any Allocator, so it is
-// toolkit-free and compiled on every configuration.
+// (M2-T06; the engine's memory-pooling backbone, kept through the CPU-first
+// pivot per ADR-004 — it becomes the KV block pool's backing store). The
+// pool is device-agnostic and works over any Allocator.
 //
 // This class is the exception the Buffer ownership model anticipated
 // (allocator.h): its deleters capture `this` to return blocks to the free
@@ -23,11 +22,9 @@
 // pool while Buffers are live is programmer error (CHECK); for the same
 // reason the class is neither copyable nor movable.
 //
-// Stream semantics (design §7.4): the pool is stream-agnostic. A block freed
-// and immediately reused on any stream is safe only under the §6.4 rule that
-// callers never destroy a Buffer while device work using it is in flight —
-// the same contract raw cudaFree imposes, but a violation here corrupts the
-// next tenant of the block instead of being driver-managed.
+// A freed block may be handed to the next requester immediately: callers
+// must not destroy a Buffer while any concurrent work still uses its bytes,
+// or the free list's next tenant is corrupted.
 
 namespace engine::memory {
 
@@ -44,9 +41,9 @@ class CachingAllocator final : public Allocator {
  public:
   // Every upstream allocation is requested at this fixed alignment, and
   // Allocate CHECK-rejects requests above it. Fixing one pool-wide alignment
-  // (cudaMalloc's 256-byte guarantee, ≥ every alignment the engine uses)
-  // means any cached block satisfies any admissible request, so free lists
-  // never need alignment keys.
+  // (256 bytes, ≥ every alignment the engine uses) means any cached block
+  // satisfies any admissible request, so free lists never need alignment
+  // keys.
   static constexpr std::size_t kMaxAlignment = 256;
 
   // `upstream` is non-owning and must outlive this allocator.

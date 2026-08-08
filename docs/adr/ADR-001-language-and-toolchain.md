@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted (2026-08-03)
+Accepted (2026-08-03). The CUDA half is superseded by
+[ADR-004](ADR-004-cpu-first-pivot.md) (2026-08-07): the engine is CPU-first —
+C++20 with SIMD kernels; there is no CUDA in the build. The C++20/CMake/
+toolchain decisions below remain in force.
 
 ## Context
 

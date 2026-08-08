@@ -1,8 +1,6 @@
 #include "tensor/tensor.h"
 
-#include "common/cuda.h"
 #include "core/status.h"
-#include "cuda/cuda_utils.h"
 #include "memory/allocator.h"
 #include "tensor/device.h"
 #include "tensor/dtype.h"
@@ -155,41 +153,33 @@ TEST(TensorTest, TypedAccessWithHalfPrecisionDtypes) {
   EXPECT_EQ(bf16.item<bfloat16>({0}), -2.0F);
 }
 
-#ifndef ENGINE_ENABLE_CUDA
-// CPU-only builds: the CUDA allocator stub reports the build (M2-T05; the
-// message distinguishes "built without CUDA" from a bad device index).
-TEST(TensorTest, EmptyCudaIsUnimplementedOnCpuOnlyBuilds) {
+// The reserved kCUDA device: representable as a Device value, never
+// allocatable — the engine has no GPU backend (ADR-004).
+TEST(TensorTest, EmptyCudaIsUnimplemented) {
   const StatusOr<Tensor> t =
       Tensor::empty(Shape{2, 2}, DataType::kFloat32, Device::Cuda(0));
   ASSERT_FALSE(t.ok());
   EXPECT_TRUE(IsUnimplemented(t.status())) << t.status().ToString();
 }
-#else
-// CUDA builds with a GPU: a real device tensor, tagged with the requested
-// device (the M2-T05 acceptance criterion). On CudaTestFixture (M2-T09) for
-// the skip guard; empty() routes through DefaultCudaAllocator itself.
-class TensorGpuTest : public engine::testing::CudaTestFixture {};
 
-TEST_F(TensorGpuTest, EmptyCudaAllocatesDeviceTensor) {
+// to() on the reserved device is likewise Unimplemented; contiguity is
+// still checked first, and the same-device fast path returns the same
+// shared handle (the retired M2 contract, kept for a future backend).
+TEST(TensorTest, ToCudaIsUnimplementedAndToSameDeviceIsSameHandle) {
   const Tensor t =
-      Unwrap(Tensor::empty(Shape{2, 3}, DataType::kFloat32, Device::Cuda(0)));
-  EXPECT_TRUE(t.device() == Device::Cuda(0));
-  EXPECT_EQ(t.dtype(), DataType::kFloat32);
-  EXPECT_EQ(t.numel(), 6);
-  EXPECT_TRUE(t.is_contiguous());
-  EXPECT_NE(t.data(), nullptr);
+      Unwrap(Tensor::empty(Shape{2, 2}, DataType::kFloat32, Device::Cpu()));
+  const StatusOr<Tensor> moved = t.to(Device::Cuda(0));
+  ASSERT_FALSE(moved.ok());
+  EXPECT_TRUE(IsUnimplemented(moved.status())) << moved.status().ToString();
+  const Tensor same = Unwrap(t.to(Device::Cpu()));
+  EXPECT_EQ(same.data(), t.data());
+  // Non-contiguous rejection precedes the same-device fast path.
+  const Tensor inner = Unwrap(t.slice(1, 0, 1));
+  const StatusOr<Tensor> strided = inner.to(Device::Cpu());
+  ASSERT_FALSE(strided.ok());
+  EXPECT_TRUE(IsInvalidArgument(strided.status()))
+      << strided.status().ToString();
 }
-
-// CUDA builds with or without a GPU: an out-of-range device index is
-// InvalidArgument (design §5.2) — on a GPU-less machine that is every index.
-TEST(TensorTest, EmptyCudaOutOfRangeIndexIsInvalidArgument) {
-  const StatusOr<Tensor> t =
-      Tensor::empty(Shape{2, 2}, DataType::kFloat32,
-                    Device::Cuda(engine::cuda::device_count()));
-  ASSERT_FALSE(t.ok());
-  EXPECT_TRUE(IsInvalidArgument(t.status())) << t.status().ToString();
-}
-#endif  // ENGINE_ENABLE_CUDA
 
 TEST(TensorTest, EmptyUsesExplicitAllocator) {
   CountingAllocator allocator;

@@ -1,5 +1,4 @@
-# Continuous integration, CPU only (M0-T05). GPU jobs are out of scope here;
-# the dormant, manually-triggered GPU workflow lives in gpu-ci.yml (M2-T09).
+# Continuous integration (M0-T05; CPU-first engine per ADR-004).
 #
 # Jobs:
 #   format      — scripts/check-format.sh with the pinned clang-format (LLVM 20).
@@ -96,7 +95,6 @@ jobs:
           ccache -z
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DENGINE_ENABLE_CUDA=OFF \
             -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DFETCHCONTENT_BASE_DIR="${{ github.workspace }}/.deps"
@@ -133,7 +131,6 @@ jobs:
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DENGINE_ENABLE_CUDA=OFF \
             -DCMAKE_CXX_COMPILER=clang++-18 \
             -DFETCHCONTENT_BASE_DIR="${{ github.workspace }}/.deps"
       - name: Run clang-tidy

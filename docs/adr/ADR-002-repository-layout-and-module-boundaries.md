@@ -36,9 +36,12 @@ by construction and must stay that way.**
 
 ```
 server → runtime → scheduler ─┐
-                   engine ────┼→ model / tokenizer / kvcache / sampling / quant / spec / distributed
-                              └→ tensor / memory / cuda / kernels / cpu → core
+                   engine ────┼→ model / tokenizer / kvcache / sampling / quant / spec
+                              └→ tensor / memory / parallel / kernels / cpu → core
 ```
+
+(Amendment 4: `cuda` and `distributed` removed, `parallel` added — the
+CPU-first pivot, ADR-004.)
 
 Expanded into layers (each module may depend on any module in a *lower* layer,
 plus the intra-layer edges listed explicitly):
@@ -48,8 +51,8 @@ plus the intra-layer edges listed explicitly):
 | 5 · serving | `server` | — |
 | 4 · orchestration | `runtime` | — |
 | 3 · execution | `engine`, `scheduler` | — (`engine` and `scheduler` never depend on each other; `runtime` mediates) |
-| 2 · domain | `model`, `tokenizer`, `kvcache`, `sampling`, `quant`, `spec`, `distributed` | none today; any future edge (e.g. `spec → model`) requires amending this ADR |
-| 1 · compute substrate | `memory`, `tensor`, `cuda`, `kernels`, `cpu` | `tensor → memory`; `tensor → cuda` (Amendment 3); `memory → cuda` (Amendment 2, was `cuda → memory`); `kernels → cuda, tensor`; `cpu → tensor`; `memory → tensor_base` (Amendment 1) |
+| 2 · domain | `model`, `tokenizer`, `kvcache`, `sampling`, `quant`, `spec` | none today; any future edge (e.g. `spec → model`) requires amending this ADR |
+| 1 · compute substrate | `memory`, `tensor`, `parallel`, `kernels`, `cpu` | `tensor → memory`; `kernels → tensor, parallel`; `cpu → tensor`; `memory → tensor_base` (Amendment 1). (Amendment 4 retired `cuda` and its edges from Amendments 2/3.) |
 | 0 · foundation | `core` | — (depends on nothing but pinned third-party libs) |
 
 Cross-cutting exception: **`metrics`** may depend only on `core`, and any module
@@ -64,12 +67,11 @@ skip it.
    only from modules it links via `target_link_libraries(… engine::<module>)`.
    Includes are rooted at `src/` (`#include "core/status.h"`), so every include
    names its module and boundary violations are greppable.
-3. **CPU-only code never links CUDA.** Only `cuda`, `kernels`, `memory` (its
-   CUDA allocators), `tensor` (its transfer TU, Amendment 3), and
-   `distributed` (NCCL) may touch the CUDA toolkit, and only behind
-   `ENGINE_ENABLE_CUDA`. Every module — including those five, with GPU paths
-   compiled out — builds and passes its CPU tests with
-   `-DENGINE_ENABLE_CUDA=OFF`, which is what CPU-only CI runs.
+3. **CPU-only code never links CUDA.** (Amendment 4: with the CPU-first
+   pivot the toolkit list is empty — no module may include CUDA toolkit
+   headers. The rule's original form, retained for history: only `cuda`,
+   `kernels`, `memory`, `tensor`, and `distributed` could touch the toolkit,
+   behind `ENGINE_ENABLE_CUDA`.)
 4. **`scheduler` stays pure decision logic** (its module contract): it consumes
    descriptions of requests and budgets and returns decisions — it never
    touches tensors, streams, or the model. That is why it sits beside `engine`,
@@ -195,3 +197,28 @@ because both edges are PRIVATE and header-hygiene keeps the toolkit out of
 public surfaces. `cuda` links nothing from `tensor` (nor, in practice,
 `tensor_base` — see the Amendment 2 correction), so no cycle exists. Rationale and details: `docs/design/cuda-backend.md` §2.1
 (refined in M2-T07) and §8.
+
+### Amendment 4 (2026-08-07, with M3-T02): the CPU-first pivot retires `cuda` and `distributed`
+
+ADR-004 pivots the engine to CPU-first. This amendment records the module
+consequences:
+
+- Removed: the `cuda` module (`src/cuda/`) and, with it, every edge added
+  for it — Amendment 2's `memory → cuda` and Amendment 3's `tensor → cuda`.
+  Rule 3's CUDA-toolkit list is now empty: no module may include CUDA
+  toolkit headers.
+- Removed: the planned `distributed` module (`src/distributed/`, NCCL
+  tensor parallelism — never implemented beyond a placeholder).
+- Added: the `parallel` module (`src/parallel/`, thread pool +
+  deterministic parallel_for; lands with M3-T04). Layer 1, beside `memory`:
+  `parallel → core` only; `kernels`, `cpu`, and `engine` may link it.
+- Repurposed: `kernels` (`src/kernels/`) now holds CPU SIMD kernels
+  (scalar/NEON/AVX2 behind runtime dispatch). Its edges become
+  `kernels → tensor, parallel`.
+- Unchanged: Amendment 1 (`memory → tensor_base`) and everything else in
+  the layer table. `tensor_base` keeps `Device` with the reserved `kCUDA`
+  value — representable, never allocatable — so a future GPU backend is
+  additive.
+
+The retired design doc lives at `docs/design/retired/cuda-backend.md`;
+rationale for the pivot itself is ADR-004.

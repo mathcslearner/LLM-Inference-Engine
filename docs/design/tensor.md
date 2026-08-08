@@ -1,5 +1,13 @@
 # Tensor library & device model
 
+> **Post-pivot note (2026-08-07, ADR-004):** the engine is CPU-first. Where
+> this document mentions CUDA devices, device allocators, or transfers, it
+> describes design *allowances* — `Device`'s reserved `kCUDA` value and the
+> backend-agnostic seams — not current functionality: allocating on or
+> transferring to a CUDA device returns `Unimplemented`, and the M2 CUDA
+> implementations were removed in M3-T02 (see
+> `docs/design/retired/cuda-backend.md`).
+
 **Milestone:** M1 (design doc: M1-T01; implementation: M1-T02 … M1-T09)
 **Governs:** `src/tensor/`, `src/memory/`
 **Cites:** ADR-001 (language/toolchain), ADR-002 (module boundaries),
@@ -282,10 +290,10 @@ namespace engine::tensor {
 
 enum class DeviceType : std::uint8_t { kCPU = 0, kCUDA = 1 };
 
-// Plain value type. Backend-agnostic: this header never includes CUDA
-// headers; a CUDA Device is *representable* on any build, but allocating on
-// one returns Unimplemented until M2 (and Unavailable-style failures after,
-// on non-CUDA builds).
+// Plain value type. Backend-agnostic: kCUDA is a *reserved* device type —
+// representable and parseable, but allocating on one returns Unimplemented
+// (CPU-first engine, ADR-004; the value is kept so a future GPU backend is
+// additive, not an API break).
 //
 // Invariants, CHECKed at construction: index >= 0, and index == 0 for
 // kCPU. They keep operator== and ToString/Parse round-trips consistent —
@@ -318,11 +326,11 @@ class Device {
 // ("cuda:1") — the printing contract §7.1 relies on.
 ```
 
-The device *registry* (how many CUDA devices exist, their properties) is
-M2's problem (`src/cuda/`); `Device` itself is just an address. Nothing in
-layer 1 validates `index` against hardware at construction time — validation
-happens where a device is *used* (allocation, M2 transfer), where a `Status`
-can be returned with real context.
+`Device` itself is just an address: nothing in layer 1 validates `index`
+against hardware at construction time — validation happens where a device is
+*used* (allocation), where a `Status` can be returned with real context.
+(A device *registry* was the retired CUDA backend's concern; a future GPU
+backend would reintroduce one.)
 
 **Refined post-M1 (hardening pass, 2026-08-03).** Originally sketched as an
 open aggregate (`struct` with public `type`/`index`); that allowed

@@ -1,90 +1,109 @@
 # LLM Inference Engine
 
-A production-grade, multi-GPU LLM inference engine for decoder-only transformer
-models (Llama, Qwen, and similar families). C++20 + CUDA, targeting NVIDIA GPUs on
-Linux x86-64. Performance-competitive with existing engines (vLLM-class) while
-prioritizing clean architecture, maintainability, and thorough testing.
+A production-grade, **CPU-first** LLM inference engine for decoder-only
+transformer models (Llama, Qwen, and similar families). C++20 with
+hand-vectorized SIMD kernels — NEON on Apple Silicon arm64 (the primary dev
+platform), AVX2 on Linux x86-64 (CI and deployment) — behind runtime dispatch
+over an always-present scalar reference. Performance-competitive with existing
+CPU engines (llama.cpp-class) while prioritizing clean architecture,
+maintainability, and thorough testing. The pivot from the original CUDA plan is
+recorded in ADR-004.
 
 **Feature scope (built incrementally):** paged KV cache, continuous batching,
-prefix caching, custom CUDA kernels (attention, norms, fusions), CUDA graphs,
-chunked prefill, weight-only quantization (INT8/INT4 AWQ/GPTQ, FP8 KV cache),
-tensor parallelism via NCCL, speculative decoding, OpenAI-compatible HTTP API with
-SSE streaming, Prometheus metrics. **Inference only** — no training, fine-tuning, or
-model-conversion tooling.
+prefix caching, custom SIMD kernels (GEMM, attention, norms, fusions), chunked
+prefill, weight-only quantization (INT8/INT4, AWQ/GPTQ formats, INT8 KV cache)
+*including our own quantizer implementations and evaluation harness*,
+speculative decoding with a measurement study, OpenAI-compatible HTTP API with
+SSE streaming, Prometheus metrics. **Inference only** — no training or
+fine-tuning.
 
 ## The roadmap is the source of truth
 
-All work follows **[ROADMAP.md](ROADMAP.md)**: linear milestones (M0–M16) broken into
-tickets (`M<n>-T<m>`) sized for one focused session (1–4 hours, a few hundred lines
-including tests). Work tickets **strictly in order**. For each ticket:
+All work follows **[ROADMAP.md](ROADMAP.md)** (the v2, CPU-first plan): linear
+milestones (M0–M17) broken into tickets (`M<n>-T<m>`) sized for one focused
+session (1–4 hours, a few hundred lines including tests). Work tickets
+**strictly in order**. For each ticket:
 
-1. Read the ticket, its dependencies, and the governing design doc in `docs/design/`
-   (each milestone's first ticket usually writes one — implementation must conform).
-2. Implement the feature **and its tests together** — a ticket without tests is not done.
-3. Meet every acceptance criterion; build clean (warnings-as-errors), format clean.
-4. Mark the ticket done in ROADMAP.md: append ` — ✅ DONE (YYYY-MM-DD)` to its heading.
-5. If implementation reveals a design flaw, update the design doc in the same change
-   and note what changed. Never silently diverge from a design doc.
+1. Read the ticket, its dependencies, and the governing design doc in
+   `docs/design/` (each milestone's first ticket usually writes one —
+   implementation must conform).
+2. Implement the feature **and its tests together** — a ticket without tests is
+   not done.
+3. Meet every acceptance criterion; build clean (warnings-as-errors), format
+   clean.
+4. Mark the ticket done in ROADMAP.md: append ` — ✅ DONE (YYYY-MM-DD)` to its
+   heading.
+5. If implementation reveals a design flaw, update the design doc in the same
+   change and note what changed. Never silently diverge from a design doc.
 
 ## Architecture
 
-Strict module boundaries (dependency rules recorded in ADR-002; no cycles):
+Strict module boundaries (dependency rules recorded in ADR-002, current as of
+Amendment 4; no cycles):
 
 ```
 server → runtime → scheduler ─┐
-                   engine ────┼→ model / tokenizer / kvcache / sampling / quant / spec / distributed
-                              └→ tensor / memory / cuda / kernels / cpu → core
+                   engine ────┼→ model / tokenizer / kvcache / sampling / quant / spec
+                              └→ tensor / memory / parallel / kernels / cpu → core
 ```
 
 | Module | Path | Responsibility |
 |---|---|---|
 | core | `src/core/` | Status/StatusOr, logging, base utilities |
 | tensor | `src/tensor/` | Dtypes, shapes, Tensor (dense, explicit memory, no autograd) |
-| memory | `src/memory/` | Allocator interface, CPU/pinned/CUDA allocators, caching pool |
-| cuda | `src/cuda/` | Streams, events, device utils, cuBLAS wrappers |
-| kernels | `src/kernels/` | All custom CUDA kernels (attention, norms, sampling, quant, fusions) |
-| cpu | `src/cpu/` | Unoptimized CPU reference implementations — the correctness oracle |
+| memory | `src/memory/` | Allocator interface, CPU allocator, caching pool |
+| parallel | `src/parallel/` | Thread pool, deterministic parallel_for/reduce (M3-T04) |
+| kernels | `src/kernels/` | SIMD kernels (scalar/NEON/AVX2 behind runtime dispatch) |
+| cpu | `src/cpu/` | Unoptimized scalar reference implementations — the correctness oracle |
 | model | `src/model/` | config.json, safetensors loading, weight mapping, architecture registry |
 | tokenizer | `src/tokenizer/` | Byte-level BPE (tokenizer.json), incremental detokenization |
 | kvcache | `src/kvcache/` | Paged block pool, block tables, prefix-cache index |
 | sampling | `src/sampling/` | SamplingParams, penalties, top-k/p, stop conditions, logprobs |
-| engine | `src/engine/` | Model runner: batch assembly, forward execution, CUDA graphs |
+| engine | `src/engine/` | Model runner: batch assembly, forward execution, backend selection |
 | scheduler | `src/scheduler/` | Pure decision logic: admission, batching budget, preemption |
 | runtime | `src/runtime/` | Engine loop thread, request lifecycle, output channels |
 | server | `src/server/` | HTTP, OpenAI-compatible API, SSE streaming, chat templates |
-| distributed | `src/distributed/` | NCCL communicator, tensor-parallel workers |
-| quant | `src/quant/` | Quantized weight containers, format loaders (AWQ/GPTQ) |
+| quant | `src/quant/` | Quantized weight containers, format loaders, quantizer algorithms |
 | spec | `src/spec/` | Speculative decoding proposers and verification |
-| metrics | `src/metrics/` | Metrics registry, Prometheus exposition, NVTX |
+| metrics | `src/metrics/` | Metrics registry, Prometheus exposition, trace spans |
 | tests | `tests/` | `unit/`, `integration/`, `fixtures/` (committed golden data) |
 | tools | `tools/` | Python dev tooling: golden-fixture generation, load testing |
 | benchmarks | `benchmarks/` | Throughput benchmarks, kernel microbenchmarks, BASELINES.md |
-| docs | `docs/` | `adr/` (decisions), `design/` (subsystem designs) |
+| docs | `docs/` | `adr/` (decisions), `design/` (subsystem designs), `archive/` + `design/retired/` (pre-pivot history) |
 
 ## Engineering conventions
 
-- **Language:** C++20 host code, CUDA for kernels. Python only in `tools/` (fixture
-  generation via HuggingFace, load testing) — never in the engine or its build.
-- **Errors:** recoverable → `Status`/`StatusOr<T>` (`src/core/status.h`); programmer
-  errors → `CHECK`; no exceptions across module boundaries (ADR-003).
-- **Correctness methodology (load-bearing):** HuggingFace fixtures (generated by
-  `tools/`, committed under `tests/fixtures/`) validate the CPU reference; the CPU
-  reference validates every GPU kernel; naive GPU kernels validate optimized ones.
-  Never optimize without a reference path to test against.
-- **Testing:** tests land in the same change as the feature. GPU tests use the shared
-  fixture and auto-skip without a GPU (CPU-only CI must stay green). Numerical tests
-  state their tolerance explicitly.
-- **Performance claims are measured:** optimization tickets record before/after
-  numbers in `benchmarks/BASELINES.md`. No perf change without a benchmark delta.
+- **Language:** C++20. Python only in `tools/` (fixture generation via
+  HuggingFace, load testing, reference cross-checks) — never in the engine or
+  its build.
+- **Errors:** recoverable → `Status`/`StatusOr<T>` (`src/core/status.h`);
+  programmer errors → `CHECK`; no exceptions across module boundaries
+  (ADR-003).
+- **Correctness methodology (load-bearing):** HuggingFace fixtures (generated
+  by `tools/`, committed under `tests/fixtures/`) validate the scalar
+  reference; the scalar reference validates every vectorized (NEON/AVX2) and
+  optimized kernel. Never optimize without a reference path to test against.
+- **Testing:** tests land in the same change as the feature. The suite runs
+  the host's best ISA plus a forced-scalar pass (`ENGINE_FORCE_ISA=scalar`
+  once M3-T05 lands), so CI (x86-64) and the dev machine (arm64) jointly
+  cover every backend — no test is skipped for lack of hardware. Numerical
+  tests state their tolerance explicitly.
+- **Determinism:** `parallel_reduce` uses a fixed tree order — results are
+  bit-identical across thread counts. Seeded fills are bit-exact
+  cross-platform (see `src/tensor/ops.h`).
+- **Performance claims are measured:** optimization tickets record
+  before/after numbers in `benchmarks/BASELINES.md`. No perf change without a
+  benchmark delta.
 - **Style:** `.clang-format` enforced; warnings-as-errors; public APIs get doc
   comments. Match surrounding code's idiom.
-- **Decisions:** anything architectural gets an ADR (`docs/adr/`); each subsystem has
-  a design doc (`docs/design/`) written before its implementation milestone.
+- **Decisions:** anything architectural gets an ADR (`docs/adr/`); each
+  subsystem has a design doc (`docs/design/`) written before its
+  implementation milestone.
 
-## Build & test (once M0 lands)
+## Build & test
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release   # add -DENGINE_ENABLE_CUDA=OFF for CPU-only
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build
 scripts/check-format.sh
@@ -97,7 +116,9 @@ The full-tree `scripts/check-tidy.sh` sweep takes minutes; while iterating,
 scope it to the ticket's TUs instead (`scripts/check-tidy.sh
 tests/unit/foo_test.cpp`). Headers have no compile-database entry, so pass a
 TU that includes them — usually the ticket's test file — and
-`HeaderFilterRegex` analyzes them through it.
+`HeaderFilterRegex` analyzes them through it. The sweep analyzes only TUs
+present in the compile database (and says what it skipped); explicit
+arguments without an entry are rejected.
 
 Before handoff, tidy coverage follows from what changed (clang-tidy has no
 cross-TU analysis, so untouched TUs with untouched headers cannot change
@@ -115,11 +136,11 @@ CI runs the full sweep regardless (same pinned LLVM 20), so a missed edge
 case surfaces as a red Actions run rather than slipping through.
 
 **On the macOS dev machine, always build with Homebrew LLVM 20, not Apple
-clang** — pass `-DENGINE_ENABLE_CUDA=OFF` (no CUDA on macOS) and:
+clang**:
 
 ```bash
 CC="$(brew --prefix llvm@20)/bin/clang" CXX="$(brew --prefix llvm@20)/bin/clang++" \
-  cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DENGINE_ENABLE_CUDA=OFF
+  cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 ```
 
 Two reasons: it matches the project's pinned clang-format/clang-tidy toolchain
@@ -130,469 +151,32 @@ C++ until the CLT is reinstalled.
 
 ## Current status
 
-M0 in progress. M0-T01 done (repository skeleton, CMake build system, module
-library targets, project warning set). M0-T02 done (pinned third-party
-dependencies via FetchContent — fmt, spdlog, nlohmann_json, GoogleTest —
-policy in `docs/dependencies.md`). M0-T03 done (GoogleTest/CTest harness:
-per-file test executables via `engine_add_tests`, shared `tests/common/`
-helper library, unit/integration labels, workflow in `tests/README.md`).
-M0-T04 done (formatting & static analysis: `.clang-format` (Google-based,
-rationale in-file) and curated `.clang-tidy`, enforced by
-`scripts/check-format.sh` / `scripts/format.sh` / `scripts/check-tidy.sh`;
-tooling pinned to upstream LLVM 20 via `scripts/clang-tools.sh`).
-M0-T05 done (CPU CI: `.github/workflows/ci.yml` — format check, GCC/Clang
-× Debug/Release build + ctest matrix, clang-tidy, all gated behind a single
-aggregate `ci` job for branch protection; ccache + FetchContent caching).
-M0-T06 done (logging subsystem: `src/core/logging.h` — `LOG_DEBUG`…`LOG_ERROR`
-macros over spdlog, per-module named loggers with per-module level overrides,
-`ENGINE_LOG_LEVEL` env var + programmatic API, compile-time floor
-`ENGINE_MIN_LOG_LEVEL` strips `LOG_DEBUG` in Release; spdlog is private to
-`logging.cpp` — no raw spdlog usage outside the wrapper).
-M0-T07 done (error-handling primitives: `src/core/status.h` — `StatusCode`
-taxonomy, `Status`, `StatusOr<T>` (variant-backed, move-only-friendly),
-fmt-composing per-code factories + `Is<Code>` predicates, `RETURN_IF_ERROR`,
-`ASSIGN_OR_RETURN`, `CHECK_OK`/`DCHECK_OK`; `src/core/check.h` — fatal
-`CHECK`/`DCHECK` with optional fmt message, `DCHECK` compiles to nothing
-under NDEBUG; ADR-003 policy documented in both headers).
-M0-T08 done (documentation scaffolding & founding ADRs: `docs/adr/` with
-process README, template (Status/Context/Decision/Consequences +
-alternatives), ADR-001 language & toolchain, ADR-002 repository layout &
-module dependency rules (layered diagram, no cycles, CMake-enforced),
-ADR-003 error-handling policy; `docs/design/README.md` explains
-design-doc-first workflow — ADRs immutable once accepted, design docs
-living documents). **Milestone 0 complete.**
-M1-T01 done (`docs/design/tensor.md` — tensor library & device model design:
-dtypes incl. reserved kInt4/kFP8E4M3 with sub-byte packing rule, Shape/Strides
-(element-denominated, kMaxRank 8), backend-agnostic `Device`, move-only
-`Buffer` with self-contained deleters + thread-safe `Allocator` interface,
-`Tensor` as cheap-copy shared handle (shared_ptr<Buffer> + offset + views:
-slice/reshape/view_as_dtype), explicit CHECK-vs-Status boundary table,
-host/device access rules, thread-safety contract, per-ticket test map;
-ADR-002 Amendment 1 adds the `memory → tensor_base` header-only edge via an
-INTERFACE target split so `Buffer` can hold `Device` without a cycle).
-M1-T02 done (`src/tensor/dtype.h`, header-only: `DataType` enum with stable
-values incl. reserved kFP8E4M3/kInt4, `kAllDataTypes` iteration array,
-`itemsize_bits` total over all dtypes / `itemsize` CHECK-fails on sub-byte
-(kInt4 packing rule documented in-header), HuggingFace-style
-`to_string`/`from_string` (unknown name → InvalidArgument),
-is_floating_point/is_integral/is_sub_byte (kBool is neither kind),
-`DTypeTraits<T>`/`dtype_of<T>` with undefined primary template; CMake gains
-the `engine::tensor_base` INTERFACE target per ADR-002 Amendment 1, linked
-by `engine::tensor`; exhaustive golden-table tests incl. death test and
-compile-time static_asserts in `tests/unit/dtype_test.cpp`).
-M1-T03 done (`src/tensor/shape.h`, header-only: `kMaxRank = 8`, `DimVector`
-fixed-capacity inline vector of int64_t (append-only, zeroed unused slots so
-defaulted `==` is exact) shared by `Shape` and `using Strides = DimVector`;
-`Shape` with cached `numel()`, CHECKing initializer_list ctor vs
-Status-returning `FromDims` (negative dim / rank > 8 / numel overflow →
-InvalidArgument) funneled through one constexpr `detail::ValidateDims`;
-overflow judged on the product of non-zero dims, which also bounds all
-row-major strides; `RowMajorStrides` treats size-0 dims as size 1 (PyTorch
-convention); `IsContiguous` with size-1 dims unconstrained and numel==0
-always contiguous; fmt formatters ("[2, 3, 4]"); design-doc §4 updated with
-the two refinements; constexpr static_asserts + golden/death tests in
-`tests/unit/shape_test.cpp`).
-M1-T04 done (`src/tensor/device.h`, header-only tensor_base header:
-`DeviceType{kCPU,kCUDA}` (stable values) with constexpr `to_string`,
-`Device{type,index}` plain value type — constexpr `Cpu()`/`Cuda(int)`
-factories, defaulted `operator==`, `is_cpu`/`is_cuda`;
-`Parse(string_view) → StatusOr<Device>` accepts exactly "cpu", "cuda"
-(≡ cuda:0), "cuda:N" (strict `from_chars`, full consumption, non-negative,
-overflow → InvalidArgument; "cpu:0"/casing/whitespace rejected);
-`ToString()` + fmt formatters produce canonical "cpu"/"cuda:N"; no CUDA
-headers — device registry/validation deferred to M2 where allocation can
-return real Statuses; constexpr static_asserts + golden round-trip +
-invalid-spec table tests in `tests/unit/device_test.cpp`).
-M1-T05 done (`src/memory/allocator.h`/`.cpp` — Buffer & Allocator per design
-§6: move-only `Buffer` (data, size, `tensor::Device`, `std::function`
-deleter; engagement tracked by non-empty deleter so engaged zero-size
-(null data) and moved-from are distinct; deleter runs exactly once, move
-assignment destroys the current allocation first, no `release()`); abstract
-`Allocator` (`Allocate(bytes, alignment) → StatusOr<Buffer>` + `device()`,
-thread-safe contract, deleters self-contained — no back-pointer, Buffers may
-outlive the allocator); `CpuAllocator` over `std::aligned_alloc` (alignment
-CHECKed power-of-two, over-aligned to `max_align_t` and size rounded up to
-satisfy aligned_alloc, requested size reported; bytes==0 → engaged null
-buffer; OOM/overflow → kOutOfMemory Status) with configurable default
-alignment (64) used by a one-arg `Allocate(bytes)` convenience overload;
-immortal `DefaultCpuAllocator()`; `engine_memory` now links
-`engine::tensor_base` (the ADR-002 Amendment 1 edge), placeholder
-`memory.cpp` deleted; alignment/zero-size/move/deleter-exactly-once (via
-counting test allocator)/OOM-Status/death/concurrency tests in
-`tests/unit/allocator_test.cpp`).
-M1-T06 done (`src/tensor/tensor.h`/`.cpp` — Tensor per design §7: cheap-copy
-shared handle (`shared_ptr<memory::Buffer>` + byte offset + Shape + Strides +
-DataType + denormalized Device); `Tensor::empty(shape, dtype, device,
-allocator=nullptr)` allocates contiguous row-major storage at fixed 64-byte
-alignment (null allocator → DefaultCpuAllocator; reserved dtypes / CUDA →
-Unimplemented, byte-size overflow → InvalidArgument, OOM propagates,
-allocator/device mismatch → CHECK); views sharing the buffer —
-`slice(dim, start, end)` (half-open, strides unchanged, offset advances;
-inner-dim slices legitimately non-contiguous), `reshape` (contiguous only,
-never copies), `view_as_dtype` (equal `itemsize_bits` only; reserved →
-Unimplemented) — all InvalidArgument on data-dependent misuse, CHECK on an
-undefined handle; `data()`/`data_ptr<T>()` (CHECK on dtype mismatch) and
-CPU-only strided `item<T>(indices)` accessor for tests; `engine_tensor` now
-links `engine::memory` PUBLIC (the ADR-002 layer-1 edge), placeholder
-tensor.cpp replaced; design doc §7 gained a "Refined in M1-T06" note
-(alignment constant, overflow/reserved-dtype policies, undefined-handle
-CHECK); aliasing/write-through, slice/reshape/view goldens,
-deleter-exactly-once via counting allocator, move semantics, and death tests
-in `tests/unit/tensor_test.cpp`).
-M1-T07 done (`src/tensor/half.h`, header-only tensor_base header: `float16`
-(IEEE binary16) and `bfloat16` — trivially-copyable 2-byte value types over
-a `uint16_t`; bit-accurate constexpr conversions via pure integer bit
-manipulation (no FPU/intrinsics): explicit narrowing ctor from float with
-round-to-nearest-even (overflow → ±inf, underflow → ±0 sign-kept), implicit
-exact `operator float()`, `from_bits`/`to_bits`; NaN policy: payload
-truncated, quiet bit forced only if payload would vanish — makes
-half→fp32→half bit-identical for all 65536 patterns incl. signaling NaNs
-(tested exhaustively); no own arithmetic/comparison operators — operands
-widen to float; `DTypeTraits<float16/bfloat16>` specializations (in half.h,
-not dtype.h — both are leaf headers), `std::numeric_limits` + fmt formatters
-for both; design doc §3.1 records the policies; golden bit-pattern tests
-(rounding boundaries/ties, overflow, subnormals, NaN payloads), exhaustive
-round-trip, and a sorted-finite-table nearest-even property test over
-random floats in `tests/unit/half_test.cpp`; typed fp16/bf16 tensor access
-smoke test added to `tensor_test.cpp`).
-M1-T08 done (`src/tensor/ops.h`/`.cpp` — CPU ops in `engine::tensor::ops`,
-design §7.1: factories `zeros`/`ones`/`full`/`arange` via `Tensor::empty`
-(full/arange validate integer representability → InvalidArgument, reserved
-dtypes stay Unimplemented, arange defaults kInt64); seeded `fill_uniform`/
-`fill_normal` mutating existing floating-dtype tensors (incl. strided views)
-in logical row-major order — mt19937_64 + hand-rolled transforms (std
-distributions are stdlib-dependent; uniform bit-exact cross-platform, normal
-Box–Muller with documented sub-ulp libm caveat); `allclose` (NumPy criterion
-in double, NaN never close, ±inf sign-matched, ints/bool exact) returning
-`AllCloseResult` with mismatch count / max-abs-diff / worst index+values +
-`Summary()`, per-dtype defaults via constexpr `default_allclose_tolerance`
-(fp32 1e-5/1e-8, fp16 1e-3/1e-5, bf16 1.6e-2/1e-5, ints exact); NumPy-style
-`to_string` with edge_items truncation, undefined handle prints instead of
-CHECKing; golden seeded-fill values, exact Summary strings, strided-view
-fill/compare/print, and death tests in `tests/unit/ops_test.cpp`).
-M1-T09 done (`src/tensor/ops.h` copy & cast per design §7.1: `copy(dst, src)`
-— identical shape+dtype required (conversion is only ever `cast`, §1),
-element-wise by logical index so either side may be a strided view,
-both-contiguous memcpy fast path, overlapping-alias UB documented (identical
-views are a no-op); `cast(src, dtype)` — always-fresh contiguous result
-(same-dtype cast = deep copy), floating+integer dtypes both sides, kBool
-excluded → InvalidArgument, reserved target → Unimplemented (checked first,
-mirroring `full`); floating targets widen-to-double then M1-T07 narrow
-(double→float→half, same path as factories/fills → bit-exact with half.h
-ctors, out-of-range → ±inf, NaN passes), integer targets truncate toward
-zero with NaN/±inf/out-of-range (incl. int→int narrowing) →
-InvalidArgument naming the first offending value and its logical index;
-strided/self-copy/all-49-pairs/fp32→half-bit-golden/truncation/range-error
-tests in `ops_test.cpp`). **Milestone 1 complete.**
-Post-M1 hardening done (2026-08-03, audit follow-up; details in ROADMAP):
-fixed `arange` count UB (span INT64_MIN/step -1 → InvalidArgument, uint64
-count math), `Device` now a class CHECKing `index >= 0` and index-0-for-CPU
-at construction (members via `type()`/`index()` accessors), `Buffer` moves
-reset the source's device; corrected overclaiming contracts
-(`Tensor::data()` nullness, moved-from `Tensor` metadata unspecified,
-`cast` quiets signaling NaNs unlike half.h, `DefaultCpuAllocator` is an
-intentional leak); added `kNumDataTypes` + density static_asserts,
-`DeviceType` stable-value asserts, death tests for uncovered CHECK paths,
-boundary/edge tests (rank-8 FromDims, numel INT64_MAX, cuda:INT_MAX,
-half→int & int64-rounding casts, rank-0 copy/cast, non-contiguous
-self-copy, print truncation), normal-fill goldens libm-tolerant; design
-doc §3–§7.1 synced.
-M2-T01 done (`docs/design/cuda-backend.md` — CUDA backend design governing
-M2-T02…T09: error strategy (`CUDA_CHECK`/`CUDA_RETURN_IF_ERROR` + `ToStatus`
-code table, device OOM → kResourceExhausted; launch errors caught via
-`cudaGetLastError` after every launch, deferred execution errors surface as
-`Status` at sync points and are terminal-by-policy — sticky context); stream
-model (all streams explicit `cudaStreamNonBlocking`, legacy default stream
-banned, per-device leaked `DefaultStream`, RAII `CudaStream`/`CudaEvent`
-with drain-on-destruction, toolkit-free opaque `StreamHandle` for non-cuda
-modules, §6.4 sync-ownership rule: enqueuer ensures completion observed,
-launchers/allocators never sync); allocators (naive `CudaAllocator`,
-`PinnedCpuAllocator` with device()==cpu — pinnedness not a DeviceType,
-stream-agnostic `CachingAllocator` with power-of-two→1MiB size classes,
-exact-class free-list reuse, stats/`release_cached()`+OOM-retry, deleters
-capture the pool → pool-outlives-Buffers lifetime rule; `cudaMallocAsync`
-considered & deferred); transfers (contiguous-only `copy(dst,src,stream)` +
-`Tensor::to`, stream-less `to` synchronous by design, async-vs-pinned truth
-table; toolkit calls compiled into `engine_tensor` behind ENGINE_ENABLE_CUDA
-without a tensor→cuda module edge — ADR-002 reviewed, no amendment);
-kernel infra (`.h` toolkit-free Status launchers / `.cu` impls, `launch.h`
-grid-stride `CUDA_1D_KERNEL_LOOP`, `DISPATCH_FLOATING_TYPES`, 5-step
-launcher contract incl. mandatory `cudaGetLastError`, numel==0 guard,
-half↔`__half` bit-cast at kernel boundary only); CPU-only builds via
-stub-source split (no `#ifdef`-riddled bodies), `device_count()`==0 without
-GPU; sm_80/86/89/90 real binaries, CUDA 12.x floor, auto-detect downgrade
-to OFF; GPU testing (`HasCudaDevice` skip predicate, `CudaTestFixture` with
-per-test stream + caching allocator, `expect_tensors_close` sync+D2H+
-allclose, shape sweep incl. grid-stride wrap, `gpu` ctest label, dormant
-self-hosted workflow)).
-M2-T02 done (CMake CUDA integration per design §3: `cmake/cuda.cmake` —
-`check_language(CUDA)` auto-detect that downgrades `ENGINE_ENABLE_CUDA` to
-OFF (status message, non-cache set) when no toolkit is found, CUDA 12.x
-floor enforced at configure time, `CMAKE_CUDA_ARCHITECTURES`
-80/86/89/90-real (SASS only, no forward-compat PTX — design §3 refined),
-device C++20, separable compilation off; `engine::cuda_build` INTERFACE
-target is the single source of the `ENGINE_ENABLE_CUDA` compile definition,
-linked PUBLIC by the four CUDA-touching modules (cuda, kernels, memory,
-tensor); `engine_warnings` host flags now fenced to
-`$<COMPILE_LANGUAGE:CXX>` plus a CUDA branch (`-Werror=all-warnings` +
-curated `-Xcompiler` host set — no `-Wpedantic`/`-Wold-style-cast`, design
-§3 refined); source-list seam in `src/cuda/` and `src/kernels/`: CUDA
-builds compile placeholder-kernel `.cu` anchors, CPU-only builds keep the
-`.cpp` anchors. CPU-only path fully validated (auto-detect downgrade +
-explicit OFF, build + 263 tests green); toolkit-present path awaits a GPU
-machine — first exercised by M2-T03+).
-M2-T03 done (CUDA error handling & device utilities per design §4–§5:
-`src/cuda/cuda_utils.h` — toolkit-free public introspection API
-(`device_count()` memoized, never fails, 0 without GPU/toolkit and on
-CPU-only builds; `DeviceProperties` + `GetDeviceProperties` with
-out-of-range → InvalidArgument naming index and count; `ScopedSetDevice`
-RAII, CHECKing ctor, restores previous device); `src/cuda/cuda_check.h` —
-internal toolkit-including header (design §2.2 refined: the macro/ToStatus
-declarations inherently name toolkit types, so they split out of the
-public header; includable only from CUDA-compiled TUs) with
-`ToStatus(cudaError_t, what)` per the §4.2 code table (device OOM →
-kResourceExhausted, invalid device/value → kInvalidArgument, no
-device/driver/support → kUnavailable, else kInternal; message always
-embeds cudaGetErrorName/String, sticky context-poisoning errors marked
-terminal), `CUDA_CHECK` (fatal via CheckFailed) and `CUDA_RETURN_IF_ERROR`
-(→ Status with expression + file:line), both single-evaluation;
-implementation in `cuda_utils.cpp` (CUDA builds; first enumeration logs
-per-device info line — §4.4) vs `cuda_utils_stub.cpp` (CPU-only:
-GetDeviceProperties → Unimplemented "built without CUDA",
-ScopedSetDevice ctor CHECKs); `find_package(CUDAToolkit)` +
-`CUDA::cudart_static` linked PUBLIC on engine_cuda (host TUs including
-cuda_runtime.h need it — design §3 refined); top-level CMP0156 (guarded)
-dedups test link lines; shared GPU-skip predicate pulled forward from
-M2-T09: `tests/common/cuda.h` `HasCudaDevice()` +
-`ENGINE_SKIP_WITHOUT_CUDA()` — GPU tests skip, never fail, without a
-device; `cuda_utils_test.cpp` runs on every configuration (stub taxonomy
-via #ifdef, GPU sanity checks guarded, uniform ScopedSetDevice death
-test), `cuda_check_test.cpp` (CUDA builds only, mostly GPU-less: ToStatus
-golden table, macro single-evaluation/message tests, bad-cudaSetDevice
-acceptance test, CUDA_CHECK death test, ScopedSetDevice restore via
-cudaGetDevice). CPU-only path validated (271 tests green, 3 GPU tests
-skip); CUDA-side sources await a toolkit machine, like M2-T02).
-M2-T04 done (stream & event wrappers per design §6: `src/cuda/stream_handle.h`
-— toolkit-free trivially-copyable `StreamHandle` over a forward-declared
-`CUstream_st*` (null ≡ "engine default stream for the relevant device", no
-ownership/validation — §6.3's deliberately thin spot); `src/cuda/stream.h` —
-toolkit-free public header (CUDA handle types spelled as pointers to
-forward-declared `CUstream_st`/`CUevent_st`, identical to the toolkit
-typedefs in CUDA TUs — §6.2 refined): move-only RAII `CudaStream`
-(`Create()` → cudaStreamNonBlocking on the current device, `Synchronize`,
-`WaitEvent`, `get`/`handle`/`device_index`) and `CudaEvent` (`Timing()`/
-`Sync()` flavors, `Record`, `Synchronize`, `Query`, static `ElapsedMs` —
-flavor misuse → InvalidArgument, incomplete record pre-checked →
-FailedPrecondition so cudaErrorNotReady never maps to kInternal); both drain
-on destruction (sync then destroy, CHECK on failure — sticky/terminal §4.3)
-and on move-assign-over; moved-from members CHECK (Tensor's
-undefined-handle policy); never-recorded events count complete
-(Query true / WaitEvent no-op — CUDA semantics, documented); lifetime rule
-"event may outlive its stream" documented + tested; `DefaultStream(i)` —
-lazy, leaked, mutex-guarded per-device non-blocking stream, out-of-range
-index or creation failure fatal (§6.3 refined); stream.cpp vs
-stream_stub.cpp source-list seam (stub factories → Unimplemented "built
-without CUDA", DefaultStream CHECKs); tests: `stream_test.cpp` (all
-configs: stub taxonomy, StreamHandle static_asserts, uniform DefaultStream
-death test; GPU-skipped: create/sync, move semantics, moved-from death
-tests, event lifecycle, ElapsedMs taxonomy, event-outlives-stream,
-DefaultStream identity + concurrency) + `stream_cuda_test.cu` (CUDA builds
-only, brings its own clock64 delay kernel since M2-T08 kernels don't exist
-yet: elapsed-of-known-duration > 0, FailedPrecondition before completion,
-cross-stream WaitEvent ordering via flag readback, destructor drains
-in-flight work). CPU-only path validated (286 tests green, GPU tests skip);
-CUDA-side sources await a toolkit machine, like M2-T02/T03).
-M2-T05 done (CUDA device allocator per design §7.1:
-`src/memory/cuda_allocator.h` — toolkit-free public header; `CudaAllocator`
-final over cudaMalloc/cudaFree, private ctor + `Create(device_index) →
-StatusOr<CudaAllocator>` (out-of-range index → InvalidArgument naming index
-and count per §5.2 — which is every index on GPU-less CUDA builds; CPU-only
-builds → Unimplemented from the stub), `Allocate` CHECKs alignment
-power-of-two and ≤ `kGuaranteedAlignment` (256, cudaMalloc's guarantee),
-bytes==0 → engaged null buffer, device OOM → kResourceExhausted via
-`ToStatus` with the last-error slot cleared after a failed cudaMalloc;
-deleters self-contained (capture only the device index; raw
-cudaSetDevice/cudaFree with log-and-drop — a deleter can't return Status or
-abort, §7.1 refined) so Buffers may outlive the allocator; leaked
-mutex-guarded per-device `DefaultCudaAllocator(i)`; `Tensor::empty` now
-routes null-allocator kCUDA requests there (M1's blanket Unimplemented
-gone; ops factories on CUDA still CHECK in the fill until M2-T08 kernels).
-`Allocator` base gained protected defaulted moves (deleted copy had
-suppressed derived moves; needed for by-value Create). **ADR-002
-Amendment 2: the layer-1 edge flips to `memory → cuda`** (was the unused
-`cuda → memory`) — CudaAllocator links cuda's `device_count`/
-`ScopedSetDevice`/`ToStatus` rather than forking the §4.2 error table;
-PRIVATE link, memory's public headers stay toolkit-free; design §2.1's
-"no amendment needed" corrected. cuda_allocator.cpp vs
-cuda_allocator_stub.cpp source-list seam; tests: `cuda_allocator_test.cpp`
-(all configs: stub taxonomy; CUDA builds GPU-less: index validation;
-GPU-skipped: alloc basics + 256-alignment, zero-byte, huge-alloc →
-ResourceExhausted then still usable, buffer-outlives-allocator, default
-singleton identity, alignment death tests) + `cuda_allocator_cuda_test.cpp`
-(CUDA builds only: cudaMemGetInfo leak-delta over 64 cycles, memset/memcpy
-round-trip proves real device memory); tensor_test CUDA-empty tests forked
-per build (CPU-only → Unimplemented, CUDA → device-tagged tensor /
-InvalidArgument index). CPU-only path validated (288 tests green, GPU tests
-skip); CUDA-side sources await a toolkit machine, like M2-T02…T04).
-M2-T06 done (caching pool allocator per design §7.3–§7.4:
-`src/memory/caching_allocator.h`/`.cpp` — toolkit-free, compiled on every
-configuration (the pool is device-agnostic over any upstream `Allocator*`,
-no source-list seam needed); size classes 512B min / powers of two to 1MiB /
-1MiB steps above (constexpr `SizeClass` with overflow guard, static_asserts
-pin the table), per-class free lists with exact-class reuse, one mutex,
-exact `Stats{bytes_allocated, bytes_reserved, hit_count, miss_count}` in
-class-rounded bytes (`bytes_reserved` == upstream footprint; handed-out
-Buffers report the requested size), `release_cached()` (upstream deleters
-run outside the pool mutex), upstream-exhaustion → release + one retry
-(triggers on kResourceExhausted *or* kOutOfMemory — device-agnostic;
-miss_count counts once per request), zero-byte requests bypass cache and
-stats; deleters capture `this` (the documented Buffer-ownership exception:
-pool must outlive its Buffers, class non-movable, destructor CHECKs no live
-Buffers then returns cached blocks). Design §7.3 gained a "Refined in
-M2-T06" note: fixed pool-wide upstream alignment `kMaxAlignment` (256,
-CHECK-ceiling on requests) so free lists never need alignment keys, plus the
-stats denomination, zero-byte, retry-code, and lock-discipline decisions.
-Tests: `caching_allocator_test.cpp` (all configs — scriptable counting
-FakeUpstream: reuse/no-upstream-call, class-rounding table, exact scripted
-stats sequence, release_cached incl. live-buffers-unaffected and
-destructor-releases-cache, retry taxonomy incl. non-exhaustion-no-retry,
-zero-byte, real-CpuAllocator round-trip, death tests for alignment/null
-upstream/live-buffer-at-destruction, 8-thread stress with invariant checks;
-GPU-skipped: reuse-via-stats + scripted stats over `DefaultCudaAllocator`)
-+ `caching_allocator_cuda_test.cpp` (CUDA builds only: cudaMemGetInfo
-cached-vs-released driver deltas, reused-block memset/D2H round-trip).
-CPU-only path validated (311 tests green, GPU tests skip); CUDA-side
-awaits a toolkit machine, like M2-T02…T05).
-M2-T07 done (pinned memory & host↔device transfer per design §7.2/§8:
-`src/memory/pinned_allocator.h` — toolkit-free public header; `PinnedCpuAllocator`
-final over cudaHostAlloc(Portable)/cudaFreeHost, `Create()` → StatusOr (no visible
-device → Unavailable — eager, cudaErrorNoDevice maps there anyway; CPU-only builds
-→ Unimplemented from the stub), same 256-byte `kGuaranteedAlignment` CHECK-ceiling
-as CudaAllocator (keeps the caching pool's fixed upstream alignment valid over
-either), exhaustion → kResourceExhausted (which the pool's OOM-retry already
-catches), **`device()` == `Device::Cpu()`** — pinnedness is a property of the
-allocation, not a DeviceType; deleters capture nothing (cudaFreeHost needs no
-device context); no default singleton (no consumer yet). Transfers:
-`ops::copy(dst, src, StreamHandle)` — same shape+dtype (InvalidArgument), both
-contiguous (InvalidArgument; strided device copy deferred), H2H delegates to the
-2-arg overload on every build (stream ignored), cross-device CUDA pair →
-Unimplemented, identical views no-op, numel==0 early-out; `Tensor::to(device[,
-stream])` — contiguity checked *before* the same-device fast path (uniform
-contract), same device → same handle, stream-less spelling enqueues on the engine
-default stream then synchronizes (§8.3 safe default), stream spelling enqueues and
-returns (§6.4 discipline). Structure refined from the design's letter: validation
-and H2H live in always-compiled ops.cpp/tensor.cpp (the InvalidArgument acceptance
-criterion runs on CPU-only CI); only `detail::DeviceCopy(dst, src, stream,
-synchronize)` (internal `transfer_detail.h`) sits behind the source seam —
-transfer.cpp (cudaMemcpyAsync with explicit kinds, null handle resolved to
-`DefaultStream(destination-relevant device)`, sync via cudaStreamSynchronize) vs
-transfer_stub.cpp (Unimplemented). **ADR-002 Amendment 3: `tensor → cuda`**
-(PRIVATE; public headers stay toolkit-free, only stream_handle.h is included) —
-the null-handle contract needs cuda's process-wide DefaultStream (a tensor-local
-stream would fork FIFO ordering) and the §4.2 error table; rule 3's toolkit list
-gains tensor's transfer TU. Tests: `pinned_allocator_test.cpp` (all configs: stub
-taxonomy; CUDA GPU-less: no-device Unavailable; GPU-skipped: 256-alignment +
-host-writability, zero-byte, huge → ResourceExhausted, buffer-outlives-allocator,
-pinned-tensor-is-ordinary-CPU-tensor via fill/item, alignment death tests) +
-`transfer_test.cpp` (all configs: dtype/shape-mismatch + non-contiguous
-InvalidArgument, H2H-with-stream value copy, identical-view no-op, same-device
-same-handle, contiguity-before-fast-path, undefined-handle death tests, CPU-only
-to(cuda) → Unimplemented / CUDA builds out-of-range index → InvalidArgument;
-GPU-skipped acceptance: byte-exact H2D→D2H round-trip across all non-reserved
-dtypes, D2D, cross-stream event ordering, pinned round-trip on a stream,
-to(stream)+event sync, zero-numel, 2-GPU cross-device Unimplemented). CPU-only
-path validated (330 tests green, GPU tests skip); CUDA-side sources await a
-toolkit machine, like M2-T02…T06).
-M2-T08 done (kernel launch infrastructure & first elementwise kernels per
-design §9: `src/kernels/launch.h` — toolkit-free, host-testable
-`LaunchConfig1D(n)` (constexpr; block 256, grid capped at 4096 so the
-grid-stride wrap is testable at ~1M elements, any config semantically
-equivalent; CHECKs n > 0) + the design-verbatim `CUDA_1D_KERNEL_LOOP`;
-`src/kernels/dispatch.h` — `DISPATCH_FLOATING_TYPES(dtype, op, alias,
-body...)` binding a caller-named alias (nesting for cast's src×dst) to the
-device type (fp32/fp16/bf16 → float/__half/__nv_bfloat16), other dtypes →
-Unimplemented naming the op; an **internal toolkit-including header**
-(cuda_check.h precedent — §9.1 refined); `src/kernels/elementwise.h` —
-public toolkit-free launchers `add`/`mul`/`scale` (double scalar, narrowed
-to float host-side)/`cast` ({fp32,fp16,bf16}² incl. the same-dtype
-diagonal), enqueue-only, null handle → device default stream, dst
-pre-allocated, exact-alias dst well-defined for the same-dtype kernels
-(cast aliasing UB). Structure mirrors the M2-T07 transfer split (§9.2
-refined): validation + numel==0 guard in always-compiled elementwise.cpp —
-order shape → dtype → contiguity → device so every rejection is testable
-with CPU tensors on CPU-only CI, non-CUDA operands → InvalidArgument on
-every build — with only the launches behind the `elementwise_detail.h`
-seam (elementwise.cu: ScopedSetDevice, resolve stream, widen-to-float
-grid-stride kernels, `cudaGetLastError` after every launch, never syncs;
-vs elementwise_stub.cpp: Unimplemented, unreachable through supported
-factories); placeholder kernels.cu/kernels.cpp anchors deleted;
-engine_kernels now links tensor PUBLIC + cuda PRIVATE (the ADR-002 edges,
-no amendment). Tests: `elementwise_test.cpp` (all configs:
-LaunchConfig1D constexpr static_asserts + golden table + death tests,
-full validation matrix incl. Unimplemented dtype taxonomy and
-undefined-handle deaths; GPU-skipped: each kernel vs a widen-to-float CPU
-reference via allclose per-dtype defaults across sizes
-{1, 255, 256, 257, 4096·256+7} × {fp32, fp16, bf16}, cast vs ops::cast
-bit-exact for all 9 pairs, null-handle default-stream path, dst-aliasing,
-mixed-device InvalidArgument, zero-numel OK) + `dispatch_test.cu` (CUDA
-builds, GPU-less: alias binding per dtype, Unimplemented default naming
-the op, body-Status propagation). CPU-only path validated (351 tests
-green, GPU tests skip); CUDA-side sources await a toolkit machine, like
-M2-T02…T07).
-M2-T09 done (GPU test infrastructure per design §10: `tests/common/cuda.h`
-gains `CudaTestFixture` — SetUp skips without a device (never fails),
-selects device 0 via `ScopedSetDevice`, provides a per-test `CudaStream`
-(`stream()`/`stream_handle()`) and per-test `CachingAllocator` over
-`DefaultCudaAllocator(0)` (`allocator()`); members are `std::optional`s
-engaged only past the skip guard so the TU compiles and skips cleanly on
-every configuration; TearDown syncs the stream then destroys the pool
-(§6.4/§7.4 order) — and free `ExpectTensorsClose(actual, expected,
-CudaStream&, rtol, atol)` — stream sync → D2H → `ops::allclose` with the
-per-dtype defaults, failures carry `Summary()`; takes `CudaStream&` not
-`StreamHandle` so tests/common stays toolkit-free (null-handle tests pass
-`DefaultStream(0)`); `engine_test_common` now links cuda/memory/tensor
-PUBLIC. **`gpu` ctest label** via a naming contract — suites deriving the
-fixture are `*GpuTest`/`*GpuDeathTest` — and dual `gtest_discover_tests`
-calls per target with complementary `TEST_FILTER`s; the GPU set gets the
-single label `<tree>-gpu` (not a `<tree>;gpu` list — the module flattens
-list-valued PROPERTIES at the CMake 3.26 floor; `-L` is a regex so
-`-L gpu` and `-L unit` both match; zero-match filters register nothing,
-without error). All 57 inline GPU tests across 12 TUs migrated onto
-fixture-derived suites (elementwise's `RunAndCompare` became a fixture
-member over `stream()`/`allocator()`/`ExpectTensorsClose`; stream/event/
-allocator suites derive the fixture for skip+device only, their subjects
-stay locally built; `PinnedCpuAllocatorTest.CreateWithoutDeviceIsUnavailable`
-deliberately stays unlabeled — it runs GPU-less). New
-`cuda_fixture_test.cpp` self-tests (fixture members, round-trip accept,
-`EXPECT_NONFATAL_FAILURE` mismatch report, pool-served tensors);
-`tests/README.md` gains the GPU section (naming contract, 5-step
-CPU-reference kernel-test recipe, tolerance stance, what-runs-where);
-dormant `.github/workflows/gpu-ci.yml` (workflow_dispatch-only,
-self-hosted `gpu` runner label, CUDA auto-detect Release build + full
-ctest + `-L gpu -N` listing, activation steps in-file); design §10 gained
-the M2-T09 refinement note. CPU-only path validated (fixture suites skip;
-labels verified via `ctest -N`); CUDA-side execution awaits a toolkit
-machine, like M2-T02…T08. **Milestone 2 complete.**
-Post-M2 hardening done (2026-08-04, audit follow-up; details in ROADMAP):
-fixed `stream.cpp` event factories calling `CudaEvent`'s private ctor from
-a free function (compile error on the first CUDA build; now a private
-static `CudaEvent::Create`) and the `ElapsedMs` taxonomy escape (a
-never-recorded `Timing()` event passed the completion pre-check then hit
-`cudaErrorInvalidResourceHandle` → opaque `kInternal`; events now track
-ever-recorded and pre-check it → `FailedPrecondition`, GPU-tested);
-`scripts/check-tidy.sh` no-arg sweep now skips TUs with no
-compile-database entry (CUDA-only `.cpp` sources on CPU-only builds were
-analyzed with guessed flags and failed on `<cuda_runtime.h>` — would have
-turned CI red; explicit args without an entry are rejected, an
-everything-filtered run fails); `transfer.cpp` clears the CUDA last-error
-slot on failure (allocator convention); cast GPU test runs the full size
-sweep incl. the grid-stride wrap; docs synced (phantom `cuda →
-tensor_base` link removed from design §2.1 + ADR-002 dated correction,
-`device_count()` memoize-on-failure and anon-namespace-`__global__`
-refinements recorded, `cuda.cu` anchor comment re-scoped, README sweep
-step fixed, load-bearing comments added: UVA pointer-compare, deleter
-error-slot clear, launch-error misattribution stance, skip-macro
-dangling-else); stale untracked placeholder leftovers deleted. Standing
-caveat: no CUDA toolkit has ever compiled/run the CUDA side — first GPU
-machine session must run full ctest incl. `-L gpu` before M3 builds on it.
-Next up: **M3-T01** (design doc: model loading & tokenization).
+**History (pre-pivot):** M0 (foundation & tooling), M1 (CPU tensor library),
+and M2 (CUDA backend) were built and audited as a CUDA engine, 2026-08-03/04;
+on 2026-08-07 the project pivoted to CPU-first (ADR-004) because no CUDA
+hardware ever compiled or ran the device code. Details:
+`docs/archive/ROADMAP-v1.md`, `docs/design/retired/cuda-backend.md`, git
+history.
+
+What survives from M0–M2 and remains load-bearing: the build/test/CI/tooling
+discipline (M0), the complete tensor library — dtypes incl. reserved
+kInt4/kFP8E4M3, Shape/Strides, `Device` (kCUDA reserved, never allocatable),
+Buffer/Allocator, Tensor with views, fp16/bf16 host types with bit-exact
+conversions, seeded fills/allclose/copy/cast (M1) — and the device-agnostic
+`CachingAllocator` (M2-T06), which becomes the KV block pool's backing store.
+
+M3-T01 done (2026-08-07: ADR-004; ADR-002 Amendment 4; v1 roadmap archived to
+`docs/archive/ROADMAP-v1.md`; v2 roadmap promoted to `ROADMAP.md`;
+cuda-backend design doc retired to `docs/design/retired/`; CLAUDE.md and
+README rewritten CPU-first).
+M3-T02 done (2026-08-07: CUDA excision — deleted `src/cuda/`,
+`src/distributed/`, the CUDA/pinned allocators, the transfer path, the CUDA
+kernel infrastructure, `cmake/cuda.cmake` + the `ENGINE_ENABLE_CUDA` option,
+`tests/common/cuda.*`, 12 CUDA test TUs, and `gpu-ci.yml`; `Tensor::empty`/
+`Tensor::to` return Unimplemented for the reserved kCUDA device;
+`ops::copy` dropped its stream overload; kernels module reset to a
+placeholder anchor; test harness gpu-label machinery removed —
+285 tests, all green; `engine_project_files` now skips deleted-but-unstaged
+ghosts).
+Next up: **M3-T03** (design doc: CPU backend — threading model, SIMD dispatch
+strategy, dtype policy, kernel validation methodology).

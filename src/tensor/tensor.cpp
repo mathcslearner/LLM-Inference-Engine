@@ -2,13 +2,10 @@
 
 #include "core/check.h"
 #include "core/status.h"
-#include "cuda/stream_handle.h"
 #include "memory/allocator.h"
-#include "memory/cuda_allocator.h"
 #include "tensor/device.h"
 #include "tensor/dtype.h"
 #include "tensor/shape.h"
-#include "tensor/transfer_detail.h"
 
 #include <array>
 #include <cstddef>
@@ -27,7 +24,7 @@ namespace {
 constexpr std::size_t kEmptyAlignment = 64;
 
 // Reserved dtypes are representable (name/size-mapped) but not allocatable —
-// or viewable — until their milestone lands (kInt4: M12, kFP8E4M3: M13).
+// or viewable — until the quantization milestones land (ROADMAP.md M13).
 [[nodiscard]] constexpr bool IsReservedDataType(DataType dtype) {
   return dtype == DataType::kInt4 || dtype == DataType::kFP8E4M3;
 }
@@ -41,15 +38,15 @@ core::StatusOr<Tensor> Tensor::empty(Shape shape, DataType dtype, Device device,
         "dtype {} is reserved and not allocatable until its milestone",
         to_string(dtype));
   }
+  if (device.is_cuda()) {
+    // kCUDA is a reserved Device value: the engine is CPU-first (ADR-004)
+    // and has no GPU backend.
+    return core::UnimplementedError(
+        "device {} is not supported: the engine has no GPU backend (ADR-004)",
+        device.ToString());
+  }
   if (allocator == nullptr) {
-    if (device.is_cuda()) {
-      // CPU-only builds: Unimplemented from the stub; CUDA builds with an
-      // out-of-range index (including any index with no visible device):
-      // InvalidArgument (memory/cuda_allocator.h).
-      ASSIGN_OR_RETURN(allocator, memory::DefaultCudaAllocator(device.index()));
-    } else {
-      allocator = memory::DefaultCpuAllocator();
-    }
+    allocator = memory::DefaultCpuAllocator();
   }
   // Both arguments are call-site-authored; a mismatch is a bug, not data.
   CHECK(allocator->device() == device,
@@ -116,46 +113,24 @@ core::StatusOr<Tensor> Tensor::reshape(Shape new_shape) const {
   return Tensor(buffer_, byte_offset_, new_shape, strides, dtype_, device_);
 }
 
-namespace {
-
-// Shared body of the two Tensor::to overloads; `synchronize` distinguishes
-// the stream-less (synchronous by design, §8.3) spelling from the stream one.
-core::StatusOr<Tensor> ToDevice(const Tensor& self, Device device,
-                                cuda::StreamHandle stream, bool synchronize) {
-  CHECK(self.defined(), "to() on an undefined Tensor");
-  if (!self.is_contiguous()) {
-    return core::InvalidArgumentError(
-        "to: tensor must be contiguous (shape {}, strides {}); strided device "
-        "copy is not implemented — make a contiguous copy first",
-        self.shape(), self.strides());
-  }
-  if (device == self.device()) {
-    return self;  // same shared handle; a deep copy is ops::copy
-  }
-  if (device.is_cuda() && self.device().is_cuda()) {
-    return core::UnimplementedError(
-        "to: cross-device copy ({} -> {}) is not implemented until the "
-        "distributed milestone",
-        self.device().ToString(), device.ToString());
-  }
-  ASSIGN_OR_RETURN(Tensor result,
-                   Tensor::empty(self.shape(), self.dtype(), device));
-  if (self.numel() == 0) {
-    return result;
-  }
-  RETURN_IF_ERROR(detail::DeviceCopy(result, self, stream, synchronize));
-  return result;
-}
-
-}  // namespace
-
 core::StatusOr<Tensor> Tensor::to(Device device) const {
-  return ToDevice(*this, device, cuda::StreamHandle(), /*synchronize=*/true);
-}
-
-core::StatusOr<Tensor> Tensor::to(Device device,
-                                  cuda::StreamHandle stream) const {
-  return ToDevice(*this, device, stream, /*synchronize=*/false);
+  CHECK(defined(), "to() on an undefined Tensor");
+  // Contiguity is checked before the same-device fast path so the contract
+  // does not depend on the destination (the retired M2 transfer contract,
+  // kept for a future backend).
+  if (!is_contiguous()) {
+    return core::InvalidArgumentError(
+        "to: tensor must be contiguous (shape {}, strides {}); make a "
+        "contiguous copy first",
+        shape_, strides_);
+  }
+  if (device == device_) {
+    return *this;  // same shared handle; a deep copy is ops::copy
+  }
+  return core::UnimplementedError(
+      "to: transfer {} -> {} is not supported: the engine has no GPU backend "
+      "(ADR-004)",
+      device_.ToString(), device.ToString());
 }
 
 core::StatusOr<Tensor> Tensor::view_as_dtype(DataType new_dtype) const {

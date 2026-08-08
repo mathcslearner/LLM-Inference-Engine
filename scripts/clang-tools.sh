@@ -69,15 +69,22 @@ ENGINE_SOURCE_DIRS=(src tests benchmarks)
 # files are checked before they are staged; --exclude-standard keeps
 # .gitignore'd trees (build*/) out. Git pathspec globs match recursively.
 # Runs from the repository root (the entry-point scripts cd there).
+# Deleted-but-not-yet-staged files still appear in `git ls-files --cached`,
+# so filter to files that exist on disk — otherwise every tool run between
+# an `rm` and the `git add` fails on the ghosts.
 engine_project_files() {
   local -a pathspecs=()
-  local dir ext
+  local dir ext file
   for dir in "${ENGINE_SOURCE_DIRS[@]}"; do
     for ext in "$@"; do
       pathspecs+=("${dir}/*.${ext}")
     done
   done
-  git ls-files -z --cached --others --exclude-standard -- "${pathspecs[@]}"
+  git ls-files -z --cached --others --exclude-standard -- "${pathspecs[@]}" |
+    while IFS= read -r -d '' file; do
+      [[ -e "$file" ]] && printf '%s\0' "$file"
+    done
+  return 0
 }
 
 # engine_cxx_sources

@@ -2,7 +2,6 @@
 
 #include "core/check.h"
 #include "core/status.h"
-#include "cuda/stream_handle.h"
 #include "memory/allocator.h"
 #include "tensor/device.h"
 #include "tensor/dtype.h"
@@ -18,19 +17,14 @@
 // debug printing.
 //
 // Everything in this header runs on the host and dereferences tensor data, so
-// per design §8 the value-touching entry points CHECK `is_cpu()`. (One
-// exception: the M2-T07 stream overload of `copy` is device-aware and hands
-// device placements to cudaMemcpyAsync — it never dereferences.) All ops are
+// per design §8 the value-touching entry points CHECK `is_cpu()`. All ops are
 // free functions: no hidden dispatch, no implicit copies, no broadcasting.
 //
 // Error split (per the design §7 table): dtype/shape/range problems in the
 // arguments are data-dependent → InvalidArgument; operating on an undefined
 // handle or a non-CPU tensor is a programmer error → CHECK; reserved dtypes
-// surface as Unimplemented from Tensor::empty. Since M2-T05, Tensor::empty
-// can allocate on CUDA devices — but these ops still CHECK is_cpu(), so a
-// factory asked for a CUDA tensor allocates and then aborts in the fill (GPU
-// fills arrive with the M2-T08 kernels; pass CUDA devices to Tensor::empty
-// directly until then).
+// surface as Unimplemented from Tensor::empty (as does the reserved kCUDA
+// device — no GPU backend, ADR-004).
 //
 // Determinism contract for the seeded fills (load-bearing for golden tests):
 // the engine is std::mt19937_64 (fully specified by the C++ standard), and
@@ -126,31 +120,6 @@ namespace engine::tensor::ops {
 // memcpy rule), except that a dst identical to src is a well-defined no-op.
 // Undefined handle or non-CPU tensor → CHECK.
 [[nodiscard]] core::Status copy(const Tensor& dst, const Tensor& src);
-
-// Device-aware copy, async on `stream` where the memory allows it (M2-T07;
-// design: docs/design/cuda-backend.md §8). Shape and dtype must match
-// exactly, as above → InvalidArgument otherwise. Additionally:
-//  - Both tensors must be contiguous → InvalidArgument otherwise (strided
-//    device copy needs a kernel, deferred until a consumer exists; the
-//    two-argument overload still handles strided CPU views).
-//  - Supported placements: H2D, D2H, and same-device D2D. A CUDA pair on
-//    different devices → Unimplemented (cross-device copy arrives with the
-//    distributed milestone). CPU↔CPU delegates to the two-argument overload,
-//    `stream` ignored — so this overload works on every build for host
-//    pairs; on CPU-only builds a copy involving a CUDA-tagged tensor is
-//    Unimplemented (unreachable through supported factories).
-//  - A null StreamHandle means the engine default stream of the
-//    destination-relevant device (H2D: dst's, D2H: src's, D2D: the common
-//    device — design §6.3).
-//  - The call ENQUEUES and returns: completion must be observed per design
-//    §6.4 (event or stream synchronize) before dst is consumed outside
-//    `stream`. Whether host-side overlap is real depends on pinnedness
-//    (design §8.2, memory/pinned_allocator.h); the correctness discipline
-//    is identical either way.
-// A dst identical to src is a well-defined no-op; other overlapping aliases
-// are undefined behavior (as above). Undefined handle → CHECK.
-[[nodiscard]] core::Status copy(const Tensor& dst, const Tensor& src,
-                                cuda::StreamHandle stream);
 
 // Fresh contiguous row-major tensor of `dtype` on src's device holding
 // src's values converted element-wise; src may be a strided view. Always

@@ -85,9 +85,9 @@ class Allocator {
 
  protected:
   // The base is stateless, so moving it is trivial; concrete allocators need
-  // it to be returned by value from StatusOr factories (CudaAllocator::Create,
-  // M2-T05). Protected so a derived object is never moved through a base
-  // reference (which would slice its state).
+  // it to be returned by value from StatusOr factories. Protected so a
+  // derived object is never moved through a base reference (which would
+  // slice its state).
   Allocator(Allocator&&) = default;
   Allocator& operator=(Allocator&&) = default;
 };

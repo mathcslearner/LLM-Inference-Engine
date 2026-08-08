@@ -11,14 +11,12 @@
 #   .clang-tidy analyzes them through it.
 #
 # Needs a compile database; configures ${ENGINE_BUILD_DIR:-build} if missing
-# (CMAKE_EXPORT_COMPILE_COMMANDS is ON project-wide). Two exclusions follow
-# from it. CUDA TUs (*.cu) are never analyzed — clang-tidy needs the CUDA
-# headers a CUDA compile-database entry would supply to parse them. And any
-# TU without an entry in the configured build is skipped (no-arg mode) or
-# rejected (explicit-arg mode): without its real compile command clang-tidy
-# guesses flags and emits spurious diagnostics — e.g. the CUDA-only .cpp
-# sources behind the source-list seams, whose <cuda_runtime.h> includes
-# cannot even resolve on a CPU-only configuration.
+# (CMAKE_EXPORT_COMPILE_COMMANDS is ON project-wide). Any TU without an
+# entry in the configured build is skipped (no-arg mode) or rejected
+# (explicit-arg mode): without its real compile command clang-tidy guesses
+# flags and emits spurious diagnostics. (With the CPU-first pivot, ADR-004,
+# every project TU normally has an entry; the filter guards conditional
+# source lists generally.)
 set -euo pipefail
 
 invocation_dir="$PWD"

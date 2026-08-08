@@ -1,9 +1,7 @@
 #include "memory/caching_allocator.h"
 
-#include "common/cuda.h"
 #include "core/status.h"
 #include "memory/allocator.h"
-#include "memory/cuda_allocator.h"
 #include "tensor/device.h"
 
 #include <gtest/gtest.h>
@@ -16,14 +14,10 @@
 #include <utility>
 #include <vector>
 
-// CachingAllocator tests (M2-T06). The pool is device-agnostic, so the
-// size-class, stats, reuse, OOM-retry, and concurrency contracts are all
-// exercised here over host-memory upstreams on every configuration — this is
-// what keeps CPU-only CI meaningful for the pooling logic. The GPU-skipped
-// tests at the bottom repeat the reuse/stats acceptance criteria over the
-// real CudaAllocator; the toolkit-touching criterion (release_cached returns
-// memory to the driver, via cudaMemGetInfo) lives in
-// caching_allocator_cuda_test.cpp, which only CUDA builds compile.
+// CachingAllocator tests (M2-T06; the pool survives the CPU-first pivot,
+// ADR-004). The pool is device-agnostic, so the size-class, stats, reuse,
+// OOM-retry, and concurrency contracts are all exercised over host-memory
+// upstreams — scriptable fakes plus the real CpuAllocator.
 
 namespace {
 
@@ -34,7 +28,6 @@ using engine::memory::Allocator;
 using engine::memory::Buffer;
 using engine::memory::CachingAllocator;
 using engine::memory::CpuAllocator;
-using engine::memory::DefaultCudaAllocator;
 using engine::tensor::Device;
 
 constexpr std::size_t kMiB = std::size_t{1} << 20U;
@@ -446,46 +439,6 @@ TEST(CachingAllocatorTest, ConcurrentAllocationStress) {
   // Everything reserved is cached, and release accounts for all of it.
   EXPECT_EQ(pool.release_cached(), stats.bytes_reserved);
   EXPECT_EQ(pool.stats().bytes_reserved, 0U);
-}
-
-// --- GPU: the ticket's acceptance criteria over the real CudaAllocator.
-// On CudaTestFixture (M2-T09): skip (never fail) without a device; the
-// pools under test are built locally over the default device allocator.
-// The cudaMemGetInfo "returned to the driver" check needs the toolkit and
-// lives in caching_allocator_cuda_test.
-
-class CachingAllocatorGpuTest : public engine::testing::CudaTestFixture {};
-
-TEST_F(CachingAllocatorGpuTest, ReuseIsServedFromCacheOnDevice) {
-  Allocator* const upstream = DefaultCudaAllocator(0).value();
-  CachingAllocator pool(upstream);
-  EXPECT_EQ(pool.device(), Device::Cuda(0));
-  void* first = nullptr;
-  {
-    const Buffer buffer = pool.Allocate(100000, 256).value();
-    first = buffer.data();
-    ASSERT_NE(first, nullptr);
-    EXPECT_EQ(buffer.device(), Device::Cuda(0));
-  }
-  const Buffer reused = pool.Allocate(100000, 256).value();
-  EXPECT_EQ(reused.data(), first);
-  // miss_count did not grow: the second allocation made no cudaMalloc call.
-  ExpectStats(pool, std::size_t{128} * 1024, std::size_t{128} * 1024,
-              /*hit_count=*/1, /*miss_count=*/1);
-}
-
-TEST_F(CachingAllocatorGpuTest, ScriptedSequenceStatsAreExactOnDevice) {
-  Allocator* const upstream = DefaultCudaAllocator(0).value();
-  CachingAllocator pool(upstream);
-  Buffer a = pool.Allocate(300, 64).value();   // 512 class, miss
-  Buffer b = pool.Allocate(2000, 64).value();  // 2048 class, miss
-  ExpectStats(pool, 512 + 2048, 512 + 2048, /*hit_count=*/0, /*miss_count=*/2);
-  a = Buffer();
-  const Buffer c = pool.Allocate(400, 64).value();  // 512 class, hit
-  ExpectStats(pool, 512 + 2048, 512 + 2048, /*hit_count=*/1, /*miss_count=*/2);
-  b = Buffer();
-  EXPECT_EQ(pool.release_cached(), 2048U);
-  ExpectStats(pool, 512, 512, /*hit_count=*/1, /*miss_count=*/2);
 }
 
 }  // namespace
