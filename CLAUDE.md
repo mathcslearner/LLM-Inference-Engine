@@ -192,5 +192,18 @@ conventions; CI additions (forced-scalar ctest pass, TSAN job for
 `parallel`, macOS arm64 CI job decided *against* — private-repo 10× minute
 multiplier — with revisit triggers). Flagged: `cpu → parallel` will need an
 ADR-002 amendment at M5-T02).
-Next up: **M3-T04** (thread pool & parallel_for/parallel_reduce, per the
-new design doc).
+M3-T04 done (2026-08-07: `src/parallel/` — `ThreadPool` (persistent
+fixed-size pool, condvar-parked workers, static round-robin chunk
+assignment, one region in flight, caller executes no chunks),
+`DefaultPool()` sized by `ENGINE_NUM_THREADS` (non-numeric fatal, <1 clamps;
+design doc §3.1 note) else `physical_core_count()` (sysctl/sysfs, SMT
+collapsed); `parallel_for` with (n, grain)-only static partitioning and
+inline path when num_chunks <= 1; `parallel_reduce` with chunk-id-indexed
+cache-line-padded partials + fixed pairwise halving fold — bit-identical at
+thread counts {1,2,8}, tested against an independent serial tree; nesting
+CHECK via thread_local flag; `FunctionRef` spelled as const std::function&
+for v1. Build/CI: `ENGINE_SANITIZE=thread` CMake option (global flags so
+gtest is instrumented too), new `tsan` CI job running `ctest -L parallel`
+(clang Debug), `engine_add_tests` gained LABELS. 309 tests green incl. 24
+new `parallel`-labeled; TSAN-clean locally).
+Next up: **M3-T05** (SIMD dispatch infrastructure, per the design doc §4).

@@ -28,3 +28,13 @@ engine_add_tests(TREE unit SOURCES
   ops_test.cpp
   tensor_test.cpp
   DEPS engine::tensor)
+
+# The extra `parallel` label lets the tsan CI job (and local TSAN builds)
+# select these suites with `ctest -L parallel` — TSAN's slowdown is spent
+# where the threads are (design: docs/design/cpu-backend.md §8.2).
+# parallel_stress_test.cpp is the many-small-regions TSAN workhorse.
+engine_add_tests(TREE unit SOURCES
+  parallel_test.cpp
+  parallel_stress_test.cpp
+  DEPS engine::parallel
+  LABELS parallel)

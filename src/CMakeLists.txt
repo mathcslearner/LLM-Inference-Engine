@@ -4,6 +4,7 @@
 add_subdirectory(core)
 add_subdirectory(tensor)
 add_subdirectory(memory)
+add_subdirectory(parallel)
 add_subdirectory(kernels)
 add_subdirectory(cpu)
 add_subdirectory(model)

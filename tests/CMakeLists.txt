@@ -5,16 +5,19 @@
 
 include(GoogleTest)
 
-# engine_add_tests(TREE <unit|integration> SOURCES <file...> [DEPS <target...>])
+# engine_add_tests(TREE <unit|integration> SOURCES <file...> [DEPS <target...>]
+#                  [LABELS <label...>])
 #
 # For each source file `foo_test.cpp`, creates executable `<tree>_foo_test`
 # linked against the shared test helpers and GoogleTest's default main, and
 # registers its tests with CTest under the ctest-name prefix "<tree>/",
 # labeled `<tree>` (ctest -L matches labels by regex, so `-L unit` and
 # `-L integration` select the trees). DEPS lists the engine targets under
-# test.
+# test. LABELS appends extra ctest labels so a CI job can select a subset —
+# e.g. the tsan job runs `ctest -L parallel` (M3-T04).
 function(engine_add_tests)
-  cmake_parse_arguments(ARG "" "TREE" "SOURCES;DEPS" ${ARGN})
+  cmake_parse_arguments(ARG "" "TREE" "SOURCES;DEPS;LABELS" ${ARGN})
+  set(test_labels ${ARG_TREE} ${ARG_LABELS})
   foreach(source IN LISTS ARG_SOURCES)
     cmake_path(GET source STEM name)
     set(target ${ARG_TREE}_${name})
@@ -28,7 +31,7 @@ function(engine_add_tests)
     gtest_discover_tests(${target}
       TEST_PREFIX "${ARG_TREE}/"
       DISCOVERY_MODE PRE_TEST
-      PROPERTIES LABELS ${ARG_TREE})
+      PROPERTIES LABELS "${test_labels}")
   endforeach()
 endfunction()
 

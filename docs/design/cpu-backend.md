@@ -127,7 +127,8 @@ class ThreadPool {
 };
 
 // The process-wide pool used by kernels: lazily constructed function-local
-// static, sized by ENGINE_NUM_THREADS if set (clamped to >= 1), else
+// static, sized by ENGINE_NUM_THREADS if set (numeric values clamp to >= 1;
+// non-numeric is fatal at startup; empty counts as unset), else
 // physical_core_count().
 ThreadPool& DefaultPool();
 
@@ -150,6 +151,16 @@ in v1 — the scheduler places threads; affinity is deferred, §10.)
 (M3-T04's restart/shutdown-cleanliness criterion); production code uses
 `DefaultPool()`. Workers park on a condition variable between regions; no
 busy-spinning in v1 (revisit with benchmarks only, §10).
+
+*M3-T04 implementation note:* this section originally left unparsable
+`ENGINE_NUM_THREADS` values unspecified ("clamped to >= 1" covers only
+numeric input). Implementation resolved it with the §4.3 stance: a
+non-numeric value is fatal at startup with an actionable message — silently
+ignoring developer/test configuration is the failure class ADR-004 exists to
+prevent — while numeric values below 1 clamp to 1 and an empty value counts
+as unset. The pool also serializes concurrently submitted regions internally
+(one region in flight at a time), so multi-threaded callers are safe by
+construction rather than by convention.
 
 ### 3.2 `parallel_for`: deterministic static partitioning
 

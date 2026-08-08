@@ -509,7 +509,7 @@ arm64 CI job is added if GitHub runner minutes allow — decided here).
 - Doc answers: how is a kernel proven correct on an ISA the CI runner lacks? Who owns threads (no nested parallelism v1)? How is determinism guaranteed across thread counts?
 - Reviewed against ADR-002 module rules; the `parallel` module's position in the layer diagram is recorded.
 
-### M3-T04 · Thread pool & parallel_for
+### M3-T04 · Thread pool & parallel_for — ✅ DONE (2026-08-07)
 `src/parallel/`: fixed-size worker pool (default: physical core count, configurable),
 `parallel_for(range, body)` with static chunking, and a deterministic
 `parallel_reduce` (fixed tree order independent of thread count). No exceptions
