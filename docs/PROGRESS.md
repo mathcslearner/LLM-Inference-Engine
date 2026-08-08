@@ -307,3 +307,39 @@ same-data()-pointer aliasing + lm_head ignored, and the real Qwen2-0.5B
 inventory (290 tensors, 24 layers): clean report, 291 canonicals, q/k/v
 bias mapping, no o_proj bias demanded, lm_head aliased; removing a bias →
 missing. 488 tests green; format + scoped tidy clean).
+M4-T07 done (2026-08-08: model loader — `src/model/loader.h/.cpp`:
+`load_model(dir) → StatusOr<LoadedModel>` composing the whole M4 weight
+path: config parse (§3.2) → checkpoint discovery (§3.1/§3.6) → weight-name
+mapping + shape validation + missing-weights policy (§4) → materializing
+every canonical weight as a zero-copy CPU tensor, checkpoint dtypes
+preserved. Config runs first deliberately, so a bad path or unsupported
+architecture fails before any weight I/O. New logic beyond composition:
+(1) the dtype-acceptance policy (design §5) — only F32/F16/BF16 pass as
+*weights*; integer/bool tensors parse fine but the loader rejects them
+with Unimplemented naming the canonical weight and pointing at M12–M13;
+(2) the §3.1 pickle error — when discovery finds neither safetensors
+spelling, the loader scans for `.bin`/`.pt`/`.pth` files and upgrades the
+NotFound to an actionable convert-to-safetensors message listing them
+(placed in loader.cpp, not Checkpoint::Open, to keep Checkpoint a pure
+safetensors abstraction); (3) progress logging (§3.7) — one INFO line per
+stage in loader.cpp, plus per-file `mapped model-…safetensors (4.9 GiB)`
+lines added to checkpoint.cpp at the two places mapping actually happens
+(the lazy shard() path and the eager single-file Open branch — the design
+put these lines in §3.7 but lazy mapping means only Checkpoint can emit
+them). Materialization resolves each unique checkpoint tensor once and
+reuses the handle, so a tied lm_head/embed_tokens pair is literally the
+same Tensor (data() pointer equality, not just equal bytes). Tests: 10 in
+`tests/integration/loader_test.cpp` (label `model`; first real
+integration-tree suite) — tiny-llama end-to-end (config fields, all 21
+canonical names, empty report, bf16 preserved); value spot-checks against
+fixture-recorded bytes (hardcoded bf16 bit patterns from the committed
+model.safetensors plus byte-identity cross-reads vs direct HF-named
+SafetensorsFile access); sharded layout staged with config into a scratch
+dir, byte-identical to single-file, with the per-shard `mapped` log lines
+asserted via SetLogStreamForTesting; tied-config variant (same-pointer
+alias, lm_head → ignored); a synthetic complete 1-layer micro checkpoint
+proving itself clean, then with one I32 weight → Unimplemented naming the
+canonical weight and M12; and the four actionable-error cases (missing
+dir, config-less dir, pickle-only dir naming the .bin and saying convert,
+unknown architecture listing supported ones). 498 tests green; format +
+scoped tidy clean).

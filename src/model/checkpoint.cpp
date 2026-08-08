@@ -1,5 +1,6 @@
 #include "model/checkpoint.h"
 
+#include "core/logging.h"
 #include "core/status.h"
 #include "memory/allocator.h"
 #include "model/mapped_file.h"
@@ -10,7 +11,9 @@
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
@@ -40,6 +43,34 @@ constexpr std::string_view kIndexFile = "model.safetensors.index.json";
     out += fmt::format(R"("{}")", item);
   }
   return out;
+}
+
+// `4.9 GiB`-style size for the per-file map lines (design §3.7). Weight
+// files are the one place human-scale sizes matter enough to format.
+[[nodiscard]] std::string HumanSize(std::uintmax_t bytes) {
+  constexpr std::string_view kUnits[] = {"B", "KiB", "MiB", "GiB", "TiB"};
+  auto value = static_cast<double>(bytes);
+  std::size_t unit = 0;
+  while (value >= 1024.0 && unit + 1 < std::size(kUnits)) {
+    value /= 1024.0;
+    ++unit;
+  }
+  return unit == 0 ? fmt::format("{} B", bytes)
+                   : fmt::format("{:.1f} {}", value, kUnits[unit]);
+}
+
+// The progress line for a freshly mapped weight file (§3.7): real models
+// are tens of GB across many shards, and these lines are what makes a long
+// load observable.
+void LogMapped(const std::filesystem::path& path) {
+  std::error_code ec;
+  const std::uintmax_t size = std::filesystem::file_size(path, ec);
+  if (ec) {
+    LOG_INFO("model", "mapped {}", path.filename().string());
+  } else {
+    LOG_INFO("model", "mapped {} ({})", path.filename().string(),
+             HumanSize(size));
+  }
 }
 
 // A bare filename: resolving `dir / name` must stay inside `dir`, so a
@@ -200,6 +231,7 @@ core::StatusOr<Checkpoint> Checkpoint::Open(const std::filesystem::path& dir) {
   const std::filesystem::path single_path = dir / kSingleFile;
   if (std::filesystem::exists(single_path, ec)) {
     ASSIGN_OR_RETURN(SafetensorsFile file, SafetensorsFile::Open(single_path));
+    LogMapped(single_path);
     checkpoint.weights_path_ = single_path.string();
     checkpoint.shard_names_.emplace_back(kSingleFile);
     for (const std::string_view name : file.names()) {
@@ -235,6 +267,7 @@ core::StatusOr<const SafetensorsFile*> Checkpoint::shard(std::size_t ordinal) {
                      SafetensorsFile::Open(dir_ / shard_names_[ordinal]));
     RETURN_IF_ERROR(CheckShardConsistency(index_, ordinal, file, shard_names_,
                                           weights_path_));
+    LogMapped(dir_ / shard_names_[ordinal]);
     slot.emplace(std::move(file));
   }
   return &*slot;

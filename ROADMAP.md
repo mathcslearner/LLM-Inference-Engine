@@ -626,7 +626,7 @@ of missing and unexpected weights at load.
 **Acceptance criteria:**
 - Unit tests: full mapping for the tiny-Llama fixture resolves every weight; deliberately removing a weight produces a load error naming it; extra weights produce a warning list.
 
-### M4-T07 · Model loader
+### M4-T07 · Model loader — ✅ DONE (2026-08-08)
 `src/model/loader.h`: `load_model(path) → StatusOr<LoadedModel>` combining config
 parse, shard resolution, name mapping, and materializing weights as CPU tensors
 (dtype preserved from checkpoint). Progress logging for large models.

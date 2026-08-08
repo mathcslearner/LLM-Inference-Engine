@@ -195,6 +195,9 @@ behind an existing subsystem):
   shard mapping, index↔shard consistency checks); T06 weight-name mapping
   (`src/model/weight_map` — canonical namespace, per-arch HF tables,
   tied-embedding aliasing, shape validation, missing/unexpected/ignored
-  report). 488 tests green.
+  report); T07 model loader (`src/model/loader` — `load_model(dir)`
+  composing config → checkpoint → mapping → zero-copy weight registry;
+  dtype policy F32/F16/BF16-only, pickle-checkpoint convert hint,
+  per-stage/per-shard progress logging). 498 tests green.
 
-Next up: **M4-T07** (model loader).
+Next up: **M4-T08** (tokenizer model parsing).
