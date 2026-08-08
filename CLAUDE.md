@@ -221,5 +221,27 @@ removed; `engine_add_tests` gained `SCALAR_PASS` (same binary re-registered
 as `<tree>-scalar/` with `ENGINE_FORCE_ISA=scalar`, label `scalar`) —
 design doc §4.2/§8.1 implementation notes added. 337 tests green
 (dispatch suite runs twice: NEON + forced-scalar)).
-Next up: **M3-T06** (first vectorized kernels: elementwise add/mul/scale,
-sum/max reductions, fp16/bf16 ↔ fp32 conversions, per the design doc §5–§6).
+M3-T06 done (2026-08-08: first vectorized kernels — `src/kernels/`
+`elementwise.h` (AddF32/MulF32/ScaleF32), `reduce.h` (SumF32/MaxF32,
+`kReduceGrain` exposed as part of the bit-exact spec), `convert.h`
+(fp16/bf16 ↔ fp32 on `tensor::float16`/`bfloat16` pointers), each with
+scalar+NEON+AVX2 variants in per-ISA TUs behind KernelTables, threaded via
+`DefaultPool()` `parallel_for`/`parallel_reduce` (variants are
+single-threaded chunk bodies). Numerics decisions recorded as design-doc §5
+/ §6.3 implementation notes: vector fp16 conversions blend NaN lanes rebuilt
+with half.h's integer ops (hardware FCVT/F16C quiets every SNaN — verified
+on M2 — where half.h preserves surviving payloads); Class-R sum lanes
+initialize to +0.0f (spec'd; all-(-0) sums are +0) and the grain is part of
+the spec; MaxF32 ±0 ties sharpened to total-order -0 < +0 (NEON FMAX
+native, AVX2 cmp-eq/AND blend, scalar signbit tie-break; NaN-free
+precondition documented for both reductions). Tests: 23 new tests × both
+ISA passes — size sweep {0,1,15,16,17,4096,2^20+3} × offsets {0..3}
+bit-compared against the scalar variants, independent serial
+re-implementation of the full sum spec (33-chunk odd-carry case),
+exhaustive 2^16-pattern widening and narrowing round-trips, half.h probe
+goldens incl. SNaN payload classes, aliasing/no-op/death cases — 383 tests
+green. `benchmarks/` scaffold: `kernels_bench` (hand-rolled best-of-N,
+`ENGINE_BUILD_BENCHMARKS` option) + first `BASELINES.md` entry — M2 NEON
+vs scalar: fp16 conversions 4.06×/2.86× (≥2× advisory target met),
+sum/max 6.7×/8.0×, memory-bound ops ~1×).
+Next up: **M4-T01** (design doc: model loading & tokenization).

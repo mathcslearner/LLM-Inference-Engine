@@ -482,6 +482,20 @@ acceptance criteria require it recorded here):
   implement RNE fp32↔fp16 (F16C availability is folded into the `kAvx2`
   gate, §4.1); bf16 conversion is shift+RNE-rounding, implementable exactly
   on both ISAs with integer ops.
+
+  *M3-T06 implementation note — hardware NaN quieting.* The "checked before
+  being admitted" claim above holds for every numeric input class, but not
+  for signaling NaNs: both conversion units force the quiet bit on every
+  SNaN (verified empirically on the M2 dev machine: `FCVTL` widens fp16
+  `0x7D01` to `0x7FE02000` where half.h's exact answer is `0x7EA02000`),
+  while half.h preserves a surviving payload verbatim and forces the quiet
+  bit only when the truncated payload would read as inf. The vector fp16
+  variants therefore take the hardware result for non-NaN lanes and blend
+  in NaN lanes rebuilt with the same integer ops half.h uses (detect via
+  `abs > inf-pattern` compare, reconstruct sign|exp|payload, select) — a
+  few extra ops per vector, bit-exactness preserved on all 2^16 patterns
+  (tested exhaustively via the round-trip identity). The bf16 variants are
+  pure integer arithmetic end-to-end and need no such carve-out.
 - **Integer dtypes** (`kInt32`/`kInt64`) pass through kernels only as ids
   and indices in v1. `kInt4`/`kFP8E4M3` remain reserved-but-unimplemented
   until the quantization milestones (M13/M14), which extend this policy in
@@ -578,6 +592,31 @@ finite activations; debug builds may assert).
 Class-R bit-identity is a *specified convention*, not an emergent property —
 which is exactly why it is written here, where every implementation ticket
 can be held to it.
+
+*M3-T06 implementation notes (Class R, sharpening the convention where the
+implementation found it underspecified — `src/kernels/reduce.h` carries the
+authoritative statement):*
+
+1. **Accumulator initialization is +0.0f, and that is part of the spec.**
+   The convention above left the lanes' starting value implicit; it is
+   observable (`SumF32` of `{-0.0f}` is `+0.0f`, since `+0 + -0 = +0`), so
+   it is now specified. A useful consequence: with +0-initialized lanes an
+   accumulator can never become `-0.0f`, so adding padded `+0.0f` elements
+   is bit-safe — though the shipped variants use per-element tail adds into
+   the spilled lane array rather than padding.
+2. **The grain is part of the spec.** `kReduceGrain` (32768) fixes the
+   chunk decomposition and hence the partials and fold-tree shape; changing
+   it changes `SumF32` results at the last-ulp level. It is a named
+   constant in `reduce.h` with this warning attached, not a tuning knob.
+3. **`max` ±0 ties are specified as -0.0f < +0.0f.** "Order-insensitive
+   for the totally-ordered values" was not quite enough: ±0 compare equal
+   yet differ in bits, and the ISAs disagree on ties (ARM `FMAX` returns
+   +0 for (±0), x86 `maxps` returns its second operand, `std::max` its
+   first). The spec is now total-order max with `-0 < +0` — NEON native,
+   scalar via an explicit signbit tie-break, AVX2 via a
+   compare-equal/bitwise-AND blend — making the result one bit pattern on
+   every ISA with no lane convention needed (total-order max is
+   associative).
 
 ---
 

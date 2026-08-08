@@ -532,7 +532,7 @@ target-wide arch flags, so illegal-instruction bugs are structurally impossible)
 - Unit tests: dispatch selects the expected ISA per platform; forced-scalar override verified; forcing an ISA the host lacks fails with an actionable error.
 - The registry pattern is documented in the design doc with the recipe for adding a kernel (used by every kernel ticket after this).
 
-### M3-T06 · First vectorized kernels
+### M3-T06 · First vectorized kernels — ✅ DONE (2026-08-08)
 Elementwise `add`/`mul`/`scale`, reductions (`sum`, `max`), and fp16/bf16 ↔ fp32
 conversion kernels in scalar + NEON + AVX2 variants, dispatched per M3-T05,
 threaded per M3-T04 above a size threshold. Scalar variants double as the

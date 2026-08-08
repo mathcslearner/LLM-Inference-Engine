@@ -43,6 +43,9 @@ engine_add_tests(TREE unit SOURCES
 # (unit/) and ENGINE_FORCE_ISA=scalar (unit-scalar/) — per design §8.1.
 engine_add_tests(TREE unit SOURCES
   dispatch_test.cpp
+  elementwise_test.cpp
+  reduce_test.cpp
+  convert_test.cpp
   DEPS engine::kernels
   LABELS kernels
   SCALAR_PASS)

@@ -28,6 +28,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(ENGINE_BUILD_TESTS "Build unit and integration tests" ON)
+option(ENGINE_BUILD_BENCHMARKS "Build microbenchmarks" ON)
 
 # Sanitizer instrumentation (M3-T04; design: docs/design/cpu-backend.md §8.2).
 # Applied globally — compile and link, third-party included — on purpose:
@@ -71,4 +72,8 @@ add_subdirectory(src)
 if(ENGINE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(ENGINE_BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks)
 endif()
