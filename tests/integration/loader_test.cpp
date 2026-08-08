@@ -32,6 +32,7 @@
 
 namespace {
 
+using engine::core::IsInvalidArgument;
 using engine::core::IsNotFound;
 using engine::core::IsUnimplemented;
 using engine::core::StatusOr;
@@ -249,10 +250,12 @@ TEST(LoaderTest, TiedEmbeddingsShareOneTensor) {
 // heads, intermediate 8, vocab 8) whose tensors are all F32 zeros except
 // `except_name`, which is written with `except_dtype` (same 4-byte
 // itemsize, so offsets are unaffected). With no exception it loads clean;
-// the dtype-policy test makes one weight I32.
+// the dtype-policy test makes one weight I32, and the missing-weight test
+// drops `omit_name` from the checkpoint entirely.
 void StageMicroCheckpoint(const std::filesystem::path& dir,
                           std::string_view except_name,
-                          std::string_view except_dtype) {
+                          std::string_view except_dtype,
+                          std::string_view omit_name = "") {
   WriteFile(dir / "config.json", R"({
     "architectures": ["LlamaForCausalLM"],
     "hidden_size": 4,
@@ -287,6 +290,9 @@ void StageMicroCheckpoint(const std::filesystem::path& dir,
   std::string header = "{";
   std::uint64_t offset = 0;
   for (const auto& [name, dims] : tensors) {
+    if (name == omit_name) {
+      continue;
+    }
     std::uint64_t numel = 1;
     for (const std::int64_t dim : dims) {
       numel *= static_cast<std::uint64_t>(dim);
@@ -300,6 +306,10 @@ void StageMicroCheckpoint(const std::filesystem::path& dir,
     offset = end;
   }
   header.back() = '}';
+  // Space-pad the header (legal trailing JSON whitespace) so the data
+  // section starts 8-aligned — what real HF serializers do, and what the
+  // parser's absolute-alignment check expects.
+  header.append((8 - (8 + header.size()) % 8) % 8, ' ');
 
   std::string bytes(8, '\0');
   const std::uint64_t header_len = header.size();
@@ -317,6 +327,21 @@ TEST(LoaderTest, MicroCheckpointLoadsClean) {
   const StatusOr<LoadedModel> model = load_model(dir);
   ASSERT_TRUE(model.ok()) << model.status().ToString();
   EXPECT_EQ(model->weights.size(), 12U);
+}
+
+TEST(LoaderTest, MissingWeightFailsNamingTheCanonicalName) {
+  // End-to-end wiring of CheckNoMissingWeights through load_model — the
+  // per-list mechanics live in weight_map_test; this pins that a deleted
+  // weight actually fails the *load* with the canonical name.
+  const std::filesystem::path dir = ScratchDir();
+  StageMicroCheckpoint(dir, "", "F32",
+                       /*omit_name=*/"model.layers.0.self_attn.k_proj.weight");
+  const StatusOr<LoadedModel> model = load_model(dir);
+  ASSERT_FALSE(model.ok());
+  EXPECT_TRUE(IsInvalidArgument(model.status())) << model.status().ToString();
+  EXPECT_NE(model.status().message().find("layers.0.attn.k_proj.weight"),
+            std::string::npos)
+      << model.status().ToString();
 }
 
 TEST(LoaderTest, RejectsIntegerWeightDtype) {

@@ -1,6 +1,7 @@
 #include "model/weight_map.h"
 
 #include "common/paths.h"
+#include "core/logging.h"
 #include "core/status.h"
 #include "model/checkpoint.h"
 #include "model/config.h"
@@ -189,12 +190,22 @@ TEST(WeightMapTest, StrayTensorIsUnexpectedNeverAnError) {
   const ModelConfig config = LlamaTestConfig();
   WeightInventory inventory = LlamaInventory(config);
   inventory.emplace("model.layers.0.self_attn.lora_A.weight", Shape{4, 8});
+  // The "warning list" criterion is the log line, not just the vector —
+  // capture it so dropping the LOG_WARN can't pass silently.
+  std::ostringstream log;
+  engine::core::SetLogStreamForTesting(&log);
   const StatusOr<WeightMap> map = BuildWeightMap(config, inventory);
+  engine::core::SetLogStreamForTesting(nullptr);
   ASSERT_TRUE(map.ok()) << map.status().ToString();
   EXPECT_EQ(map->report.unexpected,
             std::vector<std::string>{"model.layers.0.self_attn.lora_A.weight"});
   EXPECT_TRUE(map->report.missing.empty());
   EXPECT_TRUE(CheckNoMissingWeights(map->report).ok());
+  const std::string lines = log.str();
+  EXPECT_NE(lines.find("unexpected tensor"), std::string::npos) << lines;
+  EXPECT_NE(lines.find("model.layers.0.self_attn.lora_A.weight"),
+            std::string::npos)
+      << lines;
 }
 
 TEST(WeightMapTest, RotaryInvFreqIsIgnoredNotUnexpected) {

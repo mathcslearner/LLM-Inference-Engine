@@ -454,8 +454,44 @@ asserting every emission valid and concat == batch; multi-token-emoji
 buffering pinned on llama3's 3-token U+1F469; truncated-tail finish
 policy vs batch agreement; out-of-range errors batch and stream incl.
 state-preserved-after-error; mini-tokenizer non-special added token
-survives skip_special_tokens; unicode_test +4 — classifier
+survives skip_special_tokens [audit correction 2026-08-08: the file
+defines 12 gtest cases, not 11, and the round-trip + token-by-token
+streaming golden loops were vacuous until the M4 audit fix below];
+unicode_test +4 — classifier
 complete/incomplete/maximal-subpart shapes incl. overlong, surrogate,
 broken-mid-sequence, and from_utf8_lossy-parity cases; the
 DecodeIsUnimplementedUntilT10 stub test removed). 591 tests green;
 format + scoped tidy clean.
+
+M4 audit fixes done (2026-08-08: post-milestone audit of M4 against its
+acceptance criteria, fixes in one change. Tokenizer: the two
+tokenizer_decode_test golden loops (encode↔decode round-trip and
+token-by-token streaming) ranged over `LoadVectors(...)["cases"]` — a
+reference into a temporary destroyed before the first iteration under
+C++20 — so both loops ran zero times: two T10 acceptance criteria were
+unverified and qwen2 streaming was entirely unexercised. Fixed with
+named locals plus the ≥-case-count guards the healthy golden loops
+already had, and the round-trip assertion corrected to compare against
+the golden `decoded` rather than the input text (a normalizing
+tokenizer legitimately round-trips decomposed input to its NFC form —
+qwen2's nfc_decomposed vector would fail the old assertion, which is
+how the audit proved the loop never ran). Model: the safetensors
+alignment check made absolute — `(8 + header_len + begin) % itemsize`,
+not `begin % itemsize`, which an unpadded header defeats by shifting
+the whole data section (design §3.4 audit note; synthetic test headers
+now space-padded to an 8-aligned data section like real HF serializers;
+new negative test pins the unpadded-header rejection). New coverage:
+loader-level missing-weight failure naming the canonical weight
+(micro-checkpoint gains an omit parameter); LOG_WARN capture in the
+unexpected-tensor weight_map test (the "warning list" criterion is the
+log line, not just the report vector); new bpe_test pins the 256-byte
+alphabet bijection — total, injective, exact inverse, string
+round-trip. Docs: model-loading.md §6.3 generator output corrected to
+`unicode_data.inc`, §7.1 layout gains the committed tokenizer LICENSE
+files, §7.2 gains huggingface_hub in the requirements list and precise
+safetensors header-ordering wording, §8's T04 row matched to the tests
+as written; T10 entry corrected (12 decode tests, not 11). 597 tests
+green; format + scoped tidy clean. Known gap, deliberately left open
+here (mirrors M3): every commit from T04 on is unpushed, so no CI run
+has built M4 on x86-64 or compiled the AVX2 TUs against it — push and
+confirm green before treating M4 as fully validated.)

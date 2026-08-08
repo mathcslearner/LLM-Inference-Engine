@@ -175,7 +175,8 @@ struct RawEntry {
 };
 
 core::StatusOr<RawEntry> ParseEntry(std::string_view name, const json& value,
-                                    std::uint64_t data_size) {
+                                    std::uint64_t data_size,
+                                    std::uint64_t data_start) {
   if (!value.is_object()) {
     return core::InvalidArgumentError(
         R"(tensor "{}": entry must be a JSON object, got {})", name,
@@ -236,13 +237,18 @@ core::StatusOr<RawEntry> ParseEntry(std::string_view name, const json& value,
         name, entry.end - entry.begin, entry.shape.numel(),
         to_string(entry.dtype), expected_bytes);
   }
-  // Stricter than the upstream spec (design §3.4): itemsize-aligned begin,
-  // so typed access through views is never misaligned.
-  if (entry.begin % item_bytes != 0) {
+  // Stricter than the upstream spec (design §3.4): the tensor's absolute
+  // file offset must be itemsize-aligned, so typed access through views is
+  // never misaligned. Checking `begin` alone is not enough — an unpadded
+  // header shifts the whole data section, and `begin % itemsize == 0` says
+  // nothing about `(8 + header_len + begin) % itemsize`. Real HF
+  // serializers pad the header so the data section starts 8-aligned.
+  if ((data_start + entry.begin) % item_bytes != 0) {
     return core::InvalidArgumentError(
-        R"(tensor "{}": data_offsets begin {} is not aligned to the {}-byte )"
-        "itemsize of {}",
-        name, entry.begin, item_bytes, to_string(entry.dtype));
+        R"(tensor "{}": absolute offset {} (data section at {} + begin {}) )"
+        "is not aligned to the {}-byte itemsize of {}",
+        name, data_start + entry.begin, data_start, entry.begin, item_bytes,
+        to_string(entry.dtype));
   }
   return entry;
 }
@@ -342,7 +348,9 @@ core::StatusOr<ParsedFile> ParseSafetensors(const memory::Buffer& buffer) {
       continue;
     }
     RawEntry entry;
-    ASSIGN_OR_RETURN(entry, ParseEntry(name, value, data_size));
+    ASSIGN_OR_RETURN(entry,
+                     ParseEntry(name, value, data_size,
+                                static_cast<std::uint64_t>(parsed.data_start)));
     parsed.entries.emplace(name, entry);
   }
   RETURN_IF_ERROR(ValidateDataSectionLayout(parsed.entries, data_size));

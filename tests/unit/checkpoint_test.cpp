@@ -52,13 +52,18 @@ void WriteFile(const std::filesystem::path& path, std::string_view bytes) {
   ASSERT_TRUE(out.good()) << path;
 }
 
-// Serializes a safetensors file: u64-LE header length + header + data.
+// Serializes a safetensors file: u64-LE header length + header + data. The
+// header is space-padded (legal trailing JSON whitespace) so the data
+// section starts 8-aligned, matching real HF serializers and the parser's
+// absolute-alignment check.
 [[nodiscard]] std::string BuildFileBytes(std::string_view header,
                                          std::string_view data) {
   std::string bytes(8, '\0');
-  const std::uint64_t header_len = header.size();
+  std::string padded(header);
+  padded.append((8 - (8 + padded.size()) % 8) % 8, ' ');
+  const std::uint64_t header_len = padded.size();
   std::memcpy(bytes.data(), &header_len, sizeof(header_len));
-  bytes.append(header);
+  bytes.append(padded);
   bytes.append(data);
   return bytes;
 }

@@ -348,8 +348,14 @@ is an explicit copy-to-aligned pass at load, listed in §9, not a parser
 assumption. One real consequence today: an fp16/bf16 tensor whose offset is
 odd would make `data_ptr<float16>()` UB-adjacent; in practice every dtype's
 offsets in real checkpoints are itemsize-multiples, and the parser enforces
-`begin % itemsize(dtype) == 0` (a new check, stricter than the spec) so the
-assumption is verified rather than hoped.
+absolute alignment — `(8 + header_len + begin) % itemsize(dtype) == 0` (a
+new check, stricter than the spec) — so the assumption is verified rather
+than hoped. *(M4 audit, 2026-08-08: originally this checked only
+`begin % itemsize`, which an unpadded header defeats — the whole data
+section shifts, so a relatively-aligned tensor can still land on a
+misaligned absolute address. The check now covers the absolute offset;
+real HF serializers pad the header so the data section starts 8-aligned,
+so no real checkpoint is affected.)*
 
 ### 3.5 Zero-copy tensor materialization: `Tensor::from_buffer` (M4-T04)
 
@@ -637,9 +643,11 @@ tables** (unmaintainable, unverifiable); **generated tables, committed as
 source** — chosen. `tools/gen_unicode/` (Python, same pinned-requirements
 regime as §7) downloads a *pinned Unicode version's* data files
 (`UnicodeData.txt`, `DerivedNormalizationProps.txt`, …), and emits
-`src/tokenizer/unicode.cpp`: compact range tables + a generation-stamp
-comment (Unicode version, generator hash). The tables are committed like
-any other source; CI never runs the generator (fixture rule, §7.2). Order
+`src/tokenizer/unicode_data.inc` (data only, included by the hand-written
+`unicode.cpp` — see the §6.4 M4-T09 amendment): compact range tables + a
+generation-stamp comment (Unicode version, generator hash). The tables are
+committed like any other source; CI never runs the generator (fixture
+rule, §7.2). Order
 of magnitude: some tens of KB of tables — noise next to the fixtures.
 The chosen Unicode version is pinned in the generator and stamped in the
 output; upgrading it is a deliberate regenerate-and-diff change validated
@@ -862,8 +870,8 @@ tests/fixtures/
       llama3/  { config.json, LICENSE }   # Llama-3.1 (rope_scaling presence)
       qwen2/   { config.json }            # rope_scaling absence, bias default
   tokenizers/
-    llama3/  { tokenizer.json, vectors.json }
-    qwen2/   { tokenizer.json, vectors.json }
+    llama3/  { tokenizer.json, vectors.json, LICENSE }
+    qwen2/   { tokenizer.json, vectors.json, LICENSE }
 ```
 
 - **tiny-llama** (M4-T02): random-weight `LlamaForCausalLM`, ~2 layers,
@@ -894,14 +902,18 @@ tokenizer, and byte-identity against the real artifact is the entire point.
 ### 7.2 Generation & determinism (M4-T02)
 
 `tools/gen_fixtures/`: a Python package with a pinned `requirements.txt`
-(exact `==` versions: torch, transformers, tokenizers, safetensors) and a
+(exact `==` versions: torch, transformers, tokenizers, safetensors, and
+huggingface_hub — the package that performs every pinned-revision
+download) and a
 CLI (`python -m gen_fixtures …`) with one subcommand per fixture family,
 plus a `regen-all` target (Makefile or script) that rebuilds every
 committed fixture. Rules:
 
 - **Byte-identical regeneration** (M4-T02 acceptance): fixed seeds
   (`torch.manual_seed`), CPU-only generation, sorted/stable serialization
-  (safetensors written with sorted names; JSON dumped with `sort_keys` and
+  (tensor names are passed to the safetensors serializer sorted; the
+  library's header ordering — deterministic, dtype-major — is what lands
+  on disk; JSON dumped with `sort_keys` and
   fixed separators), and no timestamps anywhere. Running the CLI twice
   diffs empty; the doc-of-record for "which versions produced this" is
   `meta.json` + `requirements.txt`, both committed.
@@ -954,7 +966,7 @@ field/tensor/file (the actionability criterion, tested — not aspirational).
 |---|---|
 | M4-T02 | Generator-side determinism is proven by the committed fixtures themselves (regen produces no diff — checked at generation time, documented in tools/README) |
 | M4-T03 | Parse committed real Llama-3-style and Qwen2-style `config.json`; assert **every** `ModelConfig` field incl. per-arch `attention_bias` defaults, `head_dim` derivation, `rope_scaling` presence/absence; malformed cases: missing required field, wrong JSON type, negative dims, `num_heads % num_kv_heads != 0`, unknown architecture, non-JSON input |
-| M4-T04 | Metadata (names/dtypes/shapes) vs fixture manifest; tensor bytes vs expected values; `from_buffer` bounds/reserved-dtype rejections; **lifetime**: drop the `SafetensorsFile`, read through a surviving `Tensor` (ASAN-clean = the shared-Buffer design working); fuzz-ish negatives: file < 8 bytes, header_len overflowing/exceeding file, header-cap breach, non-object JSON, missing keys, `begin > end`, offsets past EOF, numel×itemsize ≠ range, overlap, gap, unknown dtype string, unaligned `begin` |
+| M4-T04 | Metadata (names/dtypes/shapes) spot-checked against the fixture; tensor bytes vs expected values; `from_buffer` bounds/reserved-dtype rejections; **lifetime**: drop the `SafetensorsFile`, read through a surviving `Tensor` (ASAN-clean = the shared-Buffer design working); fuzz-ish negatives: file < 8 bytes, header_len overflowing/exceeding file, header-cap breach, non-object JSON, missing keys, `begin > end`, offsets past EOF, numel×itemsize ≠ range, overlap, gap, unknown dtype string, unaligned `begin`, misaligned data-section start (unpadded header) |
 | M4-T05 | 2-shard fixture: every tensor resolvable, values identical to the single-file fixture; missing shard file, index naming absent tensors, shard tensor absent from index, path-separator shard name, duplicate names across shards |
 | M4-T06 | tiny-llama: every canonical name resolves, report empty; delete one weight → error naming it; add a stray → `unexpected` lists it; `inv_freq` → `ignored`; qwen2-weight-names.json: bias mapping + tied-`lm_head` aliasing (same `Tensor` handle under both names); shape-mismatch rejection |
 | M4-T07 | Integration: `load_model(tiny-llama)` end-to-end, spot-check tensor values vs `expected/`; bad path, config-less dir, `.bin`-only dir, unsupported architecture — each message actionable |

@@ -220,7 +220,15 @@ behind an existing subsystem):
   `classify_utf8_prefix`/`append_utf8_lossy` in unicode.h alongside the
   lenient encode-side codec; `src/tokenizer/detokenize` —
   `DetokenizerStream` push/finish over a ≤3-byte carry, streaming
-  output bit-identical to batch decode, every emission valid UTF-8).
-  591 tests green.
+  output bit-identical to batch decode, every emission valid UTF-8);
+  post-milestone audit fixes (2026-08-08: two vacuous
+  tokenizer_decode_test golden loops fixed — dangling-temporary
+  range-for, C++20 — restoring the T10 round-trip/streaming acceptance
+  coverage incl. qwen2 streaming; safetensors alignment check made
+  absolute `(8 + header_len + begin) % itemsize`; loader missing-weight,
+  weight-map LOG_WARN-capture, and 256-byte alphabet-bijection tests
+  added; model-loading.md staleness synced). 597 tests green. M4's
+  commits are not yet pushed — no CI run has built them; push and
+  confirm green before starting M5.
 
 Next up: **M5-T01** (design doc: model execution).

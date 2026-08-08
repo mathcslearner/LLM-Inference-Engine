@@ -141,7 +141,14 @@ TEST_P(GoldenDecodeTest, MatchesEveryCommittedVector) {
 TEST_P(GoldenDecodeTest, RoundTripsEveryEncodableVector) {
   const auto& tok = FixtureTokenizer(GetParam());
   ASSERT_TRUE(tok.ok()) << tok.status();
-  for (const auto& c : LoadVectors(GetParam())["cases"]) {
+  // The json must outlive the loop: range-for over
+  // `LoadVectors(...)["cases"]` binds a reference into a temporary that
+  // dies before the first iteration (C++20; the M4 audit found this loop
+  // iterating zero times).
+  const nlohmann::json vectors = LoadVectors(GetParam());
+  ASSERT_TRUE(vectors.contains("cases"));
+  std::size_t cases = 0;
+  for (const auto& c : vectors["cases"]) {
     if (c.contains("text_b64")) {
       continue;  // invalid UTF-8 round-trips only up to U+FFFD (goldens)
     }
@@ -150,8 +157,16 @@ TEST_P(GoldenDecodeTest, RoundTripsEveryEncodableVector) {
     ASSERT_TRUE(ids.ok()) << c["name"] << ": " << ids.status();
     const auto decoded = tok->decode(*ids, /*skip_special_tokens=*/false);
     ASSERT_TRUE(decoded.ok()) << c["name"] << ": " << decoded.status();
-    EXPECT_EQ(*decoded, text) << c["name"];
+    // Compared against the golden `decoded`, not `text`: a normalizing
+    // tokenizer legitimately round-trips decomposed input to its NFC form
+    // (qwen2's nfc_decomposed vector), and `decoded` is what HF returns
+    // for exactly these ids.
+    EXPECT_EQ(*decoded, c["decoded"].get<std::string>()) << c["name"];
+    ++cases;
   }
+  // 24 committed cases minus the three malformed-UTF-8 ones; a shrunken
+  // file must not pass silently.
+  EXPECT_GE(cases, 21U);
 }
 
 // Token-by-token streaming over every vector, both golden pairings: each
@@ -160,7 +175,11 @@ TEST_P(GoldenDecodeTest, RoundTripsEveryEncodableVector) {
 TEST_P(GoldenDecodeTest, StreamingMatchesBatchDecodeTokenByToken) {
   const auto& tok = FixtureTokenizer(GetParam());
   ASSERT_TRUE(tok.ok()) << tok.status();
-  for (const auto& c : LoadVectors(GetParam())["cases"]) {
+  // Named local for the same lifetime reason as above.
+  const nlohmann::json vectors = LoadVectors(GetParam());
+  ASSERT_TRUE(vectors.contains("cases"));
+  std::size_t cases = 0;
+  for (const auto& c : vectors["cases"]) {
     const std::string name = c["name"].get<std::string>();
     for (const bool skip : {false, true}) {
       const Ids ids = IdList(c[skip ? "ids_with_special" : "ids"]);
@@ -177,7 +196,9 @@ TEST_P(GoldenDecodeTest, StreamingMatchesBatchDecodeTokenByToken) {
       streamed += stream.finish();
       EXPECT_EQ(streamed, *batch) << name << " skip=" << skip;
     }
+    ++cases;
   }
+  EXPECT_GE(cases, 24U);
 }
 
 INSTANTIATE_TEST_SUITE_P(Families, GoldenDecodeTest,

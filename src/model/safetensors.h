@@ -32,7 +32,9 @@
 // every malformed shape is a recoverable error naming the file (and tensor),
 // never a CHECK and never an exception (ADR-003). Validation includes
 // non-overlapping, gap-free coverage of the data section and
-// itemsize-aligned offsets (design §3.4 checks 1–5).
+// itemsize-aligned *absolute* offsets — 8 + header_len + begin, since an
+// unpadded header can shift relatively-aligned tensors off alignment
+// (design §3.4 checks 1–5).
 
 namespace engine::model {
 

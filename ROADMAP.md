@@ -661,6 +661,16 @@ multi-byte sequences) — required later for streaming generation.
 **Acceptance criteria:**
 - Golden tests: decode(encode(x)) == x for all test vectors; streaming decode emits identical total text with no invalid UTF-8 at any intermediate step (tested token-by-token, including a multi-token emoji).
 
+> **Audit note (2026-08-08):** the post-milestone audit found this ticket's two
+> golden acceptance loops (round-trip, token-by-token streaming) vacuous — a
+> C++20 dangling-temporary range-for iterated zero times, so those criteria
+> were unverified (and qwen2 streaming unexercised) until the audit fix. Also
+> fixed in the same change: the M4-T04 safetensors alignment check is now
+> absolute (`8 + header_len + begin`, not `begin` alone — an unpadded header
+> shifts the data section); plus new loader missing-weight, weight-map
+> warning-capture, and byte-alphabet-bijection tests. Details:
+> docs/PROGRESS.md "M4 audit fixes".
+
 ---
 
 ## Milestone 5 — CPU Reference Engine

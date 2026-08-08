@@ -49,15 +49,27 @@ using engine::tensor::Tensor;
   return dir;
 }
 
-// Serializes a safetensors file: u64-LE header length + header + data.
-[[nodiscard]] std::string BuildFileBytes(std::string_view header,
-                                         std::string_view data) {
+// Serializes a safetensors file exactly as given: u64-LE header length +
+// header + data. Only the misaligned-data-section test wants this — every
+// other case goes through the padding wrapper below.
+[[nodiscard]] std::string BuildFileBytesUnpadded(std::string_view header,
+                                                 std::string_view data) {
   std::string bytes(8, '\0');
   const std::uint64_t header_len = header.size();
   std::memcpy(bytes.data(), &header_len, sizeof(header_len));
   bytes.append(header);
   bytes.append(data);
   return bytes;
+}
+
+// Serializes a safetensors file, space-padding the header (legal trailing
+// JSON whitespace) so the data section starts 8-aligned — what real HF
+// serializers do, and what the parser's absolute-alignment check expects.
+[[nodiscard]] std::string BuildFileBytes(std::string_view header,
+                                         std::string_view data) {
+  std::string padded(header);
+  padded.append((8 - (8 + padded.size()) % 8) % 8, ' ');
+  return BuildFileBytesUnpadded(padded, data);
 }
 
 // Writes `bytes` to a fresh file and opens it. Each call uses a distinct
@@ -126,8 +138,10 @@ TEST(SafetensorsTest, SyntheticRoundTrip) {
   EXPECT_EQ(a->dtype(), DataType::kFloat32);
   EXPECT_EQ(a->shape(), (Shape{2, 2}));
   EXPECT_TRUE(a->is_contiguous());
-  // Data section starts at 8 + header_len; "a" begins at its offset 0.
-  EXPECT_EQ(a->byte_offset(), 8 + kTwoTensorHeader.size());
+  // Data section starts at 8 + header_len, with the header space-padded to
+  // the next 8-byte boundary; "a" begins at its offset 0.
+  const std::size_t data_start = (8 + kTwoTensorHeader.size() + 7) / 8 * 8;
+  EXPECT_EQ(a->byte_offset(), data_start);
   EXPECT_EQ(a->item<float>({0, 0}), 1.0F);
   EXPECT_EQ(a->item<float>({1, 1}), 4.0F);
 
@@ -433,6 +447,25 @@ TEST(SafetensorsTest, RejectsUnalignedBegin) {
   ExpectInvalid(R"({"a":{"dtype":"I8","shape":[2],"data_offsets":[0,2]},)"
                 R"("b":{"dtype":"F32","shape":[1],"data_offsets":[2,6]}})",
                 std::string(6, '\0'), "not aligned");
+}
+
+TEST(SafetensorsTest, RejectsMisalignedDataSectionStart) {
+  // begin 0 is relatively aligned, but an unpadded header puts the data
+  // section itself at a non-multiple of F32's itemsize — only the
+  // *absolute* offset check catches this (the M4 audit found the relative
+  // check let a misaligned typed view through).
+  constexpr std::string_view kHeader =
+      R"({"a":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}})";
+  ASSERT_NE((8 + kHeader.size()) % 4, 0U) << "precondition: unpadded start "
+                                             "must be misaligned for F32";
+  const StatusOr<SafetensorsFile> file =
+      OpenBytes(BuildFileBytesUnpadded(kHeader, std::string(4, '\0')));
+  ASSERT_FALSE(file.ok());
+  EXPECT_TRUE(IsInvalidArgument(file.status())) << file.status().ToString();
+  EXPECT_NE(file.status().message().find("not aligned"), std::string::npos)
+      << file.status().ToString();
+  EXPECT_NE(file.status().message().find("absolute offset"), std::string::npos)
+      << file.status().ToString();
 }
 
 TEST(SafetensorsTest, RejectsOverlapGapAndUncoveredTail) {
