@@ -198,6 +198,12 @@ behind an existing subsystem):
   report); T07 model loader (`src/model/loader` — `load_model(dir)`
   composing config → checkpoint → mapping → zero-copy weight registry;
   dtype policy F32/F16/BF16-only, pickle-checkpoint convert hint,
-  per-stage/per-shard progress logging). 498 tests green.
+  per-stage/per-shard progress logging); T08 tokenizer model parsing
+  (`src/tokenizer/tokenizer` + `bpe` — tokenizer.json → byte-level BPE
+  structures: token↔id maps, merge ranks, id→raw-bytes, added-token
+  registry, template BOS/EOS; §6.2 component whitelist enforced by name,
+  amended from fixture reality: post_processor ByteLevel/Sequence
+  accepted, `pair` template ignored; encode/decode stubbed until
+  T09/T10). 544 tests green.
 
-Next up: **M4-T08** (tokenizer model parsing).
+Next up: **M4-T09** (BPE encoding).

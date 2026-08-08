@@ -87,11 +87,11 @@ Files this milestone creates:
 | `src/model/weight_map.h/.cpp` | model | canonical names, per-arch tables, load report | M4-T06 |
 | `src/model/loader.h/.cpp` | model | `load_model(dir) → StatusOr<LoadedModel>` | M4-T07 |
 | `src/tokenizer/tokenizer.h/.cpp` | tokenizer | public API, tokenizer.json parsing | M4-T08 |
-| `src/tokenizer/unicode.h/.cpp` | tokenizer | generated Unicode tables: categories, NFC (§6.3) | M4-T08/T09 |
+| `src/tokenizer/unicode.h/.cpp` | tokenizer | generated Unicode tables: categories, NFC (§6.3) | M4-T09 |
 | `src/tokenizer/pretokenize.h/.cpp` | tokenizer | GPT-2/cl100k-family split matcher (§6.4) | M4-T09 |
-| `src/tokenizer/bpe.h/.cpp` | tokenizer | byte-level alphabet, merge loop | M4-T09 |
+| `src/tokenizer/bpe.h/.cpp` | tokenizer | byte-level alphabet (M4-T08), merge loop (M4-T09) | M4-T08/T09 |
 | `src/tokenizer/detokenize.h/.cpp` | tokenizer | `DetokenizerStream` (§6.5) | M4-T10 |
-| `tools/gen_unicode/` | tools | generator for `src/tokenizer/unicode.cpp` tables | M4-T08 |
+| `tools/gen_unicode/` | tools | generator for `src/tokenizer/unicode.cpp` tables | M4-T09 |
 
 `model` does not link `parallel`: v1 loading is single-threaded (mmap makes
 materialization lazy — §3.4; parallel page-warming is deferred, §9).
@@ -595,8 +595,8 @@ component type) — silent partial support is how byte-identity dies:
 | `normalizer` | absent/null; `NFC` | Llama 3: none. Qwen 2+: NFC (§6.3). Sequences of supported normalizers also accepted. |
 | `pre_tokenizer` | `Split` (regex pattern, behavior `Isolated`, `invert: false`); `ByteLevel` (`add_prefix_space: false`, `use_regex: false`); `Sequence` of these | The regex is the GPT-2/cl100k family (§6.4). `ByteLevel` here does the byte→unicode mapping only. |
 | `model` | `BPE`: `vocab`, `merges`, `ignore_merges`, `byte_fallback: false`, no `unk_token`, `continuing_subword_prefix`/`end_of_word_suffix` empty | `ignore_merges: true` (Llama 3): a pre-token already present in the vocab is emitted directly, skipping the merge loop. |
-| `post_processor` | absent/null; `TemplateProcessing` restricted to BOS/EOS insertion around a single sequence | Pair-sequence templates (`$B`) rejected — inference never encodes pairs. |
-| `decoder` | `ByteLevel` (or a `Sequence` reducing to it) | Inverse byte↔unicode mapping. |
+| `post_processor` | absent/null; `ByteLevel` (accepted and ignored); `TemplateProcessing` restricted to BOS/EOS insertion around the `single` sequence; `Sequence` of these | A `ByteLevel` post-processor only rewrites offsets, which we never produce — an encoding no-op. The `pair` template (`$B`) is *ignored*, not rejected — inference never encodes pairs (see the M4-T08 amendment below). |
+| `decoder` | absent/null; `ByteLevel` (or a `Sequence` reducing to it) | Inverse byte↔unicode mapping — which is also what an absent decoder means for a byte-level model, so absent is accepted. |
 | `added_tokens` | full support: id, content, `special`, `lstrip`/`rstrip`, `normalized`, `single_word` | The flags are parsed and *stored* in M4-T08; matching semantics used by encode are `special`, `lstrip`/`rstrip`, `normalized` (§6.4). `single_word` is stored but unimplemented — rejected if true, which neither target family sets. |
 
 The exact component configuration of both target tokenizers is captured in
@@ -604,6 +604,20 @@ committed fixtures (§7), so "what the families actually use" is pinned by
 data, not by this table's prose — if an upstream tokenizer revision adds a
 component outside the whitelist, parsing fails loudly and the whitelist
 grows deliberately.
+
+> **Amendment (M4-T08, 2026-08-08).** The fixtures corrected this table's
+> original prose in two places, exactly per the pinned-by-data rule above:
+> the real Llama-3 `post_processor` is a `Sequence` of [`ByteLevel`,
+> `TemplateProcessing`] and Qwen 2's is a bare `ByteLevel`, so `ByteLevel`
+> (an encoding no-op) and `Sequence` joined the post_processor row; and
+> Llama-3's `TemplateProcessing` *carries* a `pair` template alongside
+> `single`, so "pair templates rejected" became "the `pair` key is ignored"
+> — rejecting on its presence would have rejected Llama 3 itself. Two
+> data-driven parsing notes from the same ticket: `merges` are accepted in
+> both serializations (`"left right"` strings — unambiguous, the byte-level
+> alphabet contains no space — and `["left", "right"]` arrays), and
+> top-level `truncation`/`padding` must be null/absent (`Unimplemented`
+> otherwise — either would change the id sequence).
 
 ### 6.3 Unicode machinery: generated tables, no ICU
 
@@ -684,21 +698,34 @@ decomposes), `is_letter(char32_t)`, `is_number(char32_t)`,
 API sketch:
 
 ```cpp
-// src/tokenizer/tokenizer.h
+// src/tokenizer/tokenizer.h (as landed in M4-T08)
 class Tokenizer {
  public:
   [[nodiscard]] static core::StatusOr<Tokenizer> from_file(
       const std::filesystem::path& tokenizer_json);
+  // The testable seam, mirroring ParseModelConfig/LoadModelConfig.
+  [[nodiscard]] static core::StatusOr<Tokenizer> from_json(
+      std::string_view json_text);
 
   [[nodiscard]] core::StatusOr<std::vector<std::int32_t>> encode(
       std::string_view text, bool add_special_tokens) const;
   [[nodiscard]] core::StatusOr<std::string> decode(
       std::span<const std::int32_t> ids, bool skip_special_tokens) const;
 
+  // Lookups over the parsed structures (M4-T08): base-vocab tokens in
+  // alphabet space, added tokens by raw content; token_bytes is the raw
+  // byte string an id decodes to (the §6.5 concatenation contract's unit).
   [[nodiscard]] std::int64_t vocab_size() const;
+  [[nodiscard]] std::optional<std::int32_t> token_to_id(
+      std::string_view token) const;
+  [[nodiscard]] std::optional<std::string_view> id_to_token(
+      std::int32_t id) const;
+  [[nodiscard]] std::optional<std::string_view> token_bytes(
+      std::int32_t id) const;
   [[nodiscard]] std::optional<std::int32_t> bos_id() const;
   [[nodiscard]] std::optional<std::int32_t> eos_id() const;
   [[nodiscard]] bool is_special(std::int32_t id) const;
+  [[nodiscard]] const AddedToken* added_token(std::int32_t id) const;
 };
 ```
 

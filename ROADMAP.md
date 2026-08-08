@@ -635,7 +635,7 @@ parse, shard resolution, name mapping, and materializing weights as CPU tensors
 - Integration test loads the tiny fixture end-to-end; spot-check tensor values against fixture-recorded expectations.
 - Load errors (bad path, unsupported architecture) produce actionable messages.
 
-### M4-T08 · Tokenizer model parsing
+### M4-T08 · Tokenizer model parsing — ✅ DONE (2026-08-08)
 `src/tokenizer/`: parse `tokenizer.json` — vocab, merges, added/special tokens
 (with `special`, `lstrip`/`rstrip` flags), byte-level alphabet mapping. Build the
 in-memory structures for encoding (merge ranks) and decoding (id → token bytes).

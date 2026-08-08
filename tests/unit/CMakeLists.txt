@@ -48,6 +48,14 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::model nlohmann_json::nlohmann_json
   LABELS model)
 
+# tokenizer_test parses the committed real tokenizer.json fixtures (design
+# §7.1, §8); the `tokenizer` label lets `ctest -L tokenizer` iterate the
+# golden suite alone. Ordinary portable C++ — no SCALAR_PASS.
+engine_add_tests(TREE unit SOURCES
+  tokenizer_test.cpp
+  DEPS engine::tokenizer
+  LABELS tokenizer)
+
 # The extra `parallel` label lets the tsan CI job (and local TSAN builds)
 # select these suites with `ctest -L parallel` — TSAN's slowdown is spent
 # where the threads are (design: docs/design/cpu-backend.md §8.2).

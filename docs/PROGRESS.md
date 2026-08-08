@@ -343,3 +343,41 @@ canonical weight and M12; and the four actionable-error cases (missing
 dir, config-less dir, pickle-only dir naming the .bin and saying convert,
 unknown architecture listing supported ones). 498 tests green; format +
 scoped tidy clean).
+M4-T08 done (2026-08-08: tokenizer model parsing — `src/tokenizer/` gains
+its first real sources. `bpe.h/.cpp`: the GPT-2 byte-level alphabet as a
+constexpr 256-entry bijection (printable-latin identity + 68 remapped to
+U+0100+n) with both directions plus `map_bytes_to_alphabet` /
+`unmap_alphabet_to_bytes` and a small self-contained UTF-8 codec (the full
+Unicode tables stay in M4-T09 — the design's file table originally pinned
+`tools/gen_unicode/` to T08, moved to T09 where its first consumer lives).
+`tokenizer.h/.cpp`: `Tokenizer::from_file`/`from_json` (the
+Parse/Load-style testable seam), enforcing the §6.2 whitelist —
+`Unimplemented` naming the component for off-whitelist types/flags
+(non-BPE models incl. unigram, NFKC, unknown pre/post-processors and
+decoders, byte_fallback, unk_token, subword affixes, single_word,
+Split.invert, non-null truncation/padding), `InvalidArgument` for
+malformed input — and building the T09/T10 structures: transparent-hash
+token→id map, dense id→token and id→raw-bytes vectors (base vocab
+unmapped through the alphabet, added tokens verbatim), merge-rank map
+keyed "left right", sorted added-token registry with id index, template
+prefix/suffix ids, split pattern + NFC flag + ignore_merges. Vocab ids
+are validated contiguous [0, n) (the dense tables' precondition); merges
+are validated against the vocab including the merged product; added
+tokens must extend the id space gaplessly or textually match the base
+entry they shadow. encode/decode are declared but return Unimplemented
+until T09/T10. Non-obvious: the committed fixtures falsified the §6.2
+table's original post_processor row two ways (Llama-3 wraps
+TemplateProcessing in a Sequence with an offsets-only ByteLevel, and its
+template *carries* a `pair` key), so the whitelist gained
+ByteLevel/Sequence and "pair rejected" became "pair ignored" — recorded
+as an amendment block in the design doc, which also now pins both merge
+serializations ("l r" strings and [l, r] arrays). bos_id/eos_id derive
+solely from TemplateProcessing insertions: Llama-3 bos=128000, no eos;
+Qwen2 neither. Tests: 46 in `tests/unit/tokenizer_test.cpp` (new
+`tokenizer` ctest label) — golden parses of both real fixtures
+(vocab_size 128256/151646, token↔id pairs, token_bytes "Ġworld"→" world",
+special metadata incl. lstrip/rstrip, bos/eos), a config_test-style
+JSON-assembly builder driving a 17-case parameterized whitelist suite
+plus vocab/merge/added-token malformation cases, each asserting code and
+message-names-the-offender; sentencepiece binary via from_json and
+from_file. 544 tests green; format + scoped tidy clean).
