@@ -1,0 +1,738 @@
+{
+  "cases": [
+    {
+      "decoded": "",
+      "decoded_skip_special": "",
+      "ids": [],
+      "ids_with_special": [
+        128000
+      ],
+      "name": "empty",
+      "text": ""
+    },
+    {
+      "decoded": "Hello, world!",
+      "decoded_skip_special": "Hello, world!",
+      "ids": [
+        9906,
+        11,
+        1917,
+        0
+      ],
+      "ids_with_special": [
+        128000,
+        9906,
+        11,
+        1917,
+        0
+      ],
+      "name": "ascii_simple",
+      "text": "Hello, world!"
+    },
+    {
+      "decoded": "The quick brown fox jumps over the lazy dog.",
+      "decoded_skip_special": "The quick brown fox jumps over the lazy dog.",
+      "ids": [
+        791,
+        4062,
+        14198,
+        39935,
+        35308,
+        927,
+        279,
+        16053,
+        5679,
+        13
+      ],
+      "ids_with_special": [
+        128000,
+        791,
+        4062,
+        14198,
+        39935,
+        35308,
+        927,
+        279,
+        16053,
+        5679,
+        13
+      ],
+      "name": "ascii_sentence",
+      "text": "The quick brown fox jumps over the lazy dog."
+    },
+    {
+      "decoded": "café résumé naïve",
+      "decoded_skip_special": "café résumé naïve",
+      "ids": [
+        936,
+        59958,
+        9517,
+        1264,
+        978,
+        95980,
+        588
+      ],
+      "ids_with_special": [
+        128000,
+        936,
+        59958,
+        9517,
+        1264,
+        978,
+        95980,
+        588
+      ],
+      "name": "nfc_composed",
+      "text": "café résumé naïve"
+    },
+    {
+      "decoded": "café résumé naïve",
+      "decoded_skip_special": "café résumé naïve",
+      "ids": [
+        936,
+        1897,
+        54939,
+        312,
+        54939,
+        32423,
+        54939,
+        308,
+        2192,
+        127104,
+        588
+      ],
+      "ids_with_special": [
+        128000,
+        936,
+        1897,
+        54939,
+        312,
+        54939,
+        32423,
+        54939,
+        308,
+        2192,
+        127104,
+        588
+      ],
+      "name": "nfc_decomposed",
+      "text": "café résumé naïve"
+    },
+    {
+      "decoded": "你好，世界！日本語のテキストです。한국어 조금.",
+      "decoded_skip_special": "你好，世界！日本語のテキストです。한국어 조금.",
+      "ids": [
+        57668,
+        53901,
+        3922,
+        102616,
+        6447,
+        102433,
+        102158,
+        16144,
+        57933,
+        62903,
+        71634,
+        38641,
+        1811,
+        112699,
+        32179,
+        119646,
+        13
+      ],
+      "ids_with_special": [
+        128000,
+        57668,
+        53901,
+        3922,
+        102616,
+        6447,
+        102433,
+        102158,
+        16144,
+        57933,
+        62903,
+        71634,
+        38641,
+        1811,
+        112699,
+        32179,
+        119646,
+        13
+      ],
+      "name": "cjk",
+      "text": "你好，世界！日本語のテキストです。한국어 조금."
+    },
+    {
+      "decoded": "I ❤️ tokenizers 🚀",
+      "decoded_skip_special": "I ❤️ tokenizers 🚀",
+      "ids": [
+        40,
+        71570,
+        31643,
+        4037,
+        12509,
+        11410,
+        248,
+        222
+      ],
+      "ids_with_special": [
+        128000,
+        40,
+        71570,
+        31643,
+        4037,
+        12509,
+        11410,
+        248,
+        222
+      ],
+      "name": "emoji_simple",
+      "text": "I ❤️ tokenizers 🚀"
+    },
+    {
+      "decoded": "👩‍👩‍👧‍👦 family, flag 🏳️‍🌈, wave 👋🏽",
+      "decoded_skip_special": "👩‍👩‍👧‍👦 family, flag 🏳️‍🌈, wave 👋🏽",
+      "ids": [
+        9468,
+        239,
+        102,
+        102470,
+        9468,
+        239,
+        102,
+        102470,
+        9468,
+        239,
+        100,
+        102470,
+        9468,
+        239,
+        99,
+        3070,
+        11,
+        5292,
+        11410,
+        237,
+        111,
+        31643,
+        102470,
+        9468,
+        234,
+        230,
+        11,
+        12330,
+        62904,
+        233,
+        9468,
+        237,
+        121
+      ],
+      "ids_with_special": [
+        128000,
+        9468,
+        239,
+        102,
+        102470,
+        9468,
+        239,
+        102,
+        102470,
+        9468,
+        239,
+        100,
+        102470,
+        9468,
+        239,
+        99,
+        3070,
+        11,
+        5292,
+        11410,
+        237,
+        111,
+        31643,
+        102470,
+        9468,
+        234,
+        230,
+        11,
+        12330,
+        62904,
+        233,
+        9468,
+        237,
+        121
+      ],
+      "name": "emoji_zwj",
+      "text": "👩‍👩‍👧‍👦 family, flag 🏳️‍🌈, wave 👋🏽"
+    },
+    {
+      "decoded": "a  b   c\td\t\te   \t f",
+      "decoded_skip_special": "a  b   c\td\t\te   \t f",
+      "ids": [
+        64,
+        220,
+        293,
+        256,
+        272,
+        2765,
+        197,
+        7883,
+        40867,
+        282
+      ],
+      "ids_with_special": [
+        128000,
+        64,
+        220,
+        293,
+        256,
+        272,
+        2765,
+        197,
+        7883,
+        40867,
+        282
+      ],
+      "name": "whitespace_runs",
+      "text": "a  b   c\td\t\te   \t f"
+    },
+    {
+      "decoded": "   padded   ",
+      "decoded_skip_special": "   padded   ",
+      "ids": [
+        256,
+        44968,
+        262
+      ],
+      "ids_with_special": [
+        128000,
+        256,
+        44968,
+        262
+      ],
+      "name": "leading_trailing_space",
+      "text": "   padded   "
+    },
+    {
+      "decoded": "line1\nline2\r\nline3\n\n\nline4\n",
+      "decoded_skip_special": "line1\nline2\r\nline3\n\n\nline4\n",
+      "ids": [
+        1074,
+        16,
+        198,
+        1074,
+        17,
+        319,
+        1074,
+        18,
+        1432,
+        1074,
+        19,
+        198
+      ],
+      "ids_with_special": [
+        128000,
+        1074,
+        16,
+        198,
+        1074,
+        17,
+        319,
+        1074,
+        18,
+        1432,
+        1074,
+        19,
+        198
+      ],
+      "name": "newline_cluster",
+      "text": "line1\nline2\r\nline3\n\n\nline4\n"
+    },
+    {
+      "decoded": "\t\t\t",
+      "decoded_skip_special": "\t\t\t",
+      "ids": [
+        573
+      ],
+      "ids_with_special": [
+        128000,
+        573
+      ],
+      "name": "tabs_only",
+      "text": "\t\t\t"
+    },
+    {
+      "decoded": "don't can't we're i'll it's you've",
+      "decoded_skip_special": "don't can't we're i'll it's you've",
+      "ids": [
+        15357,
+        956,
+        649,
+        956,
+        584,
+        2351,
+        602,
+        3358,
+        433,
+        596,
+        499,
+        3077
+      ],
+      "ids_with_special": [
+        128000,
+        15357,
+        956,
+        649,
+        956,
+        584,
+        2351,
+        602,
+        3358,
+        433,
+        596,
+        499,
+        3077
+      ],
+      "name": "contractions_lower",
+      "text": "don't can't we're i'll it's you've"
+    },
+    {
+      "decoded": "DON'T CAN'T WE'RE I'LL IT'S YOU'VE",
+      "decoded_skip_special": "DON'T CAN'T WE'RE I'LL IT'S YOU'VE",
+      "ids": [
+        85741,
+        17773,
+        20076,
+        17773,
+        20255,
+        95253,
+        358,
+        6,
+        4178,
+        8871,
+        13575,
+        15334,
+        6,
+        4592
+      ],
+      "ids_with_special": [
+        128000,
+        85741,
+        17773,
+        20076,
+        17773,
+        20255,
+        95253,
+        358,
+        6,
+        4178,
+        8871,
+        13575,
+        15334,
+        6,
+        4592
+      ],
+      "name": "contractions_upper",
+      "text": "DON'T CAN'T WE'RE I'LL IT'S YOU'VE"
+    },
+    {
+      "decoded": "Don'T isn'T wE'Re",
+      "decoded_skip_special": "Don'T isn'T wE'Re",
+      "ids": [
+        8161,
+        17773,
+        4536,
+        17773,
+        289,
+        36,
+        50527
+      ],
+      "ids_with_special": [
+        128000,
+        8161,
+        17773,
+        4536,
+        17773,
+        289,
+        36,
+        50527
+      ],
+      "name": "contractions_mixed",
+      "text": "Don'T isn'T wE'Re"
+    },
+    {
+      "decoded": "1 12 123 1234 12345 123456 1234567890",
+      "decoded_skip_special": "1 12 123 1234 12345 123456 1234567890",
+      "ids": [
+        16,
+        220,
+        717,
+        220,
+        4513,
+        220,
+        4513,
+        19,
+        220,
+        4513,
+        1774,
+        220,
+        4513,
+        10961,
+        220,
+        4513,
+        10961,
+        16474,
+        15
+      ],
+      "ids_with_special": [
+        128000,
+        16,
+        220,
+        717,
+        220,
+        4513,
+        220,
+        4513,
+        19,
+        220,
+        4513,
+        1774,
+        220,
+        4513,
+        10961,
+        220,
+        4513,
+        10961,
+        16474,
+        15
+      ],
+      "name": "digit_runs",
+      "text": "1 12 123 1234 12345 123456 1234567890"
+    },
+    {
+      "decoded": "pi is 3.14159, date 2026-08-08, v2.0.1",
+      "decoded_skip_special": "pi is 3.14159, date 2026-08-08, v2.0.1",
+      "ids": [
+        2554,
+        374,
+        220,
+        18,
+        13,
+        9335,
+        2946,
+        11,
+        2457,
+        220,
+        2366,
+        21,
+        12,
+        2318,
+        12,
+        2318,
+        11,
+        348,
+        17,
+        13,
+        15,
+        13,
+        16
+      ],
+      "ids_with_special": [
+        128000,
+        2554,
+        374,
+        220,
+        18,
+        13,
+        9335,
+        2946,
+        11,
+        2457,
+        220,
+        2366,
+        21,
+        12,
+        2318,
+        12,
+        2318,
+        11,
+        348,
+        17,
+        13,
+        15,
+        13,
+        16
+      ],
+      "name": "digits_in_text",
+      "text": "pi is 3.14159, date 2026-08-08, v2.0.1"
+    },
+    {
+      "decoded": "foo_bar-baz.qux@example.com — «quotes» & #tags!",
+      "decoded_skip_special": "foo_bar-baz.qux@example.com — «quotes» & #tags!",
+      "ids": [
+        8134,
+        14725,
+        1481,
+        1394,
+        17731,
+        87,
+        36587,
+        916,
+        2001,
+        12769,
+        54382,
+        13289,
+        612,
+        674,
+        14412,
+        0
+      ],
+      "ids_with_special": [
+        128000,
+        8134,
+        14725,
+        1481,
+        1394,
+        17731,
+        87,
+        36587,
+        916,
+        2001,
+        12769,
+        54382,
+        13289,
+        612,
+        674,
+        14412,
+        0
+      ],
+      "name": "punct_and_symbols",
+      "text": "foo_bar-baz.qux@example.com — «quotes» & #tags!"
+    },
+    {
+      "decoded": "English中文mix日本語123abc",
+      "decoded_skip_special": "English中文mix日本語123abc",
+      "ids": [
+        23392,
+        108891,
+        36171,
+        102433,
+        102158,
+        4513,
+        13997
+      ],
+      "ids_with_special": [
+        128000,
+        23392,
+        108891,
+        36171,
+        102433,
+        102158,
+        4513,
+        13997
+      ],
+      "name": "mixed_scripts",
+      "text": "English中文mix日本語123abc"
+    },
+    {
+      "decoded": "Hello <|end_of_text|> world",
+      "decoded_skip_special": "Hello  world",
+      "ids": [
+        9906,
+        220,
+        128001,
+        1917
+      ],
+      "ids_with_special": [
+        128000,
+        9906,
+        220,
+        128001,
+        1917
+      ],
+      "name": "special_mid_text",
+      "text": "Hello <|end_of_text|> world"
+    },
+    {
+      "decoded": "<|start_header_id|>user<|end_header_id|>\n\nhi<|eot_id|>",
+      "decoded_skip_special": "user\n\nhi",
+      "ids": [
+        128006,
+        882,
+        128007,
+        271,
+        6151,
+        128009
+      ],
+      "ids_with_special": [
+        128000,
+        128006,
+        882,
+        128007,
+        271,
+        6151,
+        128009
+      ],
+      "name": "special_chat_markers",
+      "text": "<|start_header_id|>user<|end_header_id|>\n\nhi<|eot_id|>"
+    },
+    {
+      "decoded": "�",
+      "decoded_skip_special": "�",
+      "encode_synthetic": true,
+      "ids": [
+        187
+      ],
+      "ids_with_special": [
+        128000,
+        187
+      ],
+      "name": "invalid_single_byte",
+      "text_b64": "/w=="
+    },
+    {
+      "decoded": "���",
+      "decoded_skip_special": "���",
+      "encode_synthetic": true,
+      "ids": [
+        187,
+        186,
+        185
+      ],
+      "ids_with_special": [
+        128000,
+        187,
+        186,
+        185
+      ],
+      "name": "invalid_byte_run",
+      "text_b64": "//79"
+    },
+    {
+      "decoded": "hi�",
+      "decoded_skip_special": "hi�",
+      "encode_synthetic": true,
+      "ids": [
+        6151,
+        16275
+      ],
+      "ids_with_special": [
+        128000,
+        6151,
+        16275
+      ],
+      "name": "truncated_multibyte_tail",
+      "text_b64": "aGnigg=="
+    }
+  ],
+  "generator_versions": {
+    "safetensors": "0.8.0",
+    "tokenizers": "0.22.2",
+    "torch": "2.13.0",
+    "transformers": "5.14.1"
+  },
+  "repo": "NousResearch/Meta-Llama-3-8B-Instruct",
+  "revision": "53346005fb0ef11d3b6a83b12c895cca40156b6c"
+}

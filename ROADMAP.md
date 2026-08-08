@@ -580,7 +580,7 @@ golden-fixture strategy.
 - Doc includes the load-pipeline diagram and the tokenizer scope with rationale.
 - Fixture strategy specifies where fixtures live (`tests/fixtures/`), how they're generated, and their size budget.
 
-### M4-T02 · Golden-fixture generation tooling
+### M4-T02 · Golden-fixture generation tooling — ✅ DONE (2026-08-08)
 `tools/gen_fixtures/`: Python package (pinned `requirements.txt`: torch, transformers,
 tokenizers, safetensors) with a CLI that generates: (a) tokenizer encode/decode test
 vectors for a given HF model, (b) a tiny random-weight model checkpoint

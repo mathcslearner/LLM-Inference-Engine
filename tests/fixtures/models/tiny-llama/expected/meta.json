@@ -1,0 +1,29 @@
+{
+  "description": "fp32 forward of tiny-llama (bf16 weights cast to fp32) on input_ids; tensors: input_ids [1,seq] i32, embeddings/layers.{i}/final_norm [1,seq,hidden] f32, logits [1,seq,vocab] f32",
+  "generator_versions": {
+    "safetensors": "0.8.0",
+    "tokenizers": "0.22.2",
+    "torch": "2.13.0",
+    "transformers": "5.14.1"
+  },
+  "input_ids": [
+    1,
+    57,
+    300,
+    4,
+    128,
+    499,
+    42,
+    42,
+    7,
+    260,
+    15,
+    511,
+    0,
+    33,
+    210,
+    5
+  ],
+  "regenerate": "tools/.venv/bin/python -m gen_fixtures tiny-llama",
+  "seed": 20260808
+}

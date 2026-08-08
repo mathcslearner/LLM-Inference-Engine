@@ -1,0 +1,8 @@
+# Pinned fixture-generation environment (Python 3.11 — see tools/.python-version).
+# Regenerating fixtures with different versions is a reviewable change: the
+# committed fixtures must be byte-identical under these exact pins.
+huggingface_hub==1.27.0
+safetensors==0.8.0
+tokenizers==0.22.2
+torch==2.13.0
+transformers==5.14.1

@@ -9,5 +9,9 @@ build*/
 .cache/
 compile_commands.json
 
+# Python (tools/ only; never in the engine or its build)
+tools/.venv/
+__pycache__/
+
 # macOS
 .DS_Store

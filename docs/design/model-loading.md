@@ -684,6 +684,21 @@ codepoint-level stages treat unpaired bytes per HF's behavior — pinned by
 a malformed-input golden vector rather than prose). Out-of-range ids to
 `decode` → `InvalidArgument`.
 
+> **Implementation note (M4-T02).** "Per HF's behavior" turned out not to
+> exist on the encode side: HF `tokenizers` rejects non-UTF-8 input at its
+> API boundary (`TextInputSequence must be str` — verified against the
+> pinned version), so no HF encode golden is possible. The malformed-input
+> vectors therefore pin *this engine's* semantics, marked
+> `"encode_synthetic": true` in `vectors.json`: each maximal invalid-byte
+> run forms its own pre-token, is mapped through the byte→unicode table
+> (step 4), and goes through the normal merge loop (step 5) with the real
+> vocab/merges; valid segments around it encode normally. The committed
+> cases place invalid runs only standalone or string-final — positions
+> where segment-at-invalid-bytes and invalid-byte-as-uncategorized-
+> codepoint pre-tokenizer implementations provably agree — so M4-T09 is
+> free to implement either. The *decode* direction of these vectors is a
+> true HF golden (decode of the resulting ids is well-defined in HF).
+
 ### 6.5 Decoding & incremental detokenization (M4-T10)
 
 Batch `decode`: ids → token strings (added tokens: raw content, dropped
@@ -808,7 +823,12 @@ Budget (enforced by review + a stated ceiling in `tests/fixtures/README.md`):
   distributed under the Llama Community License — redistribution is
   permitted with attribution/notice, so `tests/fixtures/tokenizers/llama3/`
   carries the upstream `LICENSE` file and `tests/fixtures/README.md` notes
-  the provenance (exact upstream repo + revision). If license terms make
+  the provenance (exact upstream repo + revision). *Implementation note
+  (M4-T02):* the `meta-llama` hub repo is gated (requires per-account
+  license acceptance), so the committed files come from the ungated
+  byte-exact mirror `NousResearch/Meta-Llama-3-8B-Instruct` at a pinned
+  revision — which ships the same upstream `LICENSE`, committed alongside;
+  the fixtures README records both repos. If license terms make
   committing any future artifact awkward, the fallback is a
   fetch-and-cache script — deliberately *not* chosen for M4 because it
   reintroduces network + Python into the test path this section exists to

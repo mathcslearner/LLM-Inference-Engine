@@ -295,4 +295,27 @@ byte-identical regen, CI never runs Python), budget ≤5 MB/model fixture,
 ≤40 MB total, Llama license file committed alongside. No ADR amendment
 needed — model/tokenizer use only listed layer-2→layer-1 edges. Docs-only
 change).
-Next up: **M4-T02** (golden-fixture generation tooling).
+M4-T02 done (2026-08-08: `tools/gen_fixtures/` — Python 3.11 package
+(pinned requirements: torch 2.13.0, transformers 5.14.1, tokenizers 0.22.2,
+safetensors 0.8.0, huggingface_hub 1.27.0; `tools/.python-version`), CLI
+subcommands `tiny-llama` (random-weight 2-layer LlamaForCausalLM, hidden 64,
+4 heads/2 KV heads, vocab 512, bf16; hand-authored config.json, single-file
++ deterministic 2-shard safetensors, fp32 hook-captured activation goldens
+{embeddings, layers.{i}, final_norm, logits} + meta.json), `qwen2-names`
+(header-only safetensors metadata fetch of Qwen/Qwen2-0.5B-Instruct — tied
+lm_head + QKV biases — no weight download), `tokenizer-vectors` (byte-copied
+unmodified tokenizer.json + LICENSE for llama3
+(NousResearch/Meta-Llama-3-8B-Instruct mirror; meta-llama is gated — design
+doc §7.3 note) and qwen2, 24 golden cases each incl. NFC composed/decomposed
+discriminators, ZWJ emoji, contraction case pairs, digit-run grouping,
+in-text specials); `tools/regen_fixtures.sh` with `--verify` (temp-dir regen
++ diff) — byte-identity verified. Determinism: fixed seed, 1-thread
+deterministic torch, sorted-key JSON/safetensors, commit-hash-pinned
+downloads. Design-doc §6.4 note: HF tokenizers rejects non-UTF-8 input, so
+malformed-UTF-8 vectors are `encode_synthetic` pinning our byte-fallback
+semantics (invalid runs standalone/string-final only, where implementations
+provably agree); decode side is true HF golden. ~16 MB fixtures committed
+under budget; `tools/README.md` + `tests/fixtures/README.md` (regen
+discipline, provenance/licensing incl. committed Llama LICENSE); CI
+untouched — no Python in the test path).
+Next up: **M4-T03** (model config parser).
