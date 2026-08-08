@@ -644,7 +644,7 @@ in-memory structures for encoding (merge ranks) and decoding (id → token bytes
 - Unit tests: vocab size, specific token↔id pairs, special-token metadata for both fixture tokenizers.
 - Unsupported tokenizer types (sentencepiece/unigram) rejected with a clear error.
 
-### M4-T09 · BPE encoding
+### M4-T09 · BPE encoding — ✅ DONE (2026-08-08)
 Implement byte-level BPE encode: pre-tokenization regex split (the GPT-2/Llama-3
 pattern), byte-to-unicode mapping, merge loop, special-token splitting
 (added tokens are matched before BPE). API: `encode(text, add_special_tokens) →

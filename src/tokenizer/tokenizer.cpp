@@ -1,6 +1,8 @@
 #include "tokenizer/tokenizer.h"
 
 #include "tokenizer/bpe.h"
+#include "tokenizer/pretokenize.h"
+#include "tokenizer/unicode.h"
 
 #include <fmt/format.h>
 #include <nlohmann/json.hpp>
@@ -486,8 +488,9 @@ core::Status ParseByteLevelPre(const json& node) {
   return core::OkStatus();  // trim_offsets only affects offsets; ignored
 }
 
-// Returns the Split regex pattern (matcher selection against the known
-// pattern family is M4-T09, design §6.4).
+// Returns the Split regex pattern; from_json then selects the matcher
+// against the known pattern family (design §6.4), so an off-whitelist
+// pattern fails at load, not at first encode.
 core::StatusOr<std::string> ParsePreTokenizer(const json& root) {
   const auto it = root.find("pre_tokenizer");
   if (it == root.end() || it->is_null()) {
@@ -699,6 +702,102 @@ core::Status RequireUnconfigured(const json& root, std::string_view key) {
   return core::UnimplementedError("\"{}\" is configured; not supported", key);
 }
 
+// --- encode pipeline (§6.4) -------------------------------------------------
+
+// One piece of an added-token split: either a text span between matches
+// (id < 0) or a matched added token's id.
+struct AddedSplitPiece {
+  std::string_view text;
+  std::int32_t id = -1;
+};
+
+// Walks back from `from` over whitespace codepoints, not before `floor`
+// (lstrip: the whitespace joins the added token's span and is dropped).
+std::size_t StripWhitespaceBackward(std::string_view text, std::size_t from,
+                                    std::size_t floor) {
+  std::size_t begin = from;
+  while (begin > floor) {
+    std::size_t lead = begin - 1;
+    while (lead > floor &&
+           (static_cast<unsigned char>(text[lead]) & 0xC0) == 0x80) {
+      --lead;
+    }
+    std::size_t next = lead;
+    const auto codepoint = decode_utf8(text, next);
+    if (!codepoint.has_value() || next != begin || !is_whitespace(*codepoint)) {
+      break;
+    }
+    begin = lead;
+  }
+  return begin;
+}
+
+// Walks forward from `from` over whitespace codepoints (rstrip).
+std::size_t StripWhitespaceForward(std::string_view text, std::size_t from) {
+  std::size_t end = from;
+  while (end < text.size()) {
+    std::size_t next = end;
+    const auto codepoint = decode_utf8(text, next);
+    if (!codepoint.has_value() || !is_whitespace(*codepoint)) {
+      break;
+    }
+    end = next;
+  }
+  return end;
+}
+
+// §6.4 step 1: longest-match scan for added-token contents whose
+// `normalized` flag equals `match_normalized` (false → raw text, before
+// normalization; true → after). Matching is unconditional — embedded
+// specials always become their ids; add_special_tokens only controls the
+// template insertions (the `special_mid_text` vectors pin this).
+std::vector<AddedSplitPiece> SplitOnAddedTokens(
+    std::string_view text, const std::vector<AddedToken>& tokens,
+    const std::unordered_map<char, std::vector<std::size_t>>& buckets,
+    bool match_normalized) {
+  std::vector<AddedSplitPiece> pieces;
+  std::size_t segment_start = 0;
+  std::size_t pos = 0;
+  while (pos < text.size()) {
+    const auto bucket = buckets.find(text[pos]);
+    if (bucket == buckets.end()) {
+      ++pos;
+      continue;
+    }
+    const AddedToken* match = nullptr;
+    for (const std::size_t index : bucket->second) {  // longest first
+      const AddedToken& token = tokens[index];
+      if (token.normalized == match_normalized &&
+          text.substr(pos).starts_with(token.content)) {
+        match = &token;
+        break;
+      }
+    }
+    if (match == nullptr) {
+      ++pos;
+      continue;
+    }
+    std::size_t begin = pos;
+    std::size_t end = pos + match->content.size();
+    if (match->lstrip) {
+      begin = StripWhitespaceBackward(text, begin, segment_start);
+    }
+    if (match->rstrip) {
+      end = StripWhitespaceForward(text, end);
+    }
+    if (begin > segment_start) {
+      pieces.push_back(
+          {.text = text.substr(segment_start, begin - segment_start)});
+    }
+    pieces.push_back({.text = {}, .id = match->id});
+    segment_start = pos = end;
+  }
+  if (segment_start < text.size()) {
+    pieces.push_back({.text = text.substr(segment_start)});
+  }
+  return pieces;
+}
+
 }  // namespace
 
 core::StatusOr<Tokenizer> Tokenizer::from_json(std::string_view json_text) {
@@ -778,6 +877,20 @@ core::StatusOr<Tokenizer> Tokenizer::from_json(std::string_view json_text) {
 
   ASSIGN_OR_RETURN(tokenizer.normalize_nfc_, ParseNormalizer(root));
   ASSIGN_OR_RETURN(tokenizer.split_pattern_, ParsePreTokenizer(root));
+  ASSIGN_OR_RETURN(tokenizer.split_spec_,
+                   select_split_pattern(tokenizer.split_pattern_));
+  // Encode's added-token match index: first content byte → token indices,
+  // longest content first (distinct contents of equal length cannot both
+  // prefix-match at one position, so their relative order is irrelevant).
+  for (std::size_t i = 0; i < tokenizer.added_tokens_.size(); ++i) {
+    tokenizer.added_buckets_[tokenizer.added_tokens_[i].content.front()]
+        .push_back(i);
+  }
+  for (auto& [byte, indices] : tokenizer.added_buckets_) {
+    std::ranges::sort(indices, std::ranges::greater{}, [&](std::size_t i) {
+      return tokenizer.added_tokens_[i].content.size();
+    });
+  }
   ASSIGN_OR_RETURN(
       TemplateInserts inserts,
       ParsePostProcessor(
@@ -811,12 +924,112 @@ core::StatusOr<Tokenizer> Tokenizer::from_file(
   return tokenizer;
 }
 
-// Stub until M4-T09, whose implementation reads the tokenizer's state.
-// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+// §6.4 steps 4–5 for one pre-token: map its raw bytes into the merge
+// alphabet, run the merge loop (short-circuited by ignore_merges on a
+// whole-word vocab hit), and append the resulting ids.
+core::Status Tokenizer::append_pretoken_ids(
+    std::string_view pretoken_bytes, std::vector<std::int32_t>& ids) const {
+  const std::string word = map_bytes_to_alphabet(pretoken_bytes);
+  if (ignore_merges_) {
+    const auto whole = token_to_id_.find(word);
+    if (whole != token_to_id_.end()) {
+      ids.push_back(whole->second);
+      return core::OkStatus();
+    }
+  }
+  for (const std::string_view symbol : bpe_split(word, merge_ranks_)) {
+    const auto it = token_to_id_.find(symbol);
+    if (it == token_to_id_.end()) {
+      return core::InvalidArgumentError(
+          "BPE symbol \"{}\" is not in the vocab — the tokenizer is not a "
+          "complete byte-level BPE model (every single-byte token must be "
+          "present)",
+          symbol);
+    }
+    ids.push_back(it->second);
+  }
+  return core::OkStatus();
+}
+
+// §6.4 steps 2–5 for one added-token-free segment of valid UTF-8:
+// normalize, match normalized:true added tokens, pre-tokenize, BPE.
+core::Status Tokenizer::encode_text_segment(
+    std::string_view segment, std::vector<std::int32_t>& ids) const {
+  std::string normalized_storage;
+  std::string_view normalized = segment;
+  if (normalize_nfc_) {
+    normalized_storage = nfc_normalize(segment);
+    normalized = normalized_storage;
+  }
+  for (const AddedSplitPiece& piece :
+       SplitOnAddedTokens(normalized, added_tokens_, added_buckets_,
+                          /*match_normalized=*/true)) {
+    if (piece.id >= 0) {
+      ids.push_back(piece.id);
+      continue;
+    }
+    for (const std::string_view pretoken :
+         pretokenize(piece.text, split_spec_)) {
+      RETURN_IF_ERROR(append_pretoken_ids(pretoken, ids));
+    }
+  }
+  return core::OkStatus();
+}
+
 core::StatusOr<std::vector<std::int32_t>> Tokenizer::encode(
-    std::string_view /*text*/, bool /*add_special_tokens*/) const {
-  return core::UnimplementedError(
-      "Tokenizer::encode is not implemented yet (M4-T09)");
+    std::string_view text, bool add_special_tokens) const {
+  std::vector<std::int32_t> ids;
+  if (add_special_tokens) {
+    ids.insert(ids.end(), template_prefix_.begin(), template_prefix_.end());
+  }
+  // Step 1: split on added tokens with normalized: false against the raw,
+  // un-normalized text (the typical special token).
+  for (const AddedSplitPiece& piece :
+       SplitOnAddedTokens(text, added_tokens_, added_buckets_,
+                          /*match_normalized=*/false)) {
+    if (piece.id >= 0) {
+      ids.push_back(piece.id);
+      continue;
+    }
+    // Byte-level BPE is total over bytes: each maximal run of bytes that
+    // does not decode as UTF-8 becomes its own pre-token and goes through
+    // the normal merge loop; the valid spans around it encode normally
+    // (engine-defined semantics pinned by the encode_synthetic vectors —
+    // HF rejects non-UTF-8 input at its API boundary, §6.4).
+    const std::string_view segment = piece.text;
+    std::size_t valid_start = 0;
+    std::size_t pos = 0;
+    while (pos < segment.size()) {
+      std::size_t next = pos;
+      if (decode_utf8(segment, next).has_value()) {
+        pos = next;
+        continue;
+      }
+      if (valid_start < pos) {
+        RETURN_IF_ERROR(encode_text_segment(
+            segment.substr(valid_start, pos - valid_start), ids));
+      }
+      const std::size_t run_start = pos;
+      ++pos;
+      while (pos < segment.size()) {
+        std::size_t probe = pos;
+        if (decode_utf8(segment, probe).has_value()) {
+          break;
+        }
+        ++pos;
+      }
+      RETURN_IF_ERROR(
+          append_pretoken_ids(segment.substr(run_start, pos - run_start), ids));
+      valid_start = pos;
+    }
+    if (valid_start < segment.size()) {
+      RETURN_IF_ERROR(encode_text_segment(segment.substr(valid_start), ids));
+    }
+  }
+  if (add_special_tokens) {
+    ids.insert(ids.end(), template_suffix_.begin(), template_suffix_.end());
+  }
+  return ids;
 }
 
 // Stub until M4-T10, whose implementation reads the tokenizer's state.

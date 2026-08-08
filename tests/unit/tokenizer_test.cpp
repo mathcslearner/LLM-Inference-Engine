@@ -95,9 +95,13 @@ std::string TokenizerJson(
        R"([{"id": 3, "content": "<s>", "single_word": false, "lstrip": false,
             "rstrip": false, "normalized": false, "special": true}])"},
       {"normalizer", "null"},
+      // The real Qwen-2 Split pattern: since M4-T09, from_json selects the
+      // hand-written matcher against the known pattern strings, so the
+      // builder must use one of them (JSON-escaped backslashes).
       {"pre_tokenizer",
        R"({"type": "Sequence", "pretokenizers": [
-            {"type": "Split", "pattern": {"Regex": "pat"},
+            {"type": "Split", "pattern": {"Regex":
+              "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"},
              "behavior": "Isolated", "invert": false},
             {"type": "ByteLevel", "add_prefix_space": false,
              "trim_offsets": true, "use_regex": false}]})"},
@@ -313,14 +317,27 @@ TEST(TokenizerParseTest, AddedTokenMayShadowVocabEntry) {
   EXPECT_TRUE(tok->is_special(0));
 }
 
-TEST(TokenizerParseTest, EncodeAndDecodeAreUnimplementedUntilT09T10) {
+TEST(TokenizerParseTest, DecodeIsUnimplementedUntilT10) {
   const auto tok = Tokenizer::from_json(TokenizerJson());
   ASSERT_TRUE(tok.ok()) << tok.status();
-  const auto encoded = tok->encode("hello", /*add_special_tokens=*/false);
-  EXPECT_TRUE(IsUnimplemented(encoded.status()));
   const std::vector<std::int32_t> ids = {0, 1};
   const auto decoded = tok->decode(ids, /*skip_special_tokens=*/false);
   EXPECT_TRUE(IsUnimplemented(decoded.status()));
+}
+
+TEST(TokenizerRejectTest, UnknownSplitPatternIsUnimplemented) {
+  // M4-T09: the Split regex must be one of the known GPT-2/cl100k-family
+  // pattern strings the hand-written matcher was validated against.
+  const auto tok = Tokenizer::from_json(
+      TokenizerJson({{"pre_tokenizer",
+                      R"({"type": "Sequence", "pretokenizers": [
+            {"type": "Split", "pattern": {"Regex": "[a-z]+"},
+             "behavior": "Isolated", "invert": false},
+            {"type": "ByteLevel", "add_prefix_space": false,
+             "trim_offsets": true, "use_regex": false}]})"}}));
+  ASSERT_FALSE(tok.ok());
+  EXPECT_TRUE(IsUnimplemented(tok.status())) << tok.status();
+  EXPECT_TRUE(MessageContains(tok.status(), "[a-z]+")) << tok.status();
 }
 
 // --- unsupported tokenizer types (roadmap acceptance) ----------------------

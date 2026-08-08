@@ -87,11 +87,11 @@ Files this milestone creates:
 | `src/model/weight_map.h/.cpp` | model | canonical names, per-arch tables, load report | M4-T06 |
 | `src/model/loader.h/.cpp` | model | `load_model(dir) → StatusOr<LoadedModel>` | M4-T07 |
 | `src/tokenizer/tokenizer.h/.cpp` | tokenizer | public API, tokenizer.json parsing | M4-T08 |
-| `src/tokenizer/unicode.h/.cpp` | tokenizer | generated Unicode tables: categories, NFC (§6.3) | M4-T09 |
+| `src/tokenizer/unicode.h/.cpp` | tokenizer | categories, NFC, UTF-8 codec (§6.3); includes the generated `unicode_data.inc` | M4-T09 |
 | `src/tokenizer/pretokenize.h/.cpp` | tokenizer | GPT-2/cl100k-family split matcher (§6.4) | M4-T09 |
 | `src/tokenizer/bpe.h/.cpp` | tokenizer | byte-level alphabet (M4-T08), merge loop (M4-T09) | M4-T08/T09 |
 | `src/tokenizer/detokenize.h/.cpp` | tokenizer | `DetokenizerStream` (§6.5) | M4-T10 |
-| `tools/gen_unicode/` | tools | generator for `src/tokenizer/unicode.cpp` tables | M4-T09 |
+| `tools/gen_unicode/` | tools | generator for `src/tokenizer/unicode_data.inc` (data tables only; the algorithms are hand-written in unicode.cpp) | M4-T09 |
 
 `model` does not link `parallel`: v1 loading is single-threaded (mmap makes
 materialization lazy — §3.4; parallel page-warming is deferred, §9).
@@ -749,6 +749,34 @@ a malformed-input golden vector rather than prose). Out-of-range ids to
 > codepoint pre-tokenizer implementations provably agree — so M4-T09 is
 > free to implement either. The *decode* direction of these vectors is a
 > true HF golden (decode of the resulting ids is well-defined in HF).
+
+> **Amendment (M4-T09, 2026-08-08).** Decisions recorded as implemented:
+>
+> - **Matcher selection happens at parse time**, not first encode:
+>   `from_json` matches the Split pattern string against exactly the two
+>   fixture-pinned patterns (they differ only in the digit-run bound —
+>   `\p{N}{1,3}` cl100k/Llama 3 vs `\p{N}` Qwen 2), so an off-whitelist
+>   tokenizer fails at load. The matcher is parameterized by that single
+>   knob (`SplitSpec.max_digit_run`).
+> - **Invalid-byte strategy:** encode pre-splits each added-token-free
+>   segment into maximal valid/invalid byte runs (the
+>   segment-at-invalid-bytes option above); invalid runs bypass
+>   normalize/pre-tokenize and go straight to steps 4–5. `nfc_normalize`
+>   and `pretokenize` are nevertheless total over arbitrary bytes.
+> - **Contraction case folding is ASCII-only.** Full Unicode simple
+>   folding would additionally match exotica (ſ for s, K for k) inside
+>   `(?i:...)`; no golden exercises that, and the goldens are the
+>   contract. Documented in pretokenize.cpp.
+> - **Unicode version pin: 16.0.0** (matches the tables in the pinned
+>   `tokenizers` 0.22.2's Rust dependencies; the golden vectors and the
+>   NFC unit cases — cross-checked against Python 3.13's unicodedata at
+>   the same version — arbitrate). The generator emits
+>   `unicode_data.inc` (data only) rather than the whole `unicode.cpp`
+>   prose above suggested; the NFC/lookup algorithms are hand-written.
+> - **BPE with an incomplete byte-level vocab** (a final merge symbol
+>   missing — impossible for real byte-level files, which carry all 256
+>   byte tokens) is `InvalidArgument` naming the symbol, not silent
+>   omission.
 
 ### 6.5 Decoding & incremental detokenization (M4-T10)
 

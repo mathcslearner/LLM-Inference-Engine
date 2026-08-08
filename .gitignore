@@ -13,5 +13,9 @@ compile_commands.json
 tools/.venv/
 __pycache__/
 
+# Pinned UCD downloads cached by tools/gen_unicode (verified by SHA-256 on
+# every run; the generated tables are committed, the inputs are not)
+tools/gen_unicode/cache/
+
 # macOS
 .DS_Store

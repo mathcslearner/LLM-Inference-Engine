@@ -64,3 +64,22 @@ and licensing are recorded in `tests/fixtures/README.md`. No HF account is
 needed (the Llama 3 tokenizer comes from an ungated byte-exact mirror; see the
 fixtures README), though unauthenticated downloads are rate-limited — set
 `HF_TOKEN` if that bites.
+
+## gen_unicode — tokenizer Unicode tables (M4-T09)
+
+Regenerates `src/tokenizer/unicode_data.inc` — the category ranges (\p{L},
+\p{N}, White_Space) and NFC data (combining classes, canonical
+decompositions, composition pairs, quick-check ranges) the tokenizer's
+pre-tokenizer and normalizer consume (design: model-loading.md §6.3).
+Stdlib-only (no venv needed): it downloads a *pinned* Unicode version's UCD
+files into `gen_unicode/cache/` (gitignored), verifies their SHA-256
+against the pins in `__main__.py`, and emits the tables with a
+generation-stamp header. Same review discipline as gen_fixtures: the
+committed tables never drift on their own; upgrading the Unicode version is
+a deliberate regenerate-and-diff change validated against re-generated HF
+vectors.
+
+```bash
+cd tools
+python3 -m gen_unicode      # rewrites src/tokenizer/unicode_data.inc
+```

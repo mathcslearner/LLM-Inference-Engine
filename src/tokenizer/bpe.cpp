@@ -1,11 +1,16 @@
 #include "tokenizer/bpe.h"
 
+#include "tokenizer/unicode.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <vector>
 
 namespace engine::tokenizer {
 namespace {
@@ -44,54 +49,6 @@ constexpr AlphabetTables BuildTables() {
 
 constexpr AlphabetTables kTables = BuildTables();
 
-// Appends the UTF-8 encoding of `codepoint` (< 0x800 — every alphabet
-// codepoint fits in two bytes).
-void AppendUtf8(std::string& out, char32_t codepoint) {
-  if (codepoint < 0x80) {
-    out.push_back(static_cast<char>(codepoint));
-  } else {
-    out.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
-    out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
-  }
-}
-
-// Decodes the UTF-8 sequence starting at `pos`, advancing `pos` past it.
-// nullopt on a malformed sequence (bad lead byte, truncated or invalid
-// continuation). Overlong encodings are not rejected here — they decode to
-// codepoints outside the alphabet and fail the caller's lookup instead.
-std::optional<char32_t> DecodeUtf8(std::string_view text, std::size_t& pos) {
-  const auto lead = static_cast<unsigned char>(text[pos]);
-  std::size_t length = 0;
-  char32_t codepoint = 0;
-  if (lead < 0x80) {
-    length = 1;
-    codepoint = lead;
-  } else if ((lead & 0xE0) == 0xC0) {
-    length = 2;
-    codepoint = lead & 0x1FU;
-  } else if ((lead & 0xF0) == 0xE0) {
-    length = 3;
-    codepoint = lead & 0x0FU;
-  } else if ((lead & 0xF8) == 0xF0) {
-    length = 4;
-    codepoint = lead & 0x07U;
-  } else {
-    return std::nullopt;
-  }
-  if (pos + length > text.size()) {
-    return std::nullopt;
-  }
-  for (std::size_t i = 1; i < length; ++i) {
-    const auto cont = static_cast<unsigned char>(text[pos + i]);
-    if ((cont & 0xC0) != 0x80) {
-      return std::nullopt;
-    }
-    codepoint = (codepoint << 6) | (cont & 0x3FU);
-  }
-  pos += length;
-  return codepoint;
-}
-
 }  // namespace
 
 char32_t byte_to_alphabet(std::uint8_t byte) {
@@ -109,7 +66,7 @@ std::string map_bytes_to_alphabet(std::string_view raw) {
   std::string out;
   out.reserve(raw.size() * 2);  // worst case: every byte remaps to 2 UTF-8
   for (const char byte : raw) {
-    AppendUtf8(out, byte_to_alphabet(static_cast<std::uint8_t>(byte)));
+    append_utf8(out, byte_to_alphabet(static_cast<std::uint8_t>(byte)));
   }
   return out;
 }
@@ -119,7 +76,7 @@ core::StatusOr<std::string> unmap_alphabet_to_bytes(std::string_view token) {
   out.reserve(token.size());
   std::size_t pos = 0;
   while (pos < token.size()) {
-    const auto codepoint = DecodeUtf8(token, pos);
+    const auto codepoint = decode_utf8(token, pos);
     if (!codepoint.has_value()) {
       return core::InvalidArgumentError(
           "alphabet string is not valid UTF-8 at byte offset {}", pos);
@@ -133,6 +90,52 @@ core::StatusOr<std::string> unmap_alphabet_to_bytes(std::string_view token) {
     out.push_back(static_cast<char>(*byte));
   }
   return out;
+}
+
+std::vector<std::string_view> bpe_split(
+    std::string_view word,
+    const std::unordered_map<std::string, std::int32_t>& merge_ranks) {
+  // Initial symbols: single alphabet codepoints (UTF-8 boundaries — every
+  // alphabet string is valid UTF-8, one or two bytes per codepoint).
+  std::vector<std::string_view> symbols;
+  std::size_t pos = 0;
+  while (pos < word.size()) {
+    const std::size_t start = pos;
+    ++pos;
+    while (pos < word.size() &&
+           (static_cast<unsigned char>(word[pos]) & 0xC0) == 0x80) {
+      ++pos;
+    }
+    symbols.push_back(word.substr(start, pos - start));
+  }
+  // Repeatedly merge the leftmost occurrence of the lowest-ranked adjacent
+  // pair. The rescan is O(symbols²) rank lookups per pre-token — pre-tokens
+  // are short (a word or a whitespace run), and simplicity guarantees no
+  // tie-breaking beyond rank order can creep in.
+  std::string key;
+  while (symbols.size() > 1) {
+    auto best_rank = std::numeric_limits<std::int32_t>::max();
+    std::size_t best = symbols.size();
+    for (std::size_t i = 0; i + 1 < symbols.size(); ++i) {
+      key.assign(symbols[i]);
+      key += ' ';
+      key.append(symbols[i + 1]);
+      const auto it = merge_ranks.find(key);
+      if (it != merge_ranks.end() && it->second < best_rank) {
+        best_rank = it->second;
+        best = i;
+      }
+    }
+    if (best == symbols.size()) {
+      break;
+    }
+    // Adjacent symbols are contiguous substrings of `word`, so the merged
+    // symbol is just the widened view.
+    symbols[best] = std::string_view(
+        symbols[best].data(), symbols[best].size() + symbols[best + 1].size());
+    symbols.erase(symbols.begin() + static_cast<std::ptrdiff_t>(best + 1));
+  }
+  return symbols;
 }
 
 }  // namespace engine::tokenizer

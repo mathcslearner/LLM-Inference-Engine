@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/status.h"
+#include "tokenizer/pretokenize.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -13,11 +14,13 @@
 #include <unordered_map>
 #include <vector>
 
-// Byte-level BPE tokenizer over the HF `tokenizer.json` format (M4-T08;
-// design: docs/design/model-loading.md §6). This ticket parses the file
-// into the in-memory structures encode (M4-T09) and decode (M4-T10)
-// consume: the token↔id maps, merge ranks, the added-token registry, and
-// per-id raw bytes via the byte-level alphabet (bpe.h).
+// Byte-level BPE tokenizer over the HF `tokenizer.json` format (M4-T08/T09;
+// design: docs/design/model-loading.md §6). Parsing builds the in-memory
+// structures — token↔id maps, merge ranks, the added-token registry,
+// per-id raw bytes via the byte-level alphabet (bpe.h) — and encode
+// (M4-T09) runs the §6.4 pipeline over them: added-token split →
+// normalize → pre-tokenize (pretokenize.h) → byte-level map → merge loop
+// → template insertions. decode lands in M4-T10.
 //
 // The format is a pipeline description (`normalizer` → `pre_tokenizer` →
 // `model` → `post_processor`, plus `decoder` and `added_tokens`); we
@@ -32,9 +35,9 @@
 namespace engine::tokenizer {
 
 // One `added_tokens` entry, exactly as parsed (§6.2: all flags stored;
-// encode consumes `special`, `lstrip`/`rstrip`, `normalized` in M4-T09;
-// `single_word: true` is rejected at parse — stored here only so the
-// struct mirrors the format).
+// encode consumes `special`, `lstrip`/`rstrip`, `normalized` — §6.4
+// step 1; `single_word: true` is rejected at parse — stored here only so
+// the struct mirrors the format).
 struct AddedToken {
   std::int32_t id = 0;
   std::string content;
@@ -69,10 +72,19 @@ class Tokenizer {
   [[nodiscard]] static core::StatusOr<Tokenizer> from_json(
       std::string_view json_text);
 
-  // encode/decode land in M4-T09/M4-T10; until then both return
-  // `Unimplemented`.
+  // Encodes `text` per the §6.4 pipeline. Added tokens embedded in the
+  // text always match (that is HF's behavior and the fixtures pin it);
+  // `add_special_tokens` controls only the post-processor template
+  // insertions (Llama 3 prepends <|begin_of_text|>). Total over arbitrary
+  // bytes — invalid UTF-8 is not an error (each maximal invalid-byte run
+  // forms its own pre-token; the `encode_synthetic` vectors pin this
+  // engine-defined semantic, §6.4). `InvalidArgument` only if a final
+  // merge symbol is missing from the vocab, which a real byte-level vocab
+  // (all 256 byte tokens present) cannot produce.
   [[nodiscard]] core::StatusOr<std::vector<std::int32_t>> encode(
       std::string_view text, bool add_special_tokens) const;
+
+  // decode lands in M4-T10; until then it returns `Unimplemented`.
   [[nodiscard]] core::StatusOr<std::string> decode(
       std::span<const std::int32_t> ids, bool skip_special_tokens) const;
 
@@ -115,9 +127,20 @@ class Tokenizer {
  private:
   Tokenizer() = default;
 
-  // --- pipeline configuration (consumed by encode, M4-T09) ---
+  // §6.4 steps 4–5 for one pre-token (raw bytes): byte-level map, merge
+  // loop (ignore_merges short-circuit), symbol→id lookups.
+  [[nodiscard]] core::Status append_pretoken_ids(
+      std::string_view pretoken_bytes, std::vector<std::int32_t>& ids) const;
+
+  // §6.4 steps 2–5 for one added-token-free segment of valid UTF-8:
+  // normalize, normalized:true added-token pass, pre-tokenize, BPE.
+  [[nodiscard]] core::Status encode_text_segment(
+      std::string_view segment, std::vector<std::int32_t>& ids) const;
+
+  // --- pipeline configuration (consumed by encode) ---
   bool normalize_nfc_ = false;  // §6.2: absent (Llama 3) or NFC (Qwen)
-  std::string split_pattern_;   // the Split regex; matcher selection is T09
+  std::string split_pattern_;   // the Split regex, verbatim (provenance)
+  SplitSpec split_spec_;        // matcher parameters selected at parse
   bool ignore_merges_ = false;  // §6.2: vocab hit skips the merge loop
   std::vector<std::int32_t> template_prefix_;  // TemplateProcessing inserts
   std::vector<std::int32_t> template_suffix_;
@@ -129,6 +152,11 @@ class Tokenizer {
   std::unordered_map<std::string, std::int32_t> merge_ranks_;  // "left right"
   std::vector<AddedToken> added_tokens_;                       // sorted by id
   std::unordered_map<std::int32_t, std::size_t> added_index_;  // id → index
+
+  // Added-token match index for encode's longest-match scan (§6.4 step 1):
+  // first content byte → indices into added_tokens_, longest content
+  // first. A few hundred entries at most, so a trie is not worth it.
+  std::unordered_map<char, std::vector<std::size_t>> added_buckets_;
 };
 
 }  // namespace engine::tokenizer

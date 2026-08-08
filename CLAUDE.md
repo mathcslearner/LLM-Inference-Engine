@@ -203,7 +203,16 @@ behind an existing subsystem):
   structures: token↔id maps, merge ranks, id→raw-bytes, added-token
   registry, template BOS/EOS; §6.2 component whitelist enforced by name,
   amended from fixture reality: post_processor ByteLevel/Sequence
-  accepted, `pair` template ignored; encode/decode stubbed until
-  T09/T10). 544 tests green.
+  accepted, `pair` template ignored); T09 BPE encoding (`encode()`
+  byte-identical to HF for all committed vectors, both families:
+  added-token longest-match split with lstrip/rstrip/normalized
+  semantics → NFC (hand-written, tables generated from pinned Unicode
+  16.0.0 by new `tools/gen_unicode/` → committed
+  `src/tokenizer/unicode_data.inc`) → hand-written GPT-2/cl100k split
+  matcher (`src/tokenizer/pretokenize` — the two fixture patterns only,
+  selected at parse, rejected by name otherwise) → byte-level map →
+  merge loop (`bpe_split`, leftmost-lowest-rank) → template inserts;
+  invalid UTF-8 encodes as own pre-tokens per the encode_synthetic
+  vectors; decode still stubbed until T10). 576 tests green.
 
-Next up: **M4-T09** (BPE encoding).
+Next up: **M4-T10** (decoding & incremental detokenization).

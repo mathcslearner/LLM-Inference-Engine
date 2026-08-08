@@ -381,3 +381,48 @@ JSON-assembly builder driving a 17-case parameterized whitelist suite
 plus vocab/merge/added-token malformation cases, each asserting code and
 message-names-the-offender; sentencepiece binary via from_json and
 from_file. 544 tests green; format + scoped tidy clean).
+M4-T09 done (2026-08-08: BPE encoding — `Tokenizer::encode` runs the full
+§6.4 pipeline and both fixture golden suites pass byte-identically (all
+24 vectors × llama3/qwen2 × with/without specials, incl. the
+encode_synthetic invalid-UTF-8 cases pinning our own semantics). New
+pieces: `tools/gen_unicode/` (stdlib-only Python; downloads pinned
+Unicode 16.0.0 UCD files — SHA-256-verified, cache gitignored — and
+emits `src/tokenizer/unicode_data.inc`: \p{L}/\p{N}/White_Space ranges,
+CCC, fully-expanded canonical decompositions, composition pairs minus
+exclusions, NFC quick-check ranges, with a generation stamp);
+`unicode.h/.cpp` (range/lookup tables + hand-written NFC —
+decompose/reorder/compose with algorithmic Hangul, fast path when every
+cp is QC=Yes with ccc 0 — plus the module's shared UTF-8 codec, moved
+out of bpe.cpp); `pretokenize.h/.cpp` (SplitSpec selection: exactly the
+two fixture pattern strings, differing only in digit-run bound 3 vs 1,
+rejected by name otherwise — now enforced at *parse* time in from_json;
+matcher = one helper per regex alternative in pattern order, incl. the
+\s+(?!\S) backtracking rule and \s*[\r\n]+ last-CRLF rule); bpe.cpp
+gains `bpe_split` (leftmost-lowest-rank rescan loop over contiguous
+substring views — ranks are total so no other tie-break exists);
+tokenizer.cpp gains the added-token longest-match scan (first-byte
+buckets, length-desc; lstrip/rstrip consume adjacent whitespace,
+normalized:false matches raw text before NFC, normalized:true in a
+second pass after — embedded specials always match, add_special_tokens
+only gates template inserts), the valid/invalid byte-run split (invalid
+runs are their own pre-tokens), and ignore_merges short-circuit.
+Non-obvious: HF's fullwidth-comma behavior (a single non-CRLF/L/N cp is
+a valid alt-2 prefix, so "，世界" is ONE pre-token — an intuitive
+punctuation-splits-here expectation is wrong, and the goldens caught
+exactly that during development); contraction folding is
+ASCII-only (documented gap: no golden exercises ſ→s); missing final
+merge symbol → InvalidArgument naming it. Design amendments recorded
+(§2 file table: generator emits the .inc, algorithms hand-written; §6.4
+amendment block). Tests: +32 (unicode_test 11 — categories incl.
+NBSP-is-\s and ZWSP-isn't, UTF-8 codec boundaries, NFC cases
+cross-checked against Python unicodedata 16.0.0 incl. exclusions,
+Hangul, reordering, blocking, idempotence, invalid-byte totality;
+pretokenize_test 10 — selection + per-alternative semantics;
+tokenizer_encode_test 10 — the two golden suites plus synthetic
+micro-tokenizers for merge order, rank-beats-position, ignore_merges,
+missing-symbol error, longest-match, lstrip/rstrip, normalized-flag
+passes, template prefix/suffix/empty; tokenizer_test builder now uses
+the real Qwen-2 pattern and asserts unknown-pattern rejection). 576
+tests green; format + scoped tidy clean (tidy: generated .inc wrapped
+in NOLINT for designated-initializers; MatchAt split into helpers to
+pass cognitive-complexity).

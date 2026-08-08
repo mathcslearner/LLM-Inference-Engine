@@ -52,8 +52,18 @@ engine_add_tests(TREE unit SOURCES
 # §7.1, §8); the `tokenizer` label lets `ctest -L tokenizer` iterate the
 # golden suite alone. Ordinary portable C++ — no SCALAR_PASS.
 engine_add_tests(TREE unit SOURCES
+  pretokenize_test.cpp
   tokenizer_test.cpp
+  unicode_test.cpp
   DEPS engine::tokenizer
+  LABELS tokenizer)
+
+# tokenizer_encode_test replays vectors.json (the committed HF goldens)
+# through encode, hence the test-only nlohmann_json dependency — same
+# pattern as weight_map_test.
+engine_add_tests(TREE unit SOURCES
+  tokenizer_encode_test.cpp
+  DEPS engine::tokenizer nlohmann_json::nlohmann_json
   LABELS tokenizer)
 
 # The extra `parallel` label lets the tsan CI job (and local TSAN builds)
