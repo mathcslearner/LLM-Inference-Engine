@@ -470,7 +470,12 @@ the MLP.
 pattern, presence}` with `{i}` expanded from `config.num_layers`; presence
 ∈ {required, per-config (e.g. bias iff `attention_bias`), tied-alias}:
 
-- **Llama** (`kLlama`): the exact list above with no biases;
+- **Llama** (`kLlama`): the exact list above with no biases in the default
+  configuration (`attention_bias` defaults false for Llama). The bias rows
+  are still per-config: a config that sets `attention_bias` adds biases on
+  all four projections, o_proj included — HF's `LlamaAttention` biases
+  o_proj, unlike Qwen2's. *(Clarified 2026-08-08, M4-T06: "no biases"
+  described the default, not an architectural absence of the rows.)*
   HF prefix mapping `model.embed_tokens.weight → embed_tokens.weight`,
   `model.layers.{i}.self_attn.{q,k,v,o}_proj.weight →
   layers.{i}.attn.*`, `model.layers.{i}.input_layernorm.weight →

@@ -271,3 +271,39 @@ shapes, unknown-name NotFound, and the acceptance criterion: the
 committed 2-shard tiny-llama fixture resolves every tensor with metadata
 and bytes memcmp-identical to the single-file fixture. 476 tests green;
 format + scoped tidy clean).
+M4-T06 done (2026-08-08: weight-name mapping — `src/model/weight_map.h/.cpp`:
+the canonical weight namespace (design §4) and per-architecture HF→canonical
+tables, expanded per layer from config with expected shapes substituted.
+Two-layer API so the core logic is testable without tensor bytes:
+`BuildWeightMap(config, WeightInventory)` over a name→Shape metadata view
+(what the qwen2-weight-names.json fixture is), plus a
+`BuildWeightMap(config, Checkpoint&)` convenience that extracts the
+inventory from zero-copy views. Missing required weights are *recorded* in
+`WeightMapReport.missing`, not an error at build — the separate policy step
+`CheckNoMissingWeights` turns a non-empty list into one InvalidArgument
+naming every missing weight (design §3.6's all-names-in-one-round-trip
+rule; the split exists because the report struct carries `missing` and the
+loader owns when to fail). Shape mismatch is an immediate InvalidArgument
+naming weight, expected, and actual; expected dims live in plain
+`vector<int64_t>`, not Shape, so hostile config dims can't trip Shape's
+overflow CHECK. Tied embeddings map both `lm_head.weight` and
+`embed_tokens.weight` to the same source name, so resolution shares one
+Tensor handle structurally (shallow-copy semantics); a redundantly
+serialized lm_head goes to `ignored` (alias wins, matching HF), as do
+`rotary_emb.inv_freq` artifacts. Non-obvious decision: bias rows are gated
+on `attention_bias` for *both* architectures — Llama gets q/k/v/o biases
+(HF LlamaAttention biases o_proj too), Qwen2 q/k/v only (Qwen2Attention
+leaves o_proj bias-free); design §4's Llama bullet was clarified in the
+same change. `unexpected` is one aggregated WARN line, `ignored` DEBUG.
+Tests: 12 in `tests/unit/weight_map_test.cpp` (label `model`; first test
+target with a direct nlohmann_json dep, to read the fixture) — synthetic
+complete-Llama mapping with report empty + spot-checked spellings,
+missing-weight report + policy error (single and several, all listed),
+stray tensor → unexpected, inv_freq → ignored, shape mismatch naming
+weight/expected/actual, Llama bias gating both ways (absent-bias missing
+list incl. o_proj; bias-with-flag-false → unexpected), tiny-llama fixture
+resolving all 21 weights through Checkpoint, tied-config variant proving
+same-data()-pointer aliasing + lm_head ignored, and the real Qwen2-0.5B
+inventory (290 tensors, 24 layers): clean report, 291 canonicals, q/k/v
+bias mapping, no o_proj bias demanded, lm_head aliased; removing a bias →
+missing. 488 tests green; format + scoped tidy clean).

@@ -618,7 +618,7 @@ single-file case.
 **Acceptance criteria:**
 - Unit tests with a 2-shard fixture: all tensors resolvable, missing-shard and inconsistent-index errors surfaced clearly.
 
-### M4-T06 · Weight-name mapping
+### M4-T06 · Weight-name mapping — ✅ DONE (2026-08-08)
 `src/model/weight_map.h`: per-architecture mapping from HF checkpoint names
 (`model.layers.0.self_attn.q_proj.weight`) to internal canonical names, with a report
 of missing and unexpected weights at load.

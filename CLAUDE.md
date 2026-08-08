@@ -192,6 +192,9 @@ behind an existing subsystem):
   safetensors parser (`Tensor::from_buffer`, `src/model/mapped_file`,
   `src/model/safetensors`); T05 sharded checkpoints
   (`src/model/checkpoint` — unified single-file/sharded interface, lazy
-  shard mapping, index↔shard consistency checks). 476 tests green.
+  shard mapping, index↔shard consistency checks); T06 weight-name mapping
+  (`src/model/weight_map` — canonical namespace, per-arch HF tables,
+  tied-embedding aliasing, shape validation, missing/unexpected/ignored
+  report). 488 tests green.
 
-Next up: **M4-T06** (weight-name mapping).
+Next up: **M4-T07** (model loader).

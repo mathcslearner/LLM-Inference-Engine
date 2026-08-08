@@ -40,6 +40,14 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::model
   LABELS model)
 
+# weight_map_test reads the qwen2-weight-names.json inventory fixture
+# directly, hence the test-only nlohmann_json dependency (the library's own
+# JSON use stays PRIVATE — design §2).
+engine_add_tests(TREE unit SOURCES
+  weight_map_test.cpp
+  DEPS engine::model nlohmann_json::nlohmann_json
+  LABELS model)
+
 # The extra `parallel` label lets the tsan CI job (and local TSAN builds)
 # select these suites with `ctest -L parallel` — TSAN's slowdown is spent
 # where the threads are (design: docs/design/cpu-backend.md §8.2).
