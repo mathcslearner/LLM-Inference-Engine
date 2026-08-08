@@ -206,4 +206,20 @@ for v1. Build/CI: `ENGINE_SANITIZE=thread` CMake option (global flags so
 gtest is instrumented too), new `tsan` CI job running `ctest -L parallel`
 (clang Debug), `engine_add_tests` gained LABELS. 309 tests green incl. 24
 new `parallel`-labeled; TSAN-clean locally).
-Next up: **M3-T05** (SIMD dispatch infrastructure, per the design doc §4).
+M3-T05 done (2026-08-07: `src/kernels/` SIMD dispatch — `Isa` enum +
+`SelectedIsa()` (memoized once per process; arm64 → NEON unconditionally,
+x86-64 → AVX2 iff cpuid AVX2+FMA+F16C+AVX+OSXSAVE and xgetbv confirms YMM
+state, else scalar), `KernelTable<Fn>`/`Select` registry with silent
+per-kernel scalar fallback for null slots (+ explicit-ISA overload for
+tests), `ENGINE_FORCE_ISA={scalar,neon,avx2}` fatal on unknown/unavailable
+values via testable `detail::ResolveIsa` seam; `DispatchProbe()` probe
+kernel instantiating the per-ISA TU layout (`scalar|neon|avx2/probe.cpp`,
+arch-guarded `internal/probe_impl.h`); CMake: PUBLIC `ENGINE_ARCH_ARM64`/
+`ENGINE_ARCH_X86_64` from `CMAKE_SYSTEM_PROCESSOR`, per-ISA sources with
+per-source `-mavx2;-mfma;-mf16c` (never target-wide), placeholder anchor
+removed; `engine_add_tests` gained `SCALAR_PASS` (same binary re-registered
+as `<tree>-scalar/` with `ENGINE_FORCE_ISA=scalar`, label `scalar`) —
+design doc §4.2/§8.1 implementation notes added. 337 tests green
+(dispatch suite runs twice: NEON + forced-scalar)).
+Next up: **M3-T06** (first vectorized kernels: elementwise add/mul/scale,
+sum/max reductions, fp16/bf16 ↔ fp32 conversions, per the design doc §5–§6).

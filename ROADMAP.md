@@ -520,7 +520,7 @@ across the boundary (Status/CHECK policy); no nested parallelism (CHECK-enforced
 - Determinism test: `parallel_reduce` over adversarial fp32 inputs yields bit-identical results at thread counts {1, 2, 8}.
 - TSAN job added to CI for `parallel` tests; stress test (many small parallel_fors from a loop) races clean.
 
-### M3-T05 · SIMD dispatch infrastructure
+### M3-T05 · SIMD dispatch infrastructure — ✅ DONE (2026-08-07)
 `src/kernels/`: CPU feature detection (arm64: NEON baseline; x86-64: cpuid for
 AVX2/FMA), a kernel registry binding per-ISA implementations behind one function
 pointer per kernel, `ENGINE_FORCE_ISA={scalar,neon,avx2}` env override (unknown or

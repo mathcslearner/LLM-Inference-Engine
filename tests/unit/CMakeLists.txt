@@ -38,3 +38,11 @@ engine_add_tests(TREE unit SOURCES
   parallel_stress_test.cpp
   DEPS engine::parallel
   LABELS parallel)
+
+# SCALAR_PASS registers kernel-dependent suites twice — the host's best ISA
+# (unit/) and ENGINE_FORCE_ISA=scalar (unit-scalar/) — per design §8.1.
+engine_add_tests(TREE unit SOURCES
+  dispatch_test.cpp
+  DEPS engine::kernels
+  LABELS kernels
+  SCALAR_PASS)

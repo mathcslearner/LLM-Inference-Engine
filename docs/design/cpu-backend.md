@@ -361,6 +361,22 @@ per-kernel size threshold (its `grain`, §3.2) — to run its variant inside
 `parallel_for`; below it, inline on the caller. The ISA variant is the loop
 body either way.
 
+*M3-T05 implementation notes:* three additions beyond the sketch above, all
+testability-driven. (1) `Select` gained an explicit-ISA overload
+`Select(table, isa)` — the public `Select(table)` delegates to it with
+`SelectedIsa()` — so the §9 null-slot-fallback tests can exercise all three
+selections on one host; it also CHECKs the never-null `scalar` slot. (2)
+`SelectedIsa()`'s resolution is factored into `detail::BestHostIsa()` and
+`detail::ResolveIsa(force_value, best_host)`, both exposed for tests: the
+process-wide memoization (which `EXPECT_DEATH`'s fork inherits) makes the
+§4.3 failure paths unreachable through the public entry, while the
+forced-scalar ctest pass (§8.1) covers the real-environment happy path
+end-to-end. (3) The §9 probe kernel landed as `kernels/probe.h` (public
+`Isa DispatchProbe()`) with variants in `scalar|neon|avx2/probe.cpp` — the
+first instantiation of the §4.4 layout; its vector variants compute their
+answer with real intrinsics, so a per-TU flag misconfiguration fails to
+compile rather than passing silently.
+
 ### 4.3 `ENGINE_FORCE_ISA`
 
 Values: exactly `scalar`, `neon`, or `avx2` (case-sensitive). Read once,
@@ -614,6 +630,11 @@ latitude). Properties that matter:
   §6.2 matrix's "scalar on both hosts" row is automatic, not manual.
 - Only kernel-dependent suites opt in (dispatch resolution is per-process,
   and doubling `parallel`/`tensor`/`core` suites buys nothing).
+
+*M3-T05 implementation note:* the flag is spelled `SCALAR_PASS`; the second
+registration uses prefix `<tree>-scalar/` and appends the `scalar` label
+(so `ctest -L scalar` selects the pass). `tests/unit/dispatch_test.cpp` is
+the first opt-in.
 
 ### 8.2 TSAN job (with M3-T04)
 
