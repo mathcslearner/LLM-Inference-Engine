@@ -569,7 +569,7 @@ identically to HuggingFace.
 
 **Architecture documents:** `docs/design/model-loading.md` (M4-T01).
 
-### M4-T01 · Design doc: model loading & tokenization
+### M4-T01 · Design doc: model loading & tokenization — ✅ DONE (2026-08-08)
 Write `docs/design/model-loading.md`: the load pipeline (config → weight discovery →
 mmap → tensor registry), the internal weight-naming convention and per-architecture
 mapping tables, dtype policy at load (preserve checkpoint dtype), tokenizer scope
