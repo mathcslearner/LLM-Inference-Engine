@@ -49,3 +49,37 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::kernels
   LABELS kernels
   SCALAR_PASS)
+
+# The ENGINE_FORCE_ISA failure modes, exercised through the real environment
+# variable (M3 audit; design §4.3). The in-process death tests can only reach
+# detail::ResolveIsa — SelectedIsa()'s memoization hides the env path — so
+# these registrations prove a process with a bad value actually dies, with
+# the actionable message, at its first dispatch. The binary runs under
+# `sh -c "! …"`: CTest fails any test that terminates on a signal even when
+# PASS_REGULAR_EXPRESSION matches, so the shell absorbs the expected abort
+# (and the inversion fails the test if the binary unexpectedly survives);
+# the message regex is the real assertion. The forced ISA for the
+# unavailable case is whichever vector ISA this build does not carry
+# (mirrors src/kernels/CMakeLists.txt's arch selection).
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" engine_test_processor)
+if(engine_test_processor MATCHES "^(arm64|aarch64)$")
+  set(engine_unavailable_isa avx2)
+else()
+  set(engine_unavailable_isa neon)
+endif()
+add_test(NAME unit/dispatch-env/unknown-force-isa-dies
+  COMMAND sh -c
+    "! '$<TARGET_FILE:unit_dispatch_test>' --gtest_filter=DispatchTest.SelectedIsaIsStable 2>&1")
+set_tests_properties(unit/dispatch-env/unknown-force-isa-dies PROPERTIES
+  ENVIRONMENT "ENGINE_FORCE_ISA=avx512"
+  PASS_REGULAR_EXPRESSION
+    "ENGINE_FORCE_ISA=\"avx512\" is not a supported value"
+  LABELS "unit;kernels")
+add_test(NAME unit/dispatch-env/unavailable-force-isa-dies
+  COMMAND sh -c
+    "! '$<TARGET_FILE:unit_dispatch_test>' --gtest_filter=DispatchTest.SelectedIsaIsStable 2>&1")
+set_tests_properties(unit/dispatch-env/unavailable-force-isa-dies PROPERTIES
+  ENVIRONMENT "ENGINE_FORCE_ISA=${engine_unavailable_isa}"
+  PASS_REGULAR_EXPRESSION
+    "ENGINE_FORCE_ISA=\"${engine_unavailable_isa}\" is not executable on this host"
+  LABELS "unit;kernels")

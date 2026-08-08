@@ -57,7 +57,7 @@ resolve_clang_tool() {
   exit 1
 }
 
-# The directories containing the project's own C++/CUDA code. File listings
+# The directories containing the project's own C++ code. File listings
 # are scoped to these so untracked non-project trees (the CI FetchContent
 # dir .deps/, IDE build dirs) can never leak into format/tidy, whether or
 # not they are gitignore'd.
@@ -88,7 +88,7 @@ engine_project_files() {
 }
 
 # engine_cxx_sources
-# All C++/CUDA sources, headers included — the formatting surface.
+# All C++ sources, headers included — the formatting surface.
 engine_cxx_sources() {
-  engine_project_files h hpp cc cpp cxx cu cuh
+  engine_project_files h hpp cc cpp cxx
 }

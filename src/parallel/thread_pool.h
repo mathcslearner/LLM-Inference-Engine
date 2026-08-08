@@ -42,6 +42,9 @@ class ThreadPool {
   // round-robin assignment from design §3.2: worker w of T runs chunks
   // w, w+T, w+2T, … Blocks until every chunk completed; the calling thread
   // executes no chunks (design §3.2 rule 5). chunk_fn must not throw.
+  // Calling Run from inside a parallel region is a CHECK failure (M3 audit):
+  // without the check, a worker calling Run would deadlock silently on the
+  // pool's region serialization.
   void Run(std::int64_t num_chunks,
            const std::function<void(std::int64_t)>& chunk_fn);
 
@@ -86,6 +89,13 @@ namespace detail {
 // design §4.3; empty counts as unset), else physical_core_count(). Exposed
 // for tests; DefaultPool() reads it exactly once.
 [[nodiscard]] int DefaultPoolSize();
+
+// Thread-local "currently executing a region body" flag (design §3.4). Set
+// on workers while executing a chunk and on the caller for the inline path
+// (parallel_for.h's RegionGuard); backs the nesting CHECK in
+// parallel_for / parallel_reduce and the self-use CHECK in ThreadPool::Run.
+[[nodiscard]] bool InsideParallelRegion();
+void SetInsideParallelRegion(bool inside);
 
 }  // namespace detail
 

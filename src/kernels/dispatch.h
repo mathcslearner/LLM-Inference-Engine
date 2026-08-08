@@ -39,8 +39,9 @@ enum class Isa : std::uint8_t { kScalar, kNeon, kAvx2 };
 
 // The ISA every dispatched kernel uses, resolved exactly once per process
 // and memoized: ENGINE_FORCE_ISA if set (unknown or host-unavailable values
-// are fatal at startup with an actionable message, design §4.3), else the
-// best ISA the host supports (detail::BestHostIsa).
+// are fatal with an actionable message at the first dispatch — resolution
+// is lazy, design §4.3), else the best ISA the host supports
+// (detail::BestHostIsa).
 [[nodiscard]] Isa SelectedIsa();
 
 // One table per kernel: a function pointer per ISA variant. `scalar` is

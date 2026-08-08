@@ -1,5 +1,6 @@
 #include "kernels/convert.h"
 
+#include "kernels/internal/convert_impl.h"
 #include "tensor/half.h"
 
 #include <gtest/gtest.h>
@@ -99,6 +100,28 @@ const std::vector<float>& NarrowingProbeValues() {
   return kValues;
 }
 
+TEST(ConvertTest, VectorVariantsAreWiredIntoTheTables) {
+  // Guards the suite against vacuous passes: Select's silent scalar fallback
+  // (design §4.2) means an omitted table designator would make the public
+  // entries scalar, and every half.h comparison would still pass. Pin each
+  // table's vector slot to the arch's variant.
+#if defined(ENGINE_ARCH_ARM64)
+  EXPECT_EQ(detail::Fp16ToFp32Variant(Isa::kNeon), &neon::Fp16ToFp32);
+  EXPECT_EQ(detail::Fp32ToFp16Variant(Isa::kNeon), &neon::Fp32ToFp16);
+  EXPECT_EQ(detail::Bf16ToFp32Variant(Isa::kNeon), &neon::Bf16ToFp32);
+  EXPECT_EQ(detail::Fp32ToBf16Variant(Isa::kNeon), &neon::Fp32ToBf16);
+#elif defined(ENGINE_ARCH_X86_64)
+  EXPECT_EQ(detail::Fp16ToFp32Variant(Isa::kAvx2), &avx2::Fp16ToFp32);
+  EXPECT_EQ(detail::Fp32ToFp16Variant(Isa::kAvx2), &avx2::Fp32ToFp16);
+  EXPECT_EQ(detail::Bf16ToFp32Variant(Isa::kAvx2), &avx2::Bf16ToFp32);
+  EXPECT_EQ(detail::Fp32ToBf16Variant(Isa::kAvx2), &avx2::Fp32ToBf16);
+#endif
+  EXPECT_EQ(detail::Fp16ToFp32Variant(Isa::kScalar), &scalar::Fp16ToFp32);
+  EXPECT_EQ(detail::Fp32ToFp16Variant(Isa::kScalar), &scalar::Fp32ToFp16);
+  EXPECT_EQ(detail::Bf16ToFp32Variant(Isa::kScalar), &scalar::Bf16ToFp32);
+  EXPECT_EQ(detail::Fp32ToBf16Variant(Isa::kScalar), &scalar::Fp32ToBf16);
+}
+
 TEST(ConvertTest, Fp16WideningIsExhaustivelyBitExact) {
   std::vector<float16> in;
   in.reserve(kPatternCount);
@@ -183,10 +206,12 @@ TEST(ConvertTest, Bf16NarrowingMatchesHalfOnProbeValues) {
 }
 
 TEST(ConvertTest, UnalignedBasesAndTailSizesAreBitExact) {
-  // Sizes crossing the 4/8-lane widths with bases offset off any natural
-  // alignment (design §7, §9). Content coverage lives in the exhaustive
-  // tests above; this pins the body/tail split and unaligned loads.
-  constexpr std::int64_t kSizes[] = {1, 15, 16, 17, 4096};
+  // Sizes crossing the 4/8-lane widths and the threading threshold (grain
+  // 32768: 2^20 + 3 is multi-chunk, the §9 "1M+" point) with *both* bases —
+  // input and output — offset off any natural alignment (design §7, §9).
+  // Content coverage lives in the exhaustive tests above; this pins the
+  // body/tail split and unaligned loads and stores.
+  constexpr std::int64_t kSizes[] = {1, 15, 16, 17, 4096, (1 << 20) + 3};
   constexpr std::size_t kOffsets[] = {0, 1, 2, 3};
   constexpr std::size_t kMaxOffset = 3;
   std::mt19937 rng(7);
@@ -202,27 +227,31 @@ TEST(ConvertTest, UnalignedBasesAndTailSizesAreBitExact) {
       f32[i] = static_cast<float>(h16[i]) * 1.5F;
     }
     for (const std::size_t offset : kOffsets) {
-      std::vector<float> wide(count);
-      Fp16ToFp32(h16.data() + offset, wide.data(), n);
+      std::vector<float> wide(count + kMaxOffset);
+      Fp16ToFp32(h16.data() + offset, wide.data() + offset, n);
       for (std::size_t i = 0; i < count; ++i) {
-        ASSERT_EQ(Bits(wide[i]), Bits(static_cast<float>(h16[offset + i])))
+        ASSERT_EQ(Bits(wide[offset + i]),
+                  Bits(static_cast<float>(h16[offset + i])))
             << "fp16→fp32 n=" << n << " offset=" << offset << " i=" << i;
       }
-      Bf16ToFp32(b16.data() + offset, wide.data(), n);
+      Bf16ToFp32(b16.data() + offset, wide.data() + offset, n);
       for (std::size_t i = 0; i < count; ++i) {
-        ASSERT_EQ(Bits(wide[i]), Bits(static_cast<float>(b16[offset + i])))
+        ASSERT_EQ(Bits(wide[offset + i]),
+                  Bits(static_cast<float>(b16[offset + i])))
             << "bf16→fp32 n=" << n << " offset=" << offset << " i=" << i;
       }
-      std::vector<float16> narrow16(count);
-      Fp32ToFp16(f32.data() + offset, narrow16.data(), n);
+      std::vector<float16> narrow16(count + kMaxOffset);
+      Fp32ToFp16(f32.data() + offset, narrow16.data() + offset, n);
       for (std::size_t i = 0; i < count; ++i) {
-        ASSERT_EQ(narrow16[i].to_bits(), float16(f32[offset + i]).to_bits())
+        ASSERT_EQ(narrow16[offset + i].to_bits(),
+                  float16(f32[offset + i]).to_bits())
             << "fp32→fp16 n=" << n << " offset=" << offset << " i=" << i;
       }
-      std::vector<bfloat16> narrowb(count);
-      Fp32ToBf16(f32.data() + offset, narrowb.data(), n);
+      std::vector<bfloat16> narrowb(count + kMaxOffset);
+      Fp32ToBf16(f32.data() + offset, narrowb.data() + offset, n);
       for (std::size_t i = 0; i < count; ++i) {
-        ASSERT_EQ(narrowb[i].to_bits(), bfloat16(f32[offset + i]).to_bits())
+        ASSERT_EQ(narrowb[offset + i].to_bits(),
+                  bfloat16(f32[offset + i]).to_bits())
             << "fp32→bf16 n=" << n << " offset=" << offset << " i=" << i;
       }
     }

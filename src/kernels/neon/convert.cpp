@@ -16,6 +16,12 @@
 // (shift for widening, RNE rounding add for narrowing) — bit-exact by
 // construction, no hardware unit involved.
 //
+// Environmental precondition: FPCR.FZ16 stays at its architectural default
+// of 0 — nothing in the engine sets FPCR. A nonzero FZ16 would flush fp16
+// subnormals in FCVTL/FCVTN and silently diverge from half.h. (The AVX2
+// F16C path has no analogous hazard: MXCSR's DAZ/FTZ do not apply to
+// VCVTPH2PS/VCVTPS2PH — see avx2/convert.cpp.)
+//
 // Scalar tails apply half.h per element, exactly like the scalar variant.
 
 namespace engine::kernels::neon {

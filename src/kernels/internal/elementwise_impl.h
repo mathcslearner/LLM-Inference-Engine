@@ -1,5 +1,7 @@
 #pragma once
 
+#include "kernels/dispatch.h"
+
 #include <cstdint>
 
 // Per-ISA variants of the elementwise kernels (M3-T06; design:
@@ -38,5 +40,21 @@ void MulF32(const float* a, const float* b, float* out, std::int64_t n);
 void ScaleF32(const float* x, float s, float* out, std::int64_t n);
 }  // namespace avx2
 #endif
+
+namespace detail {
+
+// Test seam (M3 audit): the KernelTable entry Select would return for `isa`,
+// scalar fallback included. Lets tests assert the build's vector slots are
+// actually populated — Select's silent scalar fallback (design §4.2) would
+// otherwise let an omitted table designator turn every bit-compare-against-
+// scalar test into scalar-vs-scalar, passing vacuously.
+using ElementwiseBinaryFn = void (*)(const float*, const float*, float*,
+                                     std::int64_t);
+using ElementwiseScaleFn = void (*)(const float*, float, float*, std::int64_t);
+[[nodiscard]] ElementwiseBinaryFn AddF32Variant(Isa isa);
+[[nodiscard]] ElementwiseBinaryFn MulF32Variant(Isa isa);
+[[nodiscard]] ElementwiseScaleFn ScaleF32Variant(Isa isa);
+
+}  // namespace detail
 
 }  // namespace engine::kernels

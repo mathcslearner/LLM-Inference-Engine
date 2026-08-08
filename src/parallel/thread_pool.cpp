@@ -51,6 +51,10 @@ ThreadPool::~ThreadPool() {
 void ThreadPool::Run(std::int64_t num_chunks,
                      const std::function<void(std::int64_t)>& chunk_fn) {
   CHECK(num_chunks >= 1, "Run requires num_chunks >= 1 (got {})", num_chunks);
+  // A worker (or an inline-path caller) re-entering the pool would deadlock
+  // on run_mutex_ / never-finishing workers; fail loudly instead (M3 audit).
+  CHECK(!detail::InsideParallelRegion(),
+        "ThreadPool::Run must not be called from inside a parallel region");
   const std::lock_guard<std::mutex> run_lock(run_mutex_);
   {
     const std::lock_guard<std::mutex> lock(mutex_);
@@ -149,6 +153,14 @@ int physical_core_count() {
 }
 
 namespace detail {
+
+namespace {
+thread_local bool inside_parallel_region = false;
+}  // namespace
+
+bool InsideParallelRegion() { return inside_parallel_region; }
+
+void SetInsideParallelRegion(bool inside) { inside_parallel_region = inside; }
 
 int DefaultPoolSize() {
   const char* env = std::getenv("ENGINE_NUM_THREADS");

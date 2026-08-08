@@ -71,6 +71,23 @@ std::uint16_t* AsBits(Half* p) {
 
 }  // namespace
 
+namespace detail {
+
+ConvertWidenFn Fp16ToFp32Variant(Isa isa) {
+  return Select(kFp16ToFp32Table, isa);
+}
+ConvertNarrowFn Fp32ToFp16Variant(Isa isa) {
+  return Select(kFp32ToFp16Table, isa);
+}
+ConvertWidenFn Bf16ToFp32Variant(Isa isa) {
+  return Select(kBf16ToFp32Table, isa);
+}
+ConvertNarrowFn Fp32ToBf16Variant(Isa isa) {
+  return Select(kFp32ToBf16Table, isa);
+}
+
+}  // namespace detail
+
 void Fp16ToFp32(const tensor::float16* in, float* out, std::int64_t n) {
   static const WidenFn fn = Select(kFp16ToFp32Table);
   const std::uint16_t* bits = AsBits(in);

@@ -22,10 +22,12 @@
 // on the caller and the pool is never touched.
 //
 // Contract for bodies (design §3.4): no exceptions (an escaping exception
-// terminates — all recoverable-error checking happens before entering a
-// region; inside there is only arithmetic and CHECK), and no nesting — a
-// body must not call parallel_for/parallel_reduce (CHECK-enforced; nesting
-// means a kernel called a kernel, which the layering already forbids).
+// terminates — enforced by invoking bodies through noexcept frames on both
+// the inline and pooled paths, so the failure mode does not depend on n vs
+// grain; all recoverable-error checking happens before entering a region,
+// inside there is only arithmetic and CHECK), and no nesting — a body must
+// not call parallel_for/parallel_reduce (CHECK-enforced; nesting means a
+// kernel called a kernel, which the layering already forbids).
 
 namespace engine::parallel {
 
@@ -37,13 +39,9 @@ using FunctionRef = const std::function<Sig>&;
 
 namespace detail {
 
-// Thread-local "currently executing a region body" flag backing the nesting
-// CHECK. Set on workers while executing a chunk and on the caller for the
-// inline path (definitions in parallel_for.cpp).
-[[nodiscard]] bool InsideParallelRegion();
-void SetInsideParallelRegion(bool inside);
-
-// RAII for the flag. Bodies never throw (§3.4), so plain set/clear is safe.
+// RAII for the thread-local region flag (declared in thread_pool.h so
+// ThreadPool::Run can also check it). Bodies never throw (§3.4), so plain
+// set/clear is safe.
 class RegionGuard {
  public:
   RegionGuard() { SetInsideParallelRegion(true); }
@@ -101,32 +99,49 @@ T parallel_reduce(ThreadPool& pool, std::int64_t n, std::int64_t grain,
   const std::int64_t num_chunks = detail::CeilDiv(n, grain);
   if (num_chunks <= 1) {
     const detail::RegionGuard guard;
-    return partial(0, n);
+    // noexcept frame: an escaping exception terminates on the inline path
+    // exactly as it does on the pooled path (design §3.4).
+    const auto invoke = [&]() noexcept -> T { return partial(0, n); };
+    return invoke();
   }
   struct alignas(64) Slot {
     T value;
   };
-  std::vector<Slot> slots(static_cast<std::size_t>(num_chunks));
+  std::vector<Slot> slots;
+  try {
+    slots.resize(static_cast<std::size_t>(num_chunks));
+  } catch (const std::bad_alloc&) {
+    // ADR-003: no exceptions across the module boundary. A partial-slot
+    // allocation this size failing has no recoverable handling at this
+    // layer, so convert to CHECK (same stance as ThreadPool's constructor).
+    CHECK(false,
+          "parallel_reduce: failed to allocate {} partial slots ({} bytes)",
+          num_chunks, num_chunks * static_cast<std::int64_t>(sizeof(Slot)));
+  }
   detail::RunChunks(pool, num_chunks, [&](std::int64_t chunk) {
     const std::int64_t begin = chunk * grain;
     const std::int64_t end = std::min(begin + grain, n);
     slots[static_cast<std::size_t>(chunk)].value = partial(begin, end);
   });
-  std::int64_t count = num_chunks;
-  while (count > 1) {
-    const std::int64_t half = count / 2;
-    for (std::int64_t i = 0; i < half; ++i) {
-      T& low = slots[static_cast<std::size_t>(i)].value;
-      low = combine(low, slots[static_cast<std::size_t>(i + half)].value);
+  // noexcept frame: combine is a body too — same termination contract.
+  const auto fold = [&]() noexcept -> T {
+    std::int64_t count = num_chunks;
+    while (count > 1) {
+      const std::int64_t half = count / 2;
+      for (std::int64_t i = 0; i < half; ++i) {
+        T& low = slots[static_cast<std::size_t>(i)].value;
+        low = combine(low, slots[static_cast<std::size_t>(i + half)].value);
+      }
+      if (count % 2 == 1) {
+        // The odd element (index 2·half) carries into the next pass.
+        slots[static_cast<std::size_t>(half)].value =
+            slots[static_cast<std::size_t>(count - 1)].value;
+      }
+      count = half + count % 2;
     }
-    if (count % 2 == 1) {
-      // The odd element (index 2·half) carries into the next pass.
-      slots[static_cast<std::size_t>(half)].value =
-          slots[static_cast<std::size_t>(count - 1)].value;
-    }
-    count = half + count % 2;
-  }
-  return slots[0].value;
+    return slots[0].value;
+  };
+  return fold();
 }
 
 }  // namespace engine::parallel

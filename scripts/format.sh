@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rewrites all tracked C++/CUDA sources in place to match .clang-format.
+# Rewrites all tracked C++ sources in place to match .clang-format.
 # Verify-only counterpart: scripts/check-format.sh.
 set -euo pipefail
 

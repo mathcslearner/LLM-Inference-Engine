@@ -11,6 +11,7 @@
 #include <limits>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -41,33 +42,38 @@ namespace {
 
 // Independent re-implementation of the specified reduction: left-to-right
 // partial per chunk, then the fixed pairwise halving fold with the odd
-// element carrying. Pins the tree spec, not just self-consistency.
+// element carrying. Written in a deliberately different shape from the
+// production in-place fold (a fresh vector per round instead of in-place
+// halving over one buffer), so an aliasing or carry-order bug in either
+// implementation breaks the agreement instead of being replicated (M3
+// audit: a line-for-line copy of the fold would only pin serial-vs-parallel
+// self-consistency, not the tree spec).
 [[nodiscard]] float ReferenceTreeSum(const std::vector<float>& data,
                                      std::int64_t grain) {
   const auto n = static_cast<std::int64_t>(data.size());
-  std::vector<float> partials;
+  std::vector<float> level;
   for (std::int64_t begin = 0; begin < n; begin += grain) {
     const std::int64_t end = std::min(begin + grain, n);
     float acc = 0.0F;
     for (std::int64_t i = begin; i < end; ++i) {
       acc += data[static_cast<std::size_t>(i)];
     }
-    partials.push_back(acc);
+    level.push_back(acc);
   }
-  auto count = static_cast<std::int64_t>(partials.size());
-  while (count > 1) {
-    const std::int64_t half = count / 2;
-    for (std::int64_t i = 0; i < half; ++i) {
-      partials[static_cast<std::size_t>(i)] +=
-          partials[static_cast<std::size_t>(i + half)];
+  while (level.size() > 1) {
+    const std::size_t half = level.size() / 2;
+    std::vector<float> next;
+    next.reserve(half + (level.size() % 2));
+    for (std::size_t i = 0; i < half; ++i) {
+      next.push_back(level[i] + level[i + half]);
     }
-    if (count % 2 == 1) {
-      partials[static_cast<std::size_t>(half)] =
-          partials[static_cast<std::size_t>(count - 1)];
+    if (level.size() % 2 == 1) {
+      // The odd element carries into the next round at index `half`.
+      next.push_back(level.back());
     }
-    count = half + count % 2;
+    level = std::move(next);
   }
-  return partials[0];
+  return level[0];
 }
 
 [[nodiscard]] float PooledSum(ThreadPool& pool, const std::vector<float>& data,
@@ -99,11 +105,12 @@ TEST(ThreadPoolTest, DefaultPoolIsASingletonWithAtLeastOneThread) {
 }
 
 TEST(ThreadPoolTest, RestartAndShutdownAreClean) {
+  // Even iterations run a region before destruction; odd iterations destroy
+  // a pool that never ran one.
   for (int iteration = 0; iteration < 10; ++iteration) {
     for (const int threads : {1, 2, 8}) {
       ThreadPool pool(threads);
       if (iteration % 2 == 0) {
-        // Half the iterations destroy a pool that never ran a region.
         std::atomic<int> calls{0};
         parallel_for(pool, 64, 4, [&](std::int64_t begin, std::int64_t end) {
           calls.fetch_add(static_cast<int>(end - begin));
@@ -322,6 +329,39 @@ TEST(ParallelNestingDeathTest, NestedParallelReduceDies) {
                                   [](int a, int b) { return a + b; });
                             }),
                "must not nest");
+}
+
+TEST(ParallelNestingDeathTest, DirectRunFromInsideRegionDies) {
+  // ThreadPool::Run is a public seam; called from inside a region it would
+  // deadlock on the pool's serialization. The CHECK converts that silent
+  // hang into a loud failure (M3 audit).
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  ThreadPool pool(2);
+  EXPECT_DEATH(parallel_for(pool, 100, 10,
+                            [&](std::int64_t, std::int64_t) {
+                              pool.Run(1, [](std::int64_t) {});
+                            }),
+               "inside a parallel region");
+}
+
+TEST(ParallelBodyExceptionDeathTest, ThrowingBodyTerminatesOnInlinePath) {
+  // Design §3.4: an escaping body exception terminates — on the inline path
+  // too, not only when a worker thread unwinds. The catch below is reachable
+  // only if the exception propagated out of parallel_for; exiting cleanly
+  // there makes the death expectation fail (M3 audit).
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  ThreadPool pool(2);
+  EXPECT_DEATH(
+      {
+        try {
+          parallel_for(pool, 4, 100, [](std::int64_t, std::int64_t) {
+            throw std::runtime_error("body threw");
+          });
+        } catch (...) {
+          std::_Exit(0);
+        }
+      },
+      "");
 }
 
 TEST(DefaultPoolSizeTest, ParsesAndClampsEnvironmentOverride) {

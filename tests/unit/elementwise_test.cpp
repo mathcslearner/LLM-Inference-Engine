@@ -74,6 +74,25 @@ void ExpectBitEqual(const float* actual, const float* expected,
   }
 }
 
+TEST(ElementwiseTest, VectorVariantsAreWiredIntoTheTables) {
+  // Guards the sweeps below against vacuous passes: Select's silent scalar
+  // fallback (design §4.2) means an omitted table designator would make the
+  // public entries scalar, and every bit-compare-against-scalar assertion
+  // would still pass. Pin each table's vector slot to the arch's variant.
+#if defined(ENGINE_ARCH_ARM64)
+  EXPECT_EQ(detail::AddF32Variant(Isa::kNeon), &neon::AddF32);
+  EXPECT_EQ(detail::MulF32Variant(Isa::kNeon), &neon::MulF32);
+  EXPECT_EQ(detail::ScaleF32Variant(Isa::kNeon), &neon::ScaleF32);
+#elif defined(ENGINE_ARCH_X86_64)
+  EXPECT_EQ(detail::AddF32Variant(Isa::kAvx2), &avx2::AddF32);
+  EXPECT_EQ(detail::MulF32Variant(Isa::kAvx2), &avx2::MulF32);
+  EXPECT_EQ(detail::ScaleF32Variant(Isa::kAvx2), &avx2::ScaleF32);
+#endif
+  EXPECT_EQ(detail::AddF32Variant(Isa::kScalar), &scalar::AddF32);
+  EXPECT_EQ(detail::MulF32Variant(Isa::kScalar), &scalar::MulF32);
+  EXPECT_EQ(detail::ScaleF32Variant(Isa::kScalar), &scalar::ScaleF32);
+}
+
 TEST(ElementwiseTest, AddMatchesScalarBitExactAcrossSizesAndOffsets) {
   for (const std::int64_t n : kSizes) {
     const auto count = static_cast<std::size_t>(n);

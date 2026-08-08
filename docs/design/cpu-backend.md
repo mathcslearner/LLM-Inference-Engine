@@ -253,6 +253,22 @@ Mechanics, all mandatory:
 - **Pool lifecycle errors** (failed thread spawn) are `CHECK` — a process
   that cannot create threads at startup has no meaningful degraded mode.
 
+*M3 audit implementation notes (2026-08-08):* three hardenings closing gaps
+between this section's contract and the M3-T04 code. (1) "An escaping
+exception terminates" is now *enforced*, not just documented: bodies (and
+`parallel_reduce`'s `combine`) are invoked through `noexcept` frames on both
+the inline and pooled paths, so the failure mode no longer depends on
+`n` vs `grain` (previously the inline path propagated the exception to the
+caller while the pooled path terminated in a worker). (2) The one internal
+allocation inside a region entry point — `parallel_reduce`'s
+cache-line-padded partial-slot vector — converts `std::bad_alloc` to `CHECK`
+(same stance as the pool constructor's `std::system_error`), so ADR-003's
+no-exceptions boundary holds even under allocation failure. (3)
+`ThreadPool::Run` itself CHECKs the thread-local region flag (moved to
+`thread_pool.h`'s `detail`): `Run` is a public seam, and calling it from
+inside a region previously self-deadlocked silently on the pool's region
+serialization.
+
 ### 3.5 OpenMP: considered and rejected
 
 The honest pros: OpenMP is mature, its runtime schedulers are excellent,
@@ -376,6 +392,21 @@ end-to-end. (3) The §9 probe kernel landed as `kernels/probe.h` (public
 first instantiation of the §4.4 layout; its vector variants compute their
 answer with real intrinsics, so a per-TU flag misconfiguration fails to
 compile rather than passing silently.
+
+*M3 audit notes (2026-08-08):* two coverage holes in the silent-fallback
+design were closed. (1) Because vector and scalar variants are bit-identical
+by specification, no behavioral test can detect an *unwired* table slot —
+an omitted `.neon`/`.avx2` designator would silently fall back to scalar and
+every bit-compare-against-scalar sweep would pass vacuously (the ADR-004
+"claims coverage it does not have" failure class). Each kernel module now
+exposes `detail::<Kernel>Variant(Isa)` — the table entry `Select` would
+return — and each suite pins the build's vector slots to the expected
+per-ISA symbols by pointer identity. The recipe in §4.5 inherits this:
+a new kernel's tests include the wiring assertion. (2) The §4.3 failure
+modes are additionally exercised end-to-end through the real environment
+variable by two ctest registrations (unknown value; host-unavailable ISA)
+asserting the process dies with the actionable message at first dispatch —
+previously only `detail::ResolveIsa` was death-tested in-process.
 
 ### 4.3 `ENGINE_FORCE_ISA`
 

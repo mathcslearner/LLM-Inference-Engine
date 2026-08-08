@@ -459,8 +459,9 @@ class Tensor {
 
   // Allocates uninitialized, contiguous, row-major storage. allocator may
   // be null → the process default for `device` (DefaultCpuAllocator for
-  // cpu; CUDA devices return Unimplemented until M2). Reserved dtypes
-  // (kInt4, kFP8E4M3) return Unimplemented until their milestone.
+  // cpu; the reserved kCUDA device returns Unimplemented — no GPU backend,
+  // ADR-004). Reserved dtypes (kInt4, kFP8E4M3) return Unimplemented until
+  // their milestone.
   [[nodiscard]] static core::StatusOr<Tensor> empty(
       Shape shape, DataType dtype, Device device,
       memory::Allocator* allocator = nullptr);
@@ -659,14 +660,14 @@ unchanged, with these additions:
 1. **Placement is explicit and static.** A Tensor's `device()` is fixed at
    creation. Nothing migrates data implicitly.
 2. **Host code may dereference only CPU tensors.** `data()` /
-   `data_ptr<T>()` on a CUDA tensor return the *device* pointer — legal to
-   hold and pass to kernels/cuBLAS (M2+), illegal to dereference on the
-   host. The typed conveniences that imply host dereference (`item`,
-   printing, `allclose`) CHECK `is_cpu()`.
-3. **All transfers are named calls** on the M2 copy API, which will also
-   define the synchronization story (streams, events). Until M2, every
-   CUDA-device operation returns `Unimplemented` — the types are ready, the
-   backend is not.
+   `data_ptr<T>()` on a device tensor would return the *device* pointer —
+   a contract retained for a future GPU backend (ADR-004); no such tensor
+   is creatable today. The typed conveniences that imply host dereference
+   (`item`, printing, `allclose`) CHECK `is_cpu()`.
+3. **All transfers are named calls** on the copy API. Every CUDA-device
+   operation returns `Unimplemented` — the types are ready, but the engine
+   has no GPU backend (ADR-004; the retired M2 design defined the
+   transfer/synchronization story, `docs/design/retired/cuda-backend.md`).
 4. **Const-ness is shallow.** `const Tensor&` means the *handle* (metadata)
    is immutable; the pointed-to data is not (`data()` is const and returns
    a mutable pointer, like `std::span`). Deep immutability is not modeled —
@@ -722,9 +723,10 @@ the harness conventions in `tests/README.md`.
 
 ## 11. Deferred (known, intentionally not designed here)
 
-- **CUDA allocators, caching pool, streams** — `docs/design/cuda-backend.md`
-  (M2-T01). This doc constrains it only via the `Allocator`/`Buffer`
-  interface and the stated thread-safety contract.
+- **CUDA allocators, caching pool, streams** —
+  `docs/design/retired/cuda-backend.md` (M2-T01; retired by ADR-004). This
+  doc constrains it only via the `Allocator`/`Buffer` interface and the
+  stated thread-safety contract.
 - **Pinned host memory** — an `Allocator` implementation in M2; no interface
   change anticipated.
 - **kInt4 packed tensors** — representable dtype now; container semantics

@@ -37,6 +37,13 @@ constexpr KernelTable<ReduceChunkFn> kMaxF32Table = {
 
 }  // namespace
 
+namespace detail {
+
+ReduceChunkFn SumF32Variant(Isa isa) { return Select(kSumF32Table, isa); }
+ReduceChunkFn MaxF32Variant(Isa isa) { return Select(kMaxF32Table, isa); }
+
+}  // namespace detail
+
 float SumF32(const float* x, std::int64_t n) {
   static const ReduceChunkFn fn = Select(kSumF32Table);
   // parallel_reduce owns the cross-chunk fixed pairwise tree; the identity

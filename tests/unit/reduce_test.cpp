@@ -122,6 +122,22 @@ float SpecMax(const float* x, std::int64_t n) {
 
 std::uint32_t Bits(float value) { return std::bit_cast<std::uint32_t>(value); }
 
+TEST(ReduceTest, VectorVariantsAreWiredIntoTheTables) {
+  // Guards the suite against vacuous passes: Select's silent scalar fallback
+  // (design §4.2) means an omitted table designator would make the public
+  // entries scalar, and the spec/scalar comparisons would still pass. Pin
+  // each table's vector slot to the arch's variant.
+#if defined(ENGINE_ARCH_ARM64)
+  EXPECT_EQ(detail::SumF32Variant(Isa::kNeon), &neon::SumF32Chunk);
+  EXPECT_EQ(detail::MaxF32Variant(Isa::kNeon), &neon::MaxF32Chunk);
+#elif defined(ENGINE_ARCH_X86_64)
+  EXPECT_EQ(detail::SumF32Variant(Isa::kAvx2), &avx2::SumF32Chunk);
+  EXPECT_EQ(detail::MaxF32Variant(Isa::kAvx2), &avx2::MaxF32Chunk);
+#endif
+  EXPECT_EQ(detail::SumF32Variant(Isa::kScalar), &scalar::SumF32Chunk);
+  EXPECT_EQ(detail::MaxF32Variant(Isa::kScalar), &scalar::MaxF32Chunk);
+}
+
 TEST(SumF32Test, MatchesSpecReferenceBitExactAcrossSizesAndOffsets) {
   for (const std::int64_t n : kSizes) {
     const auto count = static_cast<std::size_t>(n);

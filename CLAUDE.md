@@ -151,12 +151,11 @@ C++ until the CLT is reinstalled.
 
 ## Current status
 
-**History (pre-pivot):** M0 (foundation & tooling), M1 (CPU tensor library),
-and M2 (CUDA backend) were built and audited as a CUDA engine, 2026-08-03/04;
-on 2026-08-07 the project pivoted to CPU-first (ADR-004) because no CUDA
-hardware ever compiled or ran the device code. Details:
-`docs/archive/ROADMAP-v1.md`, `docs/design/retired/cuda-backend.md`, git
-history.
+**History (pre-pivot):** M0 (foundation), M1 (CPU tensor library), and M2
+(CUDA backend) were built as a CUDA engine (2026-08-03/04); on 2026-08-07
+the project pivoted to CPU-first (ADR-004) — no CUDA hardware ever compiled
+the device code. Details: `docs/archive/ROADMAP-v1.md`,
+`docs/design/retired/cuda-backend.md`, git history.
 
 What survives from M0–M2 and remains load-bearing: the build/test/CI/tooling
 discipline (M0), the complete tensor library — dtypes incl. reserved
@@ -244,4 +243,31 @@ green. `benchmarks/` scaffold: `kernels_bench` (hand-rolled best-of-N,
 `ENGINE_BUILD_BENCHMARKS` option) + first `BASELINES.md` entry — M2 NEON
 vs scalar: fp16 conversions 4.06×/2.86× (≥2× advisory target met),
 sum/max 6.7×/8.0×, memory-bound ops ~1×).
+M3 audit fixes done (2026-08-08: post-milestone audit of M3 against its
+acceptance criteria, fixes in one change. Kernels: `detail::<Kernel>Variant
+(Isa)` test seams + per-suite wiring asserts pin every vector table slot by
+pointer identity, closing the silent-scalar-fallback vacuous-pass hole;
+ENGINE_FORCE_ISA failure modes now exercised end-to-end via two `sh -c`
+ctest registrations asserting the fatal message (CTest fails signal-deaths
+even under PASS_REGULAR_EXPRESSION, hence the shell wrapper); convert sweep
+gained the 2^20+3 size and output-side offsets (was input-only, capped at
+4096). Parallel: `ThreadPool::Run` CHECKs the region flag (was a silent
+self-deadlock; flag moved to `thread_pool.h` detail), body/combine
+exceptions terminate via noexcept frames on the inline path too (was
+propagate-vs-terminate depending on n vs grain), `parallel_reduce`'s slot
+allocation converts bad_alloc to CHECK (ADR-003), `ReferenceTreeSum`
+rewritten structurally independent (fresh-vector rounds vs in-place fold),
++2 death tests. Hygiene: `is_standard_layout` static_asserts in half.h
+(convert.cpp's comment now true), FPCR.FZ16 precondition documented in
+neon/convert.cpp, dispatch.h "fatal at startup" corrected to lazy
+first-dispatch. Docs: CUDA-era leftovers purged from living surfaces —
+dependencies.md toolkit/NCCL exemption retired, tensor.md "until M2"
+phrasings + broken cuda-backend link fixed, ROADMAP future-directions paths
+repointed to archive/retired, scripts' C++/CUDA wording and `cu cuh` globs
+dropped, check-tidy's stale example replaced; M3-T02's removed-test
+enumeration recorded as a ROADMAP audit note; CLAUDE.md history trimmed to
+5 lines; design doc §3.4 + §4.2 audit implementation notes added. 393 tests
+green. Known gap, deliberately not closed here: the milestone3 branch has
+no CI run yet, so the AVX2 TUs have never been compiled and the TSAN job
+has never executed — push before treating M3 as fully validated).
 Next up: **M4-T01** (design doc: model loading & tokenization).

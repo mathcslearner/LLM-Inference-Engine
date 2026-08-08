@@ -54,6 +54,16 @@ constexpr KernelTable<ScaleFn> kScaleF32Table = {
 
 }  // namespace
 
+namespace detail {
+
+ElementwiseBinaryFn AddF32Variant(Isa isa) { return Select(kAddF32Table, isa); }
+ElementwiseBinaryFn MulF32Variant(Isa isa) { return Select(kMulF32Table, isa); }
+ElementwiseScaleFn ScaleF32Variant(Isa isa) {
+  return Select(kScaleF32Table, isa);
+}
+
+}  // namespace detail
+
 void AddF32(const float* a, const float* b, float* out, std::int64_t n) {
   static const BinaryFn fn = Select(kAddF32Table);
   parallel::parallel_for(parallel::DefaultPool(), n, kElementwiseGrain,

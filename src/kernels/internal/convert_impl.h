@@ -1,5 +1,7 @@
 #pragma once
 
+#include "kernels/dispatch.h"
+
 #include <cstdint>
 
 // Per-ISA variants of the conversion kernels (M3-T06; design:
@@ -38,5 +40,18 @@ void Bf16ToFp32(const std::uint16_t* in, float* out, std::int64_t n);
 void Fp32ToBf16(const float* in, std::uint16_t* out, std::int64_t n);
 }  // namespace avx2
 #endif
+
+namespace detail {
+
+// Test seam (M3 audit): the table entry Select would return for `isa` —
+// see internal/elementwise_impl.h for the rationale.
+using ConvertWidenFn = void (*)(const std::uint16_t*, float*, std::int64_t);
+using ConvertNarrowFn = void (*)(const float*, std::uint16_t*, std::int64_t);
+[[nodiscard]] ConvertWidenFn Fp16ToFp32Variant(Isa isa);
+[[nodiscard]] ConvertNarrowFn Fp32ToFp16Variant(Isa isa);
+[[nodiscard]] ConvertWidenFn Bf16ToFp32Variant(Isa isa);
+[[nodiscard]] ConvertNarrowFn Fp32ToBf16Variant(Isa isa);
+
+}  // namespace detail
 
 }  // namespace engine::kernels

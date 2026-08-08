@@ -11,17 +11,11 @@ namespace engine::parallel {
 
 namespace detail {
 
-namespace {
-thread_local bool inside_parallel_region = false;
-}  // namespace
-
-bool InsideParallelRegion() { return inside_parallel_region; }
-
-void SetInsideParallelRegion(bool inside) { inside_parallel_region = inside; }
-
 void RunChunks(ThreadPool& pool, std::int64_t num_chunks,
                const std::function<void(std::int64_t)>& chunk_fn) {
-  pool.Run(num_chunks, [&chunk_fn](std::int64_t chunk) {
+  // noexcept frame: an escaping body exception terminates here rather than
+  // unwinding into the worker loop (design §3.4).
+  pool.Run(num_chunks, [&chunk_fn](std::int64_t chunk) noexcept {
     const RegionGuard guard;
     chunk_fn(chunk);
   });
@@ -41,7 +35,10 @@ void parallel_for(
   const std::int64_t num_chunks = detail::CeilDiv(n, grain);
   if (num_chunks <= 1) {
     const detail::RegionGuard guard;
-    body(0, n);
+    // noexcept frame: an escaping exception terminates on the inline path
+    // exactly as it does on the pooled path (design §3.4).
+    const auto invoke = [&]() noexcept { body(0, n); };
+    invoke();
     return;
   }
   detail::RunChunks(pool, num_chunks, [&](std::int64_t chunk) {

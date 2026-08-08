@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verifies that all C++/CUDA sources (tracked or not, minus .gitignore'd)
+# Verifies that all C++ sources (tracked or not, minus .gitignore'd)
 # match .clang-format, without
 # modifying anything. Exits non-zero and names the offending files otherwise;
 # run scripts/format.sh to fix. Used by CI (M0-T05).

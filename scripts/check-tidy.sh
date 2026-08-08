@@ -74,8 +74,8 @@ if ((${#targets[@]} > 0)); then
   for path in "${targets[@]}"; do
     if ! in_compile_db "$path"; then
       echo "error: ${path} has no compile-database entry in ${build_dir}." >&2
-      echo "  The configured build does not compile it (e.g. a CUDA-only" >&2
-      echo "  source on a CPU-only configuration); clang-tidy would guess" >&2
+      echo "  The configured build does not compile it (e.g. a per-ISA" >&2
+      echo "  source for another architecture); clang-tidy would guess" >&2
       echo "  compile flags and emit spurious diagnostics. Configure a" >&2
       echo "  build that compiles this TU, or pass one it does compile." >&2
       exit 1

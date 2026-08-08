@@ -1,5 +1,7 @@
 #pragma once
 
+#include "kernels/dispatch.h"
+
 #include <cstdint>
 
 // Per-ISA variants of the reduction kernels (M3-T06; design: cpu-backend.md
@@ -34,5 +36,15 @@ float SumF32Chunk(const float* x, std::int64_t n);
 float MaxF32Chunk(const float* x, std::int64_t n);
 }  // namespace avx2
 #endif
+
+namespace detail {
+
+// Test seam (M3 audit): the table entry Select would return for `isa` —
+// see internal/elementwise_impl.h for the rationale.
+using ReduceChunkFn = float (*)(const float*, std::int64_t);
+[[nodiscard]] ReduceChunkFn SumF32Variant(Isa isa);
+[[nodiscard]] ReduceChunkFn MaxF32Variant(Isa isa);
+
+}  // namespace detail
 
 }  // namespace engine::kernels
