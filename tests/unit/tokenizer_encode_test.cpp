@@ -112,8 +112,10 @@ TEST_P(GoldenEncodeTest, MatchesEveryCommittedVector) {
 
 INSTANTIATE_TEST_SUITE_P(Families, GoldenEncodeTest,
                          ::testing::Values("llama3", "qwen2"),
-                         [](const auto& info) {
-                           return std::string(info.param);
+                         // Not `info`: it shadows the generated gtest
+                         // function's parameter under GCC's -Wshadow.
+                         [](const auto& param_info) {
+                           return std::string(param_info.param);
                          });
 
 // --- synthetic micro-tokenizers ---------------------------------------------

@@ -508,8 +508,11 @@ INSTANTIATE_TEST_SUITE_P(
                                 "single_word": true, "special": true}])"}},
                    .want_unimplemented = true,
                    .want_substring = "single_word"}),
-    [](const ::testing::TestParamInfo<RejectCase>& info) {
-      return info.param.name;
+    // `param_info`, not `info`: the macro expands this lambda inside a
+    // generated function whose parameter is itself named `info`, and GCC's
+    // -Wshadow (unlike clang's) flags the collision.
+    [](const ::testing::TestParamInfo<RejectCase>& param_info) {
+      return param_info.param.name;
     });
 
 // --- malformed vocab / merges / added_tokens -------------------------------

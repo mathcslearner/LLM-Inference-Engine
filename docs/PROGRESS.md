@@ -495,3 +495,14 @@ green; format + scoped tidy clean. Known gap, deliberately left open
 here (mirrors M3): every commit from T04 on is unpushed, so no CI run
 has built M4 on x86-64 or compiled the AVX2 TUs against it — push and
 confirm green before treating M4 as fully validated.)
+
+M4 CI-gap fallout fixed (2026-08-08: the first CI run to build
+T08–T10's code failed both gcc jobs — the three tokenizer-test
+`INSTANTIATE_TEST_SUITE_P` name-generator lambdas named their parameter
+`info`, which shadows the parameter of the generated gtest function the
+macro expands them into; GCC's -Wshadow flags this, clang's does not,
+and gcc had never compiled these TUs (clang-only dev machine, no CI
+since T03). Renamed to `param_info` in tokenizer_test,
+tokenizer_encode_test, tokenizer_decode_test. Verified by a full local
+Homebrew GCC 15 warnings-as-errors build — clean, 597/597 in both the
+gcc and clang trees; format + scoped tidy clean.)
