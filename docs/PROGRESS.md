@@ -506,3 +506,58 @@ since T03). Renamed to `param_info` in tokenizer_test,
 tokenizer_encode_test, tokenizer_decode_test. Verified by a full local
 Homebrew GCC 15 warnings-as-errors build — clean, 597/597 in both the
 gcc and clang trees; format + scoped tidy clean.)
+
+## Milestone 5 — CPU Reference Engine
+
+M5-T01 done (2026-08-17: `docs/design/model-execution.md` — the working
+contract for model execution that M6 (optimized backend), M8 (paged
+cache), M9 (batching), M11 (prefix caching), M12 (fusions), M13 (quant
+layers), M14 (activation capture), and M15 (spec decoding) all build on.
+Module decomposition: `cpu` = stateless clarity-first fp32 reference ops
+(gemm/rmsnorm/silu_mul/add/softmax/embedding/rope/attention — the oracle,
+links `tensor`+`parallel`, never `kernels`); `model` = the graph (`Linear`
+*interface* + `ReferenceLinear`, `RmsNorm`/`Rope`/`Attention`/`Mlp`/
+`DecoderLayer`, abstract `Model`, registry/builder); `kvcache` =
+`KvCache` interface + `SimpleKvCache`; `engine` = greedy generator +
+`Backend` seam. Fixes: (1) the exact `Model::forward(ForwardRequest&) →
+StatusOr<Tensor>` contract — token-major `[T,E]` activations (no batch
+dim; M9 flattens to `[Σ,E]`+cu_seqlens additively), per-token `positions`
+vector, `KvCache*`, `LogitsMode{kLast→[1,V], kAll→[T,V]}` (kAll a real
+mode for M14 ppl / M15 verify, not test-only), `ActivationHook*`; inputs
+validated as recoverable `Status` per M9-T10, not CHECK. (2) GQA layout:
+query head `h` reads kv head `h/(H/Hkv)` (repeat_interleave, HF
+`repeat_kv`), no materialized repeat (M6-T04); `head_dim` may ≠
+hidden/heads. (3) KV cache v0: per-sequence, all-layers, device-agnostic
+`append`/`view`/`length`/`capacity`/`truncate` (the roadmap's
+append/view/current-length/reset, + `truncate` for M15 rollback with
+`reset`=`truncate(0)`); head-major `[Hkv,len,d]` storage; the KV
+invariant (token-by-token == full recompute) as T06's acceptance; a full
+§6.4 account of what M8 paging changes (storage→block pool+block tables
++refcounts, append→slot-mapping scatter, `view()` is the accessor that
+does *not* survive paging → attention uses a gather helper,
+`ResourceExhausted` on exhaustion, `dtype` field for M13 INT8 KV) vs what
+stays (the abstract `KvCache` surface, per-sequence ownership,
+append-only immutability for M11). (4) RoPE spec: HF half-rotation
+(`rotate_half`, not interleaved), fp32 inv_freq tables, `rope_scaling`
+none/linear/llama3 (else `Unimplemented`). (5) `Linear` is an interface
+(opaque backend-owned weight) so M6 repacking / M13 `QuantizedLinear`
+slot in with no layer-code change; tied embeddings = an overridable
+binding, not a pointer-alias assumption (M6-T06). (6) backend seam:
+`Model`/`KvCache` polymorphic, `Backend{kReference,kOptimized}`
+construction-time choice, generator backend-agnostic (M6-T07 reuses it);
+doc commits only to the `Model`/`Linear`-level seam, leaving M6-T01 free
+on layer-class reuse. (7) registry keyed by HF `architecture_name`, one
+family builder for Llama+Qwen2 (M5-T10 = wiring not new code). (8)
+hooks: one `ActivationHook` seam (fixture-key names + `linear_input:*`
+for M14-T02), nullptr = zero cost (M16-T03). (9) M5 fixture plan
+(op/rope/attention goldens + generate.json + new tiny-qwen2, each landing
+with its ticket, ≤5 MB/model). Per-ticket test table (T02–T10) with
+Class-T tolerances, no SCALAR_PASS (calls `cpu::` directly). ADR
+consequences: **ADR-002 Amendment 5 adds `model → kvcache`** (layer 2's
+first intra-layer edge; alternatives — `Model` in `engine`, or raw K/V
+views through forward — rejected with reasons); cpu-backend.md §2's
+provisional `cpu → parallel` amendment flag retired (Amendment 4 already
+allowed it — no amendment needed, M5-T02 links it directly). §15
+placeholder left for M7-T01's sampling section. Docs-only change;
+model-loading.md §7.1 + tests/fixtures/README.md point forward to the M5
+fixture additions.)

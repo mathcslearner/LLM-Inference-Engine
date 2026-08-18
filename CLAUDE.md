@@ -41,7 +41,7 @@ session (1–4 hours, a few hundred lines including tests). Work tickets
 ## Architecture
 
 Strict module boundaries (dependency rules recorded in ADR-002, current as of
-Amendment 4; no cycles):
+Amendment 5 — `model → kvcache`, added in M5-T01; no cycles):
 
 ```
 server → runtime → scheduler ─┐
@@ -227,8 +227,24 @@ behind an existing subsystem):
   coverage incl. qwen2 streaming; safetensors alignment check made
   absolute `(8 + header_len + begin) % itemsize`; loader missing-weight,
   weight-map LOG_WARN-capture, and 256-byte alphabet-bijection tests
-  added; model-loading.md staleness synced). 597 tests green. M4's
-  commits are not yet pushed — no CI run has built them; push and
-  confirm green before starting M5.
+  added; model-loading.md staleness synced). 597 tests green. M4 is
+  pushed and CI-green (the first x86-64 CI build surfaced a GCC-only
+  `-Wshadow` break in three tokenizer tests, fixed in `fix gcc errors`).
+- **M5 (CPU reference engine) — in progress**: T01
+  `docs/design/model-execution.md` — the model-execution contract
+  M6/M8/M9/M11–M15 build on: module decomposition (`cpu` reference ops =
+  the oracle, links `tensor`+`parallel`, never `kernels`; `model` graph
+  with `Linear` as an *interface* so M6 repacking / M13 quant slot in;
+  `kvcache` v0; `engine` greedy loop), the exact
+  `Model::forward(ForwardRequest&)` contract (token-major `[T,E]`,
+  per-token positions, `LogitsMode{kLast,kAll}`, recoverable-Status
+  inputs), GQA layout (`h → h/(H/Hkv)`, no materialized repeat), KV cache
+  v0 (`append`/`view`/`length`/`truncate`, head-major `[Hkv,len,d]`, the
+  token-by-token==full-recompute invariant) with an explicit "what M8
+  paging changes" account, HF half-rotation RoPE spec, the
+  reference-vs-optimized backend seam, registry/builder, and activation
+  hooks; **ADR-002 Amendment 5 (`model → kvcache`)** added,
+  cpu-backend.md §2's provisional `cpu → parallel` flag retired
+  (Amendment 4 already allowed it). Docs-only.
 
-Next up: **M5-T01** (design doc: model execution).
+Next up: **M5-T02** (CPU GEMM & Linear layer).

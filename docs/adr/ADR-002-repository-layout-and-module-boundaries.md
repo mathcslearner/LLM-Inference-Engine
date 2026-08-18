@@ -51,7 +51,7 @@ plus the intra-layer edges listed explicitly):
 | 5 · serving | `server` | — |
 | 4 · orchestration | `runtime` | — |
 | 3 · execution | `engine`, `scheduler` | — (`engine` and `scheduler` never depend on each other; `runtime` mediates) |
-| 2 · domain | `model`, `tokenizer`, `kvcache`, `sampling`, `quant`, `spec` | none today; any future edge (e.g. `spec → model`) requires amending this ADR |
+| 2 · domain | `model`, `tokenizer`, `kvcache`, `sampling`, `quant`, `spec` | `model → kvcache` (Amendment 5); any further edge (e.g. `spec → model`) requires amending this ADR |
 | 1 · compute substrate | `memory`, `tensor`, `parallel`, `kernels`, `cpu` | `tensor → memory`; `kernels → tensor, parallel`; `cpu → tensor`; `memory → tensor_base` (Amendment 1). (Amendment 4 retired `cuda` and its edges from Amendments 2/3.) |
 | 0 · foundation | `core` | — (depends on nothing but pinned third-party libs) |
 
@@ -222,3 +222,27 @@ consequences:
 
 The retired design doc lives at `docs/design/retired/cuda-backend.md`;
 rationale for the pivot itself is ADR-004.
+
+### Amendment 5 (2026-08-17, with M5-T01): `model → kvcache`
+
+M5 gives `model` its execution surface: the model graph (modules, the abstract
+`Model`, and the architecture registry the roadmap fixes at
+`src/model/registry.h`). `Model::forward` takes a `kvcache::KvCache*`, and the
+`Attention` module reads and appends through it — so `model` gains a dependency
+on `kvcache`.
+
+New allowed edge: **`model → kvcache`** (both layer-2 domain modules; this is
+the layer table's first intra-layer edge in layer 2, which the table's
+"none today; any future edge requires amending this ADR" note anticipated). No
+cycle: `kvcache` is a sibling and never links `model` (it depends only on
+`tensor`/`memory`/`core`). The edge is PRIVATE in CMake and no public `model`
+header re-exports `kvcache` types beyond the `KvCache*` in the forward
+signature.
+
+The alternative — placing `Model` in `engine` to keep `model` cache-free — was
+rejected: it contradicts the roadmap's `src/model/registry.h` placement and
+splits the model graph across two modules. Threading raw K/V *views* through
+`forward` (also cache-free) was rejected too, because M8's paged attention must
+read the cache through a block-table abstraction living inside the attention
+kernel, so the cache abstraction has to be reachable from the model graph
+regardless. Rationale and details: `docs/design/model-execution.md` §2.1–2.2.

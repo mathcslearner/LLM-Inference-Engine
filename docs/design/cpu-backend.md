@@ -63,10 +63,14 @@ here per this ticket's acceptance criteria):
   **`parallel → core` only.** It knows nothing of tensors — it schedules
   index ranges, not data.
 - `kernels`: **`kernels → tensor, parallel`** (plus `core` transitively).
-- `cpu`: **`cpu → tensor`** today; M5's threaded reference GEMM will use the
-  listed-edge pattern (`cpu → parallel` is an *addition ADR-002 must record*
-  when M5-T02 needs it — flagged here so it is an amendment, not a smuggled
-  link line).
+- `cpu`: **`cpu → tensor`** today; M5's threaded reference GEMM adds
+  **`cpu → parallel`**, which needs **no ADR amendment** — ADR-002 Amendment 4
+  already added `parallel` beside `memory` and named `cpu` among its permitted
+  consumers ("`kernels`, `cpu`, and `engine` may link it"). *(Resolved
+  2026-08-17, M5-T01: this bullet originally flagged the edge as a possible
+  future amendment, written before Amendment 4 was finalized; the edge was
+  already allowed, so M5-T02 links `parallel` directly. See
+  `docs/design/model-execution.md` §2.1.)*
 - Consumers: `engine` may link all three; `tests/` and `benchmarks/` link
   anything.
 

@@ -25,6 +25,11 @@ models/
                                 #   embeddings, layers.{0,1}, final_norm,
                                 #   logits (all f32)
       meta.json                 # input ids, seed, generator versions
+      # M5 adds op-level goldens here (ops/rope/attention.safetensors,
+      # generate.json), each landing with the ticket that consumes it —
+      # docs/design/model-execution.md §12.
+  tiny-qwen2/                   # M5-T10: tiny Qwen2ForCausalLM (QKV biases);
+                                #   same config/weights/expected/ shape
   qwen2-weight-names.json       # real Qwen2 checkpoint name/shape inventory
                                 #   (no bytes) + the config fields the
                                 #   weight-map tests need

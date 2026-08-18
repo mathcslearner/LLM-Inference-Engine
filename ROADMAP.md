@@ -684,7 +684,7 @@ KV-cache interface) that the optimized backend (M6) will implement.
 
 **Architecture documents:** `docs/design/model-execution.md` (M5-T01).
 
-### M5-T01 · Design doc: model execution
+### M5-T01 · Design doc: model execution — ✅ DONE (2026-08-17)
 Write `docs/design/model-execution.md`: the layer/module structure (Attention, MLP,
 DecoderLayer, Model), how weights bind to modules, the forward-pass signature (token
 ids + positions + KV cache → logits), batch/sequence dimension conventions, the
