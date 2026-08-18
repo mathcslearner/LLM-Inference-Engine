@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // HF config.json → ModelConfig (M4-T03; design: docs/design/model-loading.md
 // §3.2).
@@ -61,6 +62,11 @@ struct ModelConfig {
   bool tie_word_embeddings = false;
   bool attention_bias = false;  // per-arch default (design §3.2)
   tensor::DataType torch_dtype = tensor::DataType::kFloat32;
+  // End-of-sequence token id(s). HF serializes `eos_token_id` as either a
+  // single int or a list of ints (Llama-3 style); both parse into this set,
+  // empty when the field is absent. The greedy generation loop (M5-T09) stops
+  // on any of these; each id is validated in [0, vocab_size).
+  std::vector<std::int32_t> eos_token_ids;
 };
 
 // Parses the text of a config.json. Errors: `InvalidArgument` naming the

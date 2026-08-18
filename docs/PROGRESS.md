@@ -906,3 +906,58 @@ criterion); duplicate registration → `AlreadyExists`, empty name →
 refreshed the stale "M5-T08 adds…" comment in `reference_model.h` to present
 tense. 701 tests green; format + scoped tidy clean (registry.cpp,
 registry_test.cpp, and the `reference_model.h` includers).
+
+M5-T09 done (2026-08-18: greedy generation loop). New
+`src/engine/generator.{h,cpp}` — `Generate(Model&, KvCache&, prompt_ids,
+GenerateOptions, TokenCallback) → StatusOr<vector<int32>>`: prefill the whole
+prompt in one `kLast` forward at positions `P0..P0+T-1` (`P0 = cache.length()`,
+so it continues from a non-empty cache), argmax the `[1,V]` logits, then decode
+one token per forward at the running `cache.length()`, feeding the previous
+token back. Returns the continuation (prompt excluded). `GenerateOptions{
+max_new_tokens, eos_ids }`; `on_token` fires once per returned id, in order,
+after that id's append and before the next forward (the streaming seam M10
+uses). New `src/engine/backend.h` — `Backend`/`BuildOptions` re-export +
+header-only `BackendName`/`ParseBackend`; the placeholder `engine.cpp` anchor
+removed (generator.cpp now anchors `engine_engine`). **Non-obvious decisions:**
+(1) **Greedy = strict-`>` argmax → lowest-index tie-break**, stated so the
+determinism criterion doesn't rest on `std::max_element`'s incidental behavior;
+a NaN max → `Internal` rather than a bogus token. (2) **EOS id is included in
+the output** (HF-style: the matched id is the last element), and `on_token`
+fires for it too. (3) **Capacity checked up front on the worst case**
+(`P0 + T + (max_new_tokens − 1)`, ignoring early EOS) → `ResourceExhausted`
+before anything is generated — a `StatusOr<vector>` can't carry a partial result
+beside a Status, so failing mid-loop would silently drop the tokens already
+produced. Documented as the one judgment call; M10 streaming can revisit. (4)
+New **`ModelConfig::eos_token_ids`** (the M4-config addition the loop needs):
+HF's `eos_token_id` serializes as an int *or* a list of ints (Llama-3 ships a
+list), both parse into the set, validated in `[0, vocab_size)`; a wrong shape or
+non-int element → `InvalidArgument` naming `eos_token_id`/`eos_token_id[i]`.
+model-loading.md §3.2 updated. **The golden's conditioning was the real work.**
+A random tiny model has low-entropy stretches with sub-1e-3 top-2 logit gaps;
+there, HF `generate`, a manual KV loop, and our reference (mutually ~4e-6 apart
+on logits) flip tokens independently — so matching "HF generate token-for-token"
+is *ill-conditioned* on such prompts (the committed activation prompt is one:
+HF's own generate and manual paths diverge at token 18 on it). Fix: a
+tools-side search selects three prompts whose **minimum top-2 gap stays > 1e-2**
+over all 40 steps (four orders above the reference error), so every
+numerically-close path agrees; EOS is suppressed in the fixture so each reaches
+full length regardless of a chance EOS, and the C++ golden runs with empty
+`eos_ids`. New `tools/gen_fixtures/tiny_llama_generate.py`
+(`tiny-llama-generate`) writes `tiny-llama/expected/generate.json` and
+cross-checks HF `generate` == the manual KV loop before writing; registered in
+`__main__.py` and `regen_fixtures.sh`; existing fixture bytes untouched. Tests
+(+20 → 721 green): `generator_test.cpp` — token-for-token vs the golden (≥32
+asserted, all 40 compared) built through the registry; two-runs-identical;
+max-new-tokens stop (n=1,7 prefixes); EOS-on-first-token (returns exactly it) and
+mid-sequence EOS (stops at first occurrence, inclusive); `on_token` fired once
+per id in order with `cache.length() == prompt+i` at the i-th callback (proving
+the append/forward ordering); continuation from a half-prefilled cache equals the
+full-prompt golden (the KV invariant); error paths (empty prompt, `max_new=0`,
+insufficient capacity → `ResourceExhausted` with nothing appended, out-of-range
+prompt id propagated from `forward`); backend `Name`/`Parse` round-trip + unknown
+→ `InvalidArgument`. Plus 7 `config_test.cpp` `eos_token_id` cases (absent/scalar/
+list/null/wrong-type/list-element/out-of-range) and list-vs-scalar assertions on
+the real Llama-3.1 and Qwen2 config goldens. Label `engine` (`ctest -L engine`);
+no `SCALAR_PASS` (portable C++, calls the interfaces not `kernels::`). Format +
+scoped tidy clean (generator.{cpp} + test, config.{cpp} + test, and the
+`model/config.h` direct-includer TUs).

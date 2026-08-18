@@ -184,6 +184,7 @@ struct ModelConfig {
   bool tie_word_embeddings = false;
   bool attention_bias = false;     // per-arch default, see below
   tensor::DataType torch_dtype = tensor::DataType::kFloat32;
+  std::vector<std::int32_t> eos_token_ids;  // int or list; empty when absent
 };
 
 [[nodiscard]] core::StatusOr<ModelConfig> ParseModelConfig(
@@ -225,6 +226,13 @@ Rules:
   M5/M7's contract. Unknown `rope_type` values are *parsed*, not rejected —
   rejection would couple config parsing to execution capability; the
   executor rejects what it can't honor.
+- **`eos_token_id`** (added M5-T09 for the generation loop) is optional and
+  accepts HF's two serializations — a single int or a list of ints (Llama-3
+  ships a list) — parsed into `eos_token_ids` (empty when absent or `null`).
+  Each id is validated in `[0, vocab_size)`; a present field of any other
+  shape, or a non-int element, is `InvalidArgument` naming `eos_token_id`
+  (or `eos_token_id[i]`). The greedy loop stops on any of these ids; the
+  caller may also pass its own stop set (e.g. the tokenizer's `eos_id()`).
 
 *Implementation notes (M4-T03):*
 

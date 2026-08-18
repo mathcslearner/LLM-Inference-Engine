@@ -45,8 +45,12 @@ models/
                                 #   (docs/design/model-execution.md §12)
       attention_meta.json       # attention case manifest (cases, dims, scale,
                                 #   seed)
-      # M5 adds more op-level goldens here (generate.json), each landing with
-      # the ticket that consumes it — docs/design/model-execution.md §12.
+      generate.json             # M5-T09: greedy generate(do_sample=False)
+                                #   continuations — the token-for-token oracle
+                                #   for engine::engine::Generate; well-separated
+                                #   prompts (min top-2 gap > 1e-2), EOS
+                                #   suppressed (docs/design/model-execution.md
+                                #   §10, §12)
   tiny-qwen2/                   # M5-T10: tiny Qwen2ForCausalLM (QKV biases);
                                 #   same config/weights/expected/ shape
   qwen2-weight-names.json       # real Qwen2 checkpoint name/shape inventory

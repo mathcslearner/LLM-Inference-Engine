@@ -7,6 +7,7 @@ from . import (
     qwen2_names,
     tiny_llama,
     tiny_llama_attention,
+    tiny_llama_generate,
     tiny_llama_ops,
     tiny_llama_rope,
     tokenizer_vectors,
@@ -24,6 +25,7 @@ def main() -> None:
     tiny_llama_ops.register(subparsers)
     tiny_llama_rope.register(subparsers)
     tiny_llama_attention.register(subparsers)
+    tiny_llama_generate.register(subparsers)
     qwen2_names.register(subparsers)
     tokenizer_vectors.register(subparsers)
     model_configs.register(subparsers)

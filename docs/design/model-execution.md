@@ -766,7 +766,7 @@ core::Status RegisterArchitecture(std::string_view hf_arch_name,
 
 ---
 
-## 10. Generation loop (M5-T09)
+## 10. Generation loop (M5-T09) — landed 2026-08-18
 
 ```cpp
 // src/engine/generator.h
@@ -775,35 +775,70 @@ struct GenerateOptions {
   std::vector<std::int32_t> eos_ids;               // stop when any is produced
 };
 
+// Called with each new id as it is produced — the streaming seam (M10 uses it).
+using TokenCallback = std::function<void(std::int32_t)>;
+
 // Greedy (argmax) continuation of `prompt_ids`. Returns the generated token
-// ids (excluding the prompt). `on_token`, if set, is called with each new id
-// as it is produced (the streaming seam; M10 uses it).
+// ids (excluding the prompt).
 [[nodiscard]] core::StatusOr<std::vector<std::int32_t>> Generate(
     Model& model, KvCache& cache, std::span<const std::int32_t> prompt_ids,
-    const GenerateOptions& options,
-    FunctionRef<void(std::int32_t)> on_token = {});
+    const GenerateOptions& options, const TokenCallback& on_token = {});
 ```
 
-- **Prefill** the whole prompt in one `forward` (positions `0..P-1`, `kLast`),
-  argmax the `[1, V]` logits → first new token. **Decode**: one `forward` per
-  step (`T == 1`, position = running length, `kLast`), argmax, append, repeat.
-- **Greedy = argmax with lowest-index tie-break** (deterministic; the
-  determinism-test acceptance requires two runs to be identical — trivially
-  true for argmax, but the tie-break is stated so it is not left to
-  `std::max_element`'s incidental behavior).
-- **Stopping:** any `eos_ids` match, or `max_new_tokens` reached. `eos_ids`
-  comes from the caller — the tokenizer's `eos_id()` and/or config. *(M5-T09
-  adds `eos_token_id` parsing to `ModelConfig`: HF serializes it as an int or a
-  list; the loop accepts a set. This is a small M4-config addition M5-T09 makes
-  in passing, noted here so it is not a surprise.)*
+- **Prefill** the whole prompt in one `forward` (positions `P0..P0+T-1` where
+  `P0 = cache.length()` — the loop continues from a non-empty cache, so `P0` is
+  0 for a fresh cache and the prompt's start otherwise; `kLast`), argmax the
+  `[1, V]` logits → first new token. **Decode**: one `forward` per step (`T ==
+  1`, position = running `cache.length()`, `kLast`), feeding the previously
+  produced token back as the single input, argmax, repeat.
+- **Greedy = argmax with lowest-index tie-break** (a strict `>` scan;
+  deterministic — the determinism-test acceptance requires two runs to be
+  identical, and the tie-break is stated so it is not left to
+  `std::max_element`'s incidental behavior). A non-finite max (NaN logit) is
+  surfaced as `Internal`, not returned as a bogus token.
+- **Stopping:** any `eos_ids` match (**the matched EOS id is included** as the
+  last element of the result — HF-style), or `max_new_tokens` produced. `eos_ids`
+  comes from the caller — the tokenizer's `eos_id()` and/or
+  `ModelConfig::eos_token_ids`. *(M5-T09 adds `eos_token_id` parsing to
+  `ModelConfig` → `eos_token_ids`: HF serializes it as an int or a list, both
+  parse to a set validated in `[0, vocab_size)`. A small M4-config addition
+  M5-T09 makes in passing, §3.2 of model-loading.md.)*
+- **Error posture (front-loaded, nothing generated, cache unmodified):** empty
+  prompt or `max_new_tokens ≤ 0` → `InvalidArgument`; a prompt+continuation that
+  cannot fit `cache.capacity()` → `ResourceExhausted`. The capacity check is
+  **up front on the worst case** (`P0 + T + (max_new_tokens − 1)`, ignoring early
+  EOS) because a `StatusOr<vector>` cannot return a partial result beside a
+  Status — a caller wanting "generate up to the cache limit" sizes
+  `max_new_tokens` to fit. Any `model.forward` error (bad id, geometry mismatch,
+  position overflow past `max_position_embeddings`) propagates unchanged.
+- **`on_token`** fires **exactly once per returned id, in order**, after that id
+  is appended to the result and before the next `forward` — the per-token
+  callback hook the roadmap names ("hooks for per-token callbacks, streaming
+  later"); M10's SSE streaming and cancel-within-one-step build on it.
+  `std::function` for now; a non-allocating callback is a measured-perf
+  follow-up.
 - **Backend-agnostic:** the loop touches only `Model` and `KvCache`. M6-T07
   reuses it verbatim ("greedy loop reused from M5") against the optimized
   backend; the acceptance is token-for-token agreement with the reference. The
   golden test (M5-T09) is agreement with HF `generate(do_sample=False)` for ≥32
   tokens on tiny-llama.
-- `on_token` is the **per-token callback hook** the roadmap names ("hooks for
-  per-token callbacks, streaming later"); M10's SSE streaming and
-  cancel-within-one-step build on it.
+- **Backend selection (`src/engine/backend.h`).** Re-exports `model::Backend`
+  and `model::BuildOptions` under the `engine` namespace (the enum is defined in
+  `registry.h`, §9), plus header-only `BackendName(Backend)` and
+  `ParseBackend(string_view)` (unknown → `InvalidArgument` listing the accepted
+  names) for the generation-loop, CLI, and M17 config call sites.
+
+**On the golden's robustness (why these prompts).** A random tiny model has
+low-entropy stretches where the top-2 logits are near-degenerate (gaps < 1e-3);
+there, any two numerically-almost-identical greedy paths (HF `generate`, a
+manual KV loop, our reference — mutually within ~4e-6 on logits, §13 T07) flip
+tokens independently, so "match HF token-for-token" is an ill-conditioned,
+untestable target. The `generate.json` prompts (§12) are therefore **selected
+for a well-separated trajectory** — minimum top-2 logit gap > 1e-2 over all
+generated steps, four orders of magnitude above the reference error — and EOS is
+suppressed in the fixture so each reaches the full length regardless of the
+random model's chance EOS. The committed activation prompt (`INPUT_IDS`) is one
+of the ill-conditioned cases and is deliberately *not* reused for generation.
 
 ---
 
@@ -866,7 +901,7 @@ total). Planned additions under `tests/fixtures/models/`:
 | `tiny-llama/expected/ops.safetensors` | T02–T04 | GEMM cases (incl. `k==1`, skinny, wide); RMSNorm on bf16 input → fp32 out; softmax on large-magnitude logits (e.g. ±1e4); SiLU-and-mul; `embedding_edge` — real bf16 embed table gathered at edge ids {0, V−1, duplicate} |
 | `tiny-llama/expected/rope.safetensors` | T04 | `tiny_table` cos/sin `[max_pos, d/2]`; `tiny_sparse`/`tiny_contig` apply I/O in token-major `[T, H, d]` at positions {0, 1, 127} and {0..7} (GQA H=4/Hkv=2); `llama3` scaled `inv_freq` + cos/sin from the committed Llama-3.1 config (§7); `linear` scaled `inv_freq` + cos/sin (synthetic factor 4). The end-to-end embedding golden is the existing `activations.safetensors` `embeddings`/`input_ids`. |
 | `tiny-llama/expected/attention.safetensors` | T05 | per case (layer, P, T): the module I/O (`x [T,E]`, `positions [T]`, `out [T,E]`) and the op intermediates (`q_rot [T,H,d]`, `k_all`/`v_all [Hkv,P+T,d]`, `ctx [T,H,d]`), plus `past_k`/`past_v [Hkv,P,d]` when P>0. Cases: `l{0,1}_prefill_empty` (P=0,T=8), `l{0,1}_prefill_continue` (P=5,T=6, HF-seeded past-key-values), `l0_decode` (P=7,T=1). GQA (Hkv=2 < H=4) is inherent; both layers appear (distinct weights). Intermediates captured from HF eager attention (a registered capture wrapper over `eager_attention_forward`). |
-| `tiny-llama/expected/generate.json` | T09 | greedy `generate(do_sample=False)` continuation (≥ 32 ids) for a few fixed prompts |
+| `tiny-llama/expected/generate.json` | T09 | greedy `generate(do_sample=False)` continuation (40 ids) for three fixed, **well-separated** prompts (min top-2 logit gap > 1e-2; §10); EOS suppressed; each cross-checked against a manual prefill+decode KV loop before commit |
 | `tiny-qwen2/` (new model fixture) | T10 | a tiny `Qwen2ForCausalLM` mirror of tiny-llama: **q/k/v biases**, its config fields, tied or untied embeddings, with the same `expected/` set (logits + greedy) — exercises the Qwen2 wiring on the shared modules |
 
 `tiny-qwen2` is deliberately small (same dims class as tiny-llama) and, to

@@ -137,6 +137,19 @@ core::StatusOr<int> AsInt(std::int64_t value, std::string_view field) {
   return static_cast<int>(value);
 }
 
+// Narrows a validated int64 token id into an `int32` member. Token ids are
+// small non-negative integers; this only guards the narrowing (range against
+// vocab_size is checked in ValidateConfig, where vocab_size is known).
+core::StatusOr<std::int32_t> AsInt32(std::int64_t value,
+                                     std::string_view field) {
+  if (value > std::numeric_limits<std::int32_t>::max() ||
+      value < std::numeric_limits<std::int32_t>::min()) {
+    return core::InvalidArgumentError("field \"{}\" is out of range: {}", field,
+                                      value);
+  }
+  return static_cast<std::int32_t>(value);
+}
+
 core::Status CheckPositive(std::int64_t value, std::string_view field) {
   if (value <= 0) {
     return core::InvalidArgumentError(
@@ -361,6 +374,41 @@ core::Status ParseTorchDtype(const json& root, ModelConfig& config) {
   return core::OkStatus();
 }
 
+// eos_token_id: optional, either a single int or a JSON array of ints (HF
+// serializes both forms — Llama-3 configs use a list). Absent → empty set (the
+// member default). A present field of any other shape, or a non-int element, →
+// InvalidArgument naming the field; range against vocab_size is validated in
+// ValidateConfig. `null` is treated as absent (some configs serialize it).
+core::Status ParseEosTokenIds(const json& root, ModelConfig& config) {
+  const auto it = root.find("eos_token_id");
+  if (it == root.end() || it->is_null()) {
+    return core::OkStatus();
+  }
+  const auto append = [&](const json& value,
+                          std::string_view field) -> core::Status {
+    auto id = IntValue(value, field);
+    if (!id.ok()) {
+      return id.status();
+    }
+    auto narrowed = AsInt32(*id, field);
+    if (!narrowed.ok()) {
+      return narrowed.status();
+    }
+    config.eos_token_ids.push_back(*narrowed);
+    return core::OkStatus();
+  };
+  if (it->is_array()) {
+    for (std::size_t i = 0; i < it->size(); ++i) {
+      auto status = append((*it)[i], fmt::format("eos_token_id[{}]", i));
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    return core::OkStatus();
+  }
+  return append(*it, "eos_token_id");
+}
+
 // head_dim: explicit, or derived as hidden_size / num_heads. When
 // explicit, `hidden_size == num_heads * head_dim` is deliberately not
 // enforced (real checkpoints legitimately decouple them); when derived,
@@ -461,6 +509,13 @@ core::Status ValidateConfig(const ModelConfig& config) {
         "\"num_attention_heads\" ({})",
         config.num_kv_heads, config.num_heads);
   }
+  for (const std::int32_t eos_id : config.eos_token_ids) {
+    if (eos_id < 0 || eos_id >= config.vocab_size) {
+      return core::InvalidArgumentError(
+          "field \"eos_token_id\" ({}) is out of range [0, vocab_size={})",
+          eos_id, config.vocab_size);
+    }
+  }
   return core::OkStatus();
 }
 
@@ -481,7 +536,8 @@ core::StatusOr<ModelConfig> ParseModelConfig(std::string_view json_text) {
   using ParseStage = core::Status (*)(const json&, ModelConfig&);
   constexpr ParseStage kStages[] = {
       ParseArchitectureField, ParseRequiredDims, ParseDefaultedFields,
-      ParseTorchDtype,        ParseHeadDim,      ParseRopeScalingField,
+      ParseTorchDtype,        ParseEosTokenIds,  ParseHeadDim,
+      ParseRopeScalingField,
   };
   for (const ParseStage stage : kStages) {
     auto status = stage(root, config);

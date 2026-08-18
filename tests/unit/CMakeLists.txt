@@ -127,6 +127,19 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::model engine::kvcache engine::cpu
   LABELS model)
 
+# generator_test (M5-T09): the greedy generation loop — token-for-token vs the
+# HF generate.json golden (>=32 tokens), determinism, EOS/max-new-tokens
+# stopping, the per-token callback, continuation from a non-empty cache, and the
+# front-loaded error paths; plus the engine/backend.h re-export helpers. Builds
+# the model through the registry (engine::model), runs it on the real
+# SimpleKvCache (engine::kvcache), and replays generate.json (nlohmann_json,
+# test-only — same pattern as the tokenizer golden tests). `engine` label lets
+# `ctest -L engine` iterate the execution suite alone.
+engine_add_tests(TREE unit SOURCES
+  generator_test.cpp
+  DEPS engine::engine engine::model engine::kvcache nlohmann_json::nlohmann_json
+  LABELS engine)
+
 # tokenizer_test parses the committed real tokenizer.json fixtures (design
 # §7.1, §8); the `tokenizer` label lets `ctest -L tokenizer` iterate the
 # golden suite alone. Ordinary portable C++ — no SCALAR_PASS.

@@ -352,8 +352,26 @@ behind an existing subsystem):
   Built-ins register lazily inside a mutex-guarded `GetRegistry` function-local
   static (a static-lib TU of self-registering globals would be linker-dropped).
   `BuildModel` bit-identical to a direct `ReferenceModel::Create` (pass-through).
-  design §2/§8/§9/§13 updated. +7 tests (701 green).
+  design §2/§8/§9/§13 updated. +7 tests (701 green). T09 Greedy generation loop:
+  `src/engine/generator.{h,cpp}` — `Generate(Model&, KvCache&, prompt_ids,
+  GenerateOptions, TokenCallback)`: prefill in one `kLast` forward at positions
+  `P0..P0+T-1` (`P0=cache.length()`, continues from a non-empty cache), strict-`>`
+  argmax (lowest-index tie-break; NaN→`Internal`), decode one token/forward at the
+  running length feeding the prior token back; EOS ids **included** in the output;
+  `on_token` fires once per id, in order, after append/before next forward;
+  front-loaded validation (empty prompt / `max_new_tokens≤0` → InvalidArgument;
+  **up-front worst-case capacity check** → ResourceExhausted since `StatusOr<vec>`
+  can't carry a partial result); `forward` errors propagate. `src/engine/backend.h`
+  — `Backend`/`BuildOptions` re-export + header-only `BackendName`/`ParseBackend`;
+  `engine.cpp` anchor removed. New `ModelConfig::eos_token_ids` (HF int-or-list
+  `eos_token_id`, validated `[0,vocab)`; model-loading.md §3.2). New
+  `tools/gen_fixtures/tiny_llama_generate.py` → `generate.json`: three prompts
+  **selected for min top-2 logit gap > 1e-2** (the random model's sub-1e-3-gap
+  regions make greedy trajectories ill-conditioned — HF generate vs a manual KV
+  loop diverge there; well-separated prompts make token-for-token robust), EOS
+  suppressed, HF `generate` cross-checked vs manual loop. design §10/§12 updated.
+  +20 tests (721 green).
 
-Next up: **M5-T09** (Greedy generation loop — `src/engine/generator.h`: prefill +
-autoregressive decode with greedy argmax, EOS/max-new-tokens stopping,
-per-token callback; `engine/backend.h` re-exports `model::Backend`).
+Next up: **M5-T10** (Qwen-family support — Qwen2/2.5 QKV-bias wiring on the shared
+modules + a tiny `Qwen2ForCausalLM` fixture with golden logits & greedy
+generation; diff should be config/fixtures, not new layer code).

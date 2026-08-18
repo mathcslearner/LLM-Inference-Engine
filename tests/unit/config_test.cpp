@@ -106,6 +106,10 @@ TEST(ModelConfigTest, ParsesRealLlama31Config) {
   EXPECT_FLOAT_EQ(scaling.low_freq_factor, 1.0F);
   EXPECT_FLOAT_EQ(scaling.high_freq_factor, 4.0F);
   EXPECT_EQ(scaling.original_max_position_embeddings, 8192);
+
+  // Llama-3.1 serializes eos_token_id as a list (M5-T09).
+  EXPECT_EQ(config->eos_token_ids,
+            (std::vector<std::int32_t>{128001, 128008, 128009}));
 }
 
 TEST(ModelConfigTest, ParsesRealQwen2Config) {
@@ -131,6 +135,9 @@ TEST(ModelConfigTest, ParsesRealQwen2Config) {
   EXPECT_EQ(config->torch_dtype, DataType::kBFloat16);
   // …and this fixture is the rope_scaling *absence* golden.
   EXPECT_FALSE(config->rope_scaling.has_value());
+
+  // Qwen2 serializes eos_token_id as a single int (M5-T09).
+  EXPECT_EQ(config->eos_token_ids, (std::vector<std::int32_t>{151645}));
 }
 
 TEST(ModelConfigTest, ParsesTinyLlamaFixtureConfig) {
@@ -425,6 +432,57 @@ TEST(ModelConfigTest, LoadFromMissingPathIsNotFoundNamingPath) {
   EXPECT_TRUE(IsNotFound(config.status()));
   EXPECT_TRUE(MessageContains(config.status(), "/no/such/dir/config.json"))
       << config.status().ToString();
+}
+
+// --------------------------------------------------------- eos_token_id --
+
+TEST(ModelConfigTest, EosTokenIdAbsentYieldsEmptySet) {
+  const auto config = ParseModelConfig(ConfigJson());
+  ASSERT_TRUE(config.ok()) << config.status().ToString();
+  EXPECT_TRUE(config->eos_token_ids.empty());
+}
+
+TEST(ModelConfigTest, EosTokenIdScalarParsed) {
+  const auto config = ParseModelConfig(ConfigJson({{"eos_token_id", "2"}}));
+  ASSERT_TRUE(config.ok()) << config.status().ToString();
+  EXPECT_EQ(config->eos_token_ids, (std::vector<std::int32_t>{2}));
+}
+
+TEST(ModelConfigTest, EosTokenIdListParsed) {
+  const auto config =
+      ParseModelConfig(ConfigJson({{"eos_token_id", "[2, 7, 500]"}}));
+  ASSERT_TRUE(config.ok()) << config.status().ToString();
+  EXPECT_EQ(config->eos_token_ids, (std::vector<std::int32_t>{2, 7, 500}));
+}
+
+TEST(ModelConfigTest, EosTokenIdNullTreatedAsAbsent) {
+  const auto config = ParseModelConfig(ConfigJson({{"eos_token_id", "null"}}));
+  ASSERT_TRUE(config.ok()) << config.status().ToString();
+  EXPECT_TRUE(config->eos_token_ids.empty());
+}
+
+TEST(ModelConfigTest, EosTokenIdWrongTypeIsNamedError) {
+  const auto config =
+      ParseModelConfig(ConfigJson({{"eos_token_id", "\"two\""}}));
+  ASSERT_FALSE(config.ok());
+  EXPECT_TRUE(IsInvalidArgument(config.status()));
+  EXPECT_TRUE(MessageContains(config.status(), "eos_token_id"));
+}
+
+TEST(ModelConfigTest, EosTokenIdListElementWrongTypeIsIndexNamed) {
+  const auto config =
+      ParseModelConfig(ConfigJson({{"eos_token_id", "[2, \"x\"]"}}));
+  ASSERT_FALSE(config.ok());
+  EXPECT_TRUE(IsInvalidArgument(config.status()));
+  EXPECT_TRUE(MessageContains(config.status(), "eos_token_id[1]"));
+}
+
+TEST(ModelConfigTest, EosTokenIdOutOfVocabRangeIsNamedError) {
+  // vocab_size is 512 in ConfigJson; 512 is out of [0, 512).
+  const auto config = ParseModelConfig(ConfigJson({{"eos_token_id", "512"}}));
+  ASSERT_FALSE(config.ok());
+  EXPECT_TRUE(IsInvalidArgument(config.status()));
+  EXPECT_TRUE(MessageContains(config.status(), "eos_token_id"));
 }
 
 TEST(ModelConfigTest, LoadParseErrorIsPrefixedWithPath) {

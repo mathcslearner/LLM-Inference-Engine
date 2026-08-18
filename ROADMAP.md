@@ -784,7 +784,7 @@ error listing supported ones. Builder wires `ModelConfig` + weights → `Model`.
 > function-local static (a static-lib TU of self-registering globals would be
 > dropped by the linker). +7 tests (701 green); design §2/§8/§9/§13 updated.
 
-### M5-T09 · Greedy generation loop
+### M5-T09 · Greedy generation loop — ✅ DONE (2026-08-18)
 `src/engine/generator.h`: prefill + autoregressive decode loop with greedy argmax,
 EOS-token and max-new-tokens stopping. Returns generated ids; hooks for per-token
 callbacks (streaming later).
@@ -792,6 +792,27 @@ callbacks (streaming later).
 **Acceptance criteria:**
 - Golden test: greedy continuation of fixture prompts matches HF `generate(do_sample=False)` token-for-token for ≥ 32 tokens on the tiny model.
 - Determinism test: two runs produce identical outputs.
+
+> **Note (2026-08-18):** landed `src/engine/generator.{h,cpp}` (`Generate` —
+> prefill in one `kLast` forward, argmax with **lowest-index tie-break**, decode
+> one token per forward at the running cache position, `on_token` callback firing
+> once per id after its append and before the next forward; EOS ids included in
+> the output; front-loaded validation — empty prompt / `max_new_tokens ≤ 0` →
+> InvalidArgument, and an **up-front capacity check** → ResourceExhausted since a
+> `StatusOr<vector>` cannot carry a partial result) and `src/engine/backend.h`
+> (`Backend`/`BuildOptions` re-export + header-only `BackendName`/`ParseBackend`;
+> the `engine.cpp` anchor removed). New `ModelConfig::eos_token_ids` (M4-config
+> addition the loop needs: HF's int-or-list `eos_token_id`, validated in
+> `[0, vocab_size)`). New `tiny-llama/expected/generate.json` (`tiny-llama-generate`
+> subcommand): three **well-separated** prompts (min top-2 logit gap > 1e-2 —
+> four orders above the ~4e-6 HF-vs-reference logit diff), EOS suppressed so each
+> reaches 40 tokens, HF `generate` cross-checked against a manual KV loop. The
+> committed activation prompt is *ill-conditioned* (sub-1e-3 gaps make the greedy
+> trajectory untestable across numerically-close paths) and deliberately not
+> reused. +20 tests (721 green): golden token-for-token match, determinism, EOS/
+> max-new-tokens stopping, callback ordering, non-empty-cache continuation (KV
+> invariant), error paths, backend helpers, and 7 `eos_token_id` config tests.
+> design §10/§12 updated.
 
 ### M5-T10 · Qwen-family support (CPU)
 Implement Qwen2/2.5 differences (QKV bias, its config fields) on the shared modules;
