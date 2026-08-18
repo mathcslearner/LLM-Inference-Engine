@@ -300,4 +300,105 @@ class Attention {
   std::int64_t hidden_size_ = 0;  // E == q/k/v_proj in_features
 };
 
+// SwiGLU feed-forward network (M5-T03/T07; design:
+// docs/design/model-execution.md §4.2). Owns the gate/up/down projection
+// `Linear`s and computes `down(silu(gate(x)) ⊙ up(x))` in fp32 via
+// `cpu::silu_mul` + the projections' `cpu::gemm`. Bias is each projection's
+// business (Llama's `mlp_bias` is false; the builder decides) — like
+// `Attention`, holding `std::unique_ptr<Linear>` makes the module move-only so
+// M6/M13 slot `PackedLinear`/`QuantizedLinear` in unchanged.
+class Mlp {
+ public:
+  // Validates the projection shapes: all non-null; gate/up share
+  // `in_features == E` (the hidden size) and `out_features == I` (the
+  // intermediate size); down maps `I → E` (`in_features == I`,
+  // `out_features == E`). A null projection or a shape disagreement →
+  // InvalidArgument naming the problem.
+  [[nodiscard]] static core::StatusOr<Mlp> Create(std::unique_ptr<Linear> gate,
+                                                  std::unique_ptr<Linear> up,
+                                                  std::unique_ptr<Linear> down);
+
+  // y[T, E] = down(silu(gate(x)) ⊙ up(x)). `x` and `y` are caller-allocated
+  // contiguous fp32 [T, E]; a wrong-shape/dtype `x`/`y` is InvalidArgument. The
+  // gate/up projections and the silu-and-multiply run into freshly allocated
+  // fp32 work tensors (the reference allocates freely; M6/M12 provide
+  // workspaces).
+  [[nodiscard]] core::Status forward(const tensor::Tensor& x,
+                                     tensor::Tensor& y) const;
+
+  [[nodiscard]] std::int64_t hidden_size() const { return hidden_size_; }
+  [[nodiscard]] std::int64_t intermediate_size() const {
+    return intermediate_size_;
+  }
+
+ private:
+  Mlp(std::unique_ptr<Linear> gate, std::unique_ptr<Linear> up,
+      std::unique_ptr<Linear> down, std::int64_t hidden_size,
+      std::int64_t intermediate_size)
+      : gate_(std::move(gate)),
+        up_(std::move(up)),
+        down_(std::move(down)),
+        hidden_size_(hidden_size),
+        intermediate_size_(intermediate_size) {}
+
+  std::unique_ptr<Linear> gate_;
+  std::unique_ptr<Linear> up_;
+  std::unique_ptr<Linear> down_;
+  std::int64_t hidden_size_ = 0;        // E
+  std::int64_t intermediate_size_ = 0;  // I
+};
+
+// One transformer decoder block (M5-T07; design:
+// docs/design/model-execution.md §4.2). The pre-norm arrangement HF Llama uses:
+//
+//   h  = attn_norm(x); a = attn(h, …); r = x + a
+//   h2 = mlp_norm(r);  m = mlp(h2);    y = r + m
+//
+// Norm names are *positions*, not tensors of their own semantics
+// (model-loading.md §4). Owns two `RmsNorm`s, one `Attention`, one `Mlp`;
+// move-only because `Attention`/`Mlp` are. The `layer`/`cache` are threaded
+// straight through to `Attention` (the one submodule that touches the cache).
+class DecoderLayer {
+ public:
+  // Validates that all four submodules agree on the hidden size E (the norms'
+  // `hidden_size`, attention's `hidden_size`, and the MLP's `hidden_size`). A
+  // disagreement → InvalidArgument naming the mismatch.
+  [[nodiscard]] static core::StatusOr<DecoderLayer> Create(RmsNorm attn_norm,
+                                                           Attention attn,
+                                                           RmsNorm mlp_norm,
+                                                           Mlp mlp);
+
+  // y[T, E] = decoder_block(x[T, E]) for one layer. Projects through the
+  // pre-norm attention + SwiGLU MLP with residual adds, appending this call's
+  // K/V to `cache` at `layer`. `x` and `y` are caller-allocated contiguous fp32
+  // [T, E] and must not alias (the residual reads `x` after `y` is written);
+  // `positions.size() == T`. A wrong-shape/dtype `x`/`y`, a positions/T
+  // disagreement, or an out-of-range position → InvalidArgument; a cache error
+  // surfaces the cache's Status. Validation is front-loaded (via the
+  // submodules) so a failure never leaves a half-appended layer.
+  [[nodiscard]] core::Status forward(const tensor::Tensor& x,
+                                     std::span<const std::int32_t> positions,
+                                     int layer, kvcache::KvCache& cache,
+                                     tensor::Tensor& y) const;
+
+  [[nodiscard]] std::int64_t hidden_size() const { return hidden_size_; }
+  [[nodiscard]] const Attention& attention() const { return attn_; }
+  [[nodiscard]] const Mlp& mlp() const { return mlp_; }
+
+ private:
+  DecoderLayer(RmsNorm attn_norm, Attention attn, RmsNorm mlp_norm, Mlp mlp,
+               std::int64_t hidden_size)
+      : attn_norm_(std::move(attn_norm)),
+        attn_(std::move(attn)),
+        mlp_norm_(std::move(mlp_norm)),
+        mlp_(std::move(mlp)),
+        hidden_size_(hidden_size) {}
+
+  RmsNorm attn_norm_;
+  Attention attn_;
+  RmsNorm mlp_norm_;
+  Mlp mlp_;
+  std::int64_t hidden_size_ = 0;  // E
+};
+
 }  // namespace engine::model

@@ -108,6 +108,16 @@ engine_add_tests(TREE unit SOURCES
   simple_cache_test.cpp
   DEPS engine::kvcache engine::tensor)
 
+# model_test (M5-T07): the DecoderLayer/Mlp modules, ReferenceModel end-to-end
+# logits vs activations.safetensors, the per-layer activation hook, kLast/kAll
+# consistency, and the KV-cache invariant elevated to full-model logits. Uses
+# the loader + SafetensorsFile (engine::model), the cpu ops (via the modules),
+# and the real SimpleKvCache (engine::kvcache). `model` label.
+engine_add_tests(TREE unit SOURCES
+  model_test.cpp
+  DEPS engine::model engine::kvcache engine::cpu
+  LABELS model)
+
 # tokenizer_test parses the committed real tokenizer.json fixtures (design
 # §7.1, §8); the `tokenizer` label lets `ctest -L tokenizer` iterate the
 # golden suite alone. Ordinary portable C++ — no SCALAR_PASS.

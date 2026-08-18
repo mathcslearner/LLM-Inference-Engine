@@ -522,4 +522,145 @@ core::Status Attention::forward(const tensor::Tensor& x,
   return o_proj_->forward(ctx2, y);
 }
 
+core::StatusOr<Mlp> Mlp::Create(std::unique_ptr<Linear> gate,
+                                std::unique_ptr<Linear> up,
+                                std::unique_ptr<Linear> down) {
+  if (gate == nullptr || up == nullptr || down == nullptr) {
+    return core::InvalidArgumentError(
+        "Mlp: gate/up/down projections must all be non-null");
+  }
+  const std::int64_t hidden = gate->in_features();
+  const std::int64_t intermediate = gate->out_features();
+  if (up->in_features() != hidden || up->out_features() != intermediate) {
+    return core::InvalidArgumentError(
+        "Mlp: up_proj must be [{}, {}] (I×E), got out={} in={}", intermediate,
+        hidden, up->out_features(), up->in_features());
+  }
+  if (down->in_features() != intermediate || down->out_features() != hidden) {
+    return core::InvalidArgumentError(
+        "Mlp: down_proj must be [{}, {}] (E×I), got out={} in={}", hidden,
+        intermediate, down->out_features(), down->in_features());
+  }
+  return Mlp(std::move(gate), std::move(up), std::move(down), hidden,
+             intermediate);
+}
+
+core::Status Mlp::forward(const tensor::Tensor& x, tensor::Tensor& y) const {
+  // Validate the activation tensors here so messages name `x`/`y`; the
+  // projections re-validate cheaply in cpu::gemm.
+  if (!x.defined()) {
+    return core::InvalidArgumentError("Mlp::forward: x is undefined");
+  }
+  if (x.shape().rank() != 2 || x.shape().dim(1) != hidden_size_) {
+    return core::InvalidArgumentError("Mlp::forward: x must be [T, {}], got {}",
+                                      hidden_size_, x.shape());
+  }
+  if (x.dtype() != tensor::DataType::kFloat32) {
+    return core::InvalidArgumentError("Mlp::forward: x must be f32, got {}",
+                                      tensor::to_string(x.dtype()));
+  }
+  if (!y.defined()) {
+    return core::InvalidArgumentError("Mlp::forward: y is undefined");
+  }
+  if (y.shape().rank() != 2 || y.shape().dim(0) != x.shape().dim(0) ||
+      y.shape().dim(1) != hidden_size_) {
+    return core::InvalidArgumentError(
+        "Mlp::forward: y must be caller-allocated [{}, {}], got {}",
+        x.shape().dim(0), hidden_size_, y.shape());
+  }
+
+  const std::int64_t t_dim = x.shape().dim(0);
+  // gate/up into fresh [T, I] work tensors, then silu(gate) ⊙ up in place, then
+  // down back to [T, E] (the reference allocates freely; M6/M12 add
+  // workspaces).
+  ASSIGN_OR_RETURN(tensor::Tensor gate_out,
+                   tensor::ops::zeros(tensor::Shape{t_dim, intermediate_size_},
+                                      tensor::DataType::kFloat32));
+  ASSIGN_OR_RETURN(tensor::Tensor up_out,
+                   tensor::ops::zeros(tensor::Shape{t_dim, intermediate_size_},
+                                      tensor::DataType::kFloat32));
+  RETURN_IF_ERROR(gate_->forward(x, gate_out));
+  RETURN_IF_ERROR(up_->forward(x, up_out));
+  RETURN_IF_ERROR(cpu::silu_mul(gate_out, up_out, gate_out));
+  return down_->forward(gate_out, y);
+}
+
+core::StatusOr<DecoderLayer> DecoderLayer::Create(RmsNorm attn_norm,
+                                                  Attention attn,
+                                                  RmsNorm mlp_norm, Mlp mlp) {
+  const std::int64_t hidden = attn.hidden_size();
+  if (attn_norm.hidden_size() != hidden) {
+    return core::InvalidArgumentError(
+        "DecoderLayer: attn_norm hidden_size {} must equal attention hidden "
+        "size {}",
+        attn_norm.hidden_size(), hidden);
+  }
+  if (mlp_norm.hidden_size() != hidden) {
+    return core::InvalidArgumentError(
+        "DecoderLayer: mlp_norm hidden_size {} must equal attention hidden "
+        "size "
+        "{}",
+        mlp_norm.hidden_size(), hidden);
+  }
+  if (mlp.hidden_size() != hidden) {
+    return core::InvalidArgumentError(
+        "DecoderLayer: mlp hidden_size {} must equal attention hidden size {}",
+        mlp.hidden_size(), hidden);
+  }
+  return DecoderLayer(std::move(attn_norm), std::move(attn),
+                      std::move(mlp_norm), std::move(mlp), hidden);
+}
+
+core::Status DecoderLayer::forward(const tensor::Tensor& x,
+                                   std::span<const std::int32_t> positions,
+                                   int layer, kvcache::KvCache& cache,
+                                   tensor::Tensor& y) const {
+  // Validate `x`/`y` here so the message names the block's terms; the
+  // submodules re-validate their own inputs. `y` must not alias `x` — the final
+  // residual reads `x` after the attention branch has written into `y`'s
+  // lineage. The submodules front-load their validation, so the cache is not
+  // touched until Attention's checks pass (ADR-003).
+  if (!x.defined()) {
+    return core::InvalidArgumentError("DecoderLayer::forward: x is undefined");
+  }
+  if (x.shape().rank() != 2 || x.shape().dim(1) != hidden_size_) {
+    return core::InvalidArgumentError(
+        "DecoderLayer::forward: x must be [T, {}], got {}", hidden_size_,
+        x.shape());
+  }
+  if (x.dtype() != tensor::DataType::kFloat32) {
+    return core::InvalidArgumentError(
+        "DecoderLayer::forward: x must be f32, got {}",
+        tensor::to_string(x.dtype()));
+  }
+  if (!y.defined()) {
+    return core::InvalidArgumentError("DecoderLayer::forward: y is undefined");
+  }
+  if (y.shape().rank() != 2 || y.shape().dim(0) != x.shape().dim(0) ||
+      y.shape().dim(1) != hidden_size_) {
+    return core::InvalidArgumentError(
+        "DecoderLayer::forward: y must be caller-allocated [{}, {}], got {}",
+        x.shape().dim(0), hidden_size_, y.shape());
+  }
+
+  const std::int64_t t_dim = x.shape().dim(0);
+  const auto make = [&]() {
+    return tensor::ops::zeros(tensor::Shape{t_dim, hidden_size_},
+                              tensor::DataType::kFloat32);
+  };
+
+  // h = attn_norm(x); a = attn(h); r = x + a  (r reuses the norm buffer).
+  ASSIGN_OR_RETURN(tensor::Tensor normed, make());
+  RETURN_IF_ERROR(attn_norm_.forward(x, normed));
+  ASSIGN_OR_RETURN(tensor::Tensor attn_out, make());
+  RETURN_IF_ERROR(attn_.forward(normed, positions, layer, cache, attn_out));
+  ASSIGN_OR_RETURN(tensor::Tensor residual, make());
+  RETURN_IF_ERROR(cpu::add(x, attn_out, residual));
+
+  // h2 = mlp_norm(r); m = mlp(h2); y = r + m.
+  RETURN_IF_ERROR(mlp_norm_.forward(residual, normed));
+  RETURN_IF_ERROR(mlp_.forward(normed, attn_out));
+  return cpu::add(residual, attn_out, y);
+}
+
 }  // namespace engine::model

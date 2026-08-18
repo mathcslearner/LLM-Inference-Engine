@@ -808,7 +808,14 @@ class ActivationHook {
   is what M14-T02's calibration needs ("per-layer input activations," streaming
   running statistics, "never materializing all activations"). The hook is a
   callback invoked with a *view*, not a dump-everything API, so memory-bounded
-  accumulation is possible.
+  accumulation is possible. **These events are deferred to M14-T02, not built in
+  M5-T07** (2026-08-17): emitting them requires threading the hook through the
+  `Linear`/`Attention`/`Mlp` forwards (signature changes to the modules landed
+  in T02–T05), and T07's acceptance ("per-layer debug hook allows dumping
+  intermediate activations") is met by the four stage events above. M14-T02
+  adds an optional hook parameter to those forwards when it needs the
+  linear-input granularity; the `ActivationEvent`/`ActivationHook` shape here is
+  the seam it extends, unchanged.
 - **Zero cost when off.** `hook == nullptr` (the default) means the forward
   pass makes no hook calls at all — a branch the optimizer removes. M16-T03
   needs the per-layer form to be "compile-time-gated to zero cost when off";

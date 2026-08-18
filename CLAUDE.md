@@ -320,7 +320,25 @@ behind an existing subsystem):
   swapped from the `FakeKvCache` double to the real `SimpleKvCache`
   (`PreloadHeadMajor` seeds P>0 through `append`), so the prefill-continuation
   goldens now cover the cache end-to-end. +13 tests, −1 Fake self-check
-  (679 green).
+  (679 green). T07 Transformer block & full model forward: `src/model/`
+  `modules.{h,cpp}` gain `Mlp` (SwiGLU `down(silu(gate)⊙up)`, move-only, owns
+  gate/up/down `Linear`s) and `DecoderLayer` (pre-norm `h=attn_norm(x);
+  r=x+attn(h); y=r+mlp(mlp_norm(r))`, move-only, owns 2×`RmsNorm`+`Attention`+
+  `Mlp`); new `model/model.h` — the `Model::forward` contract
+  (`LogitsMode{kLast,kAll}`, `ForwardRequest`, abstract `Model` with
+  `forward`/`config`/`cache_geometry`) + the `ActivationHook`/`ActivationEvent`
+  debug seam; new `model/reference_model.{h,cpp}` — `ReferenceModel::Create`
+  binds modules from `LoadedModel.weights` by canonical name (honoring tied
+  embeddings as a binding, not a pointer-equality assumption) and `forward` runs
+  embedding → N layers → final norm → lm_head with front-loaded validation,
+  `kLast` (project only the last row) vs `kAll`, and per-stage hook emission.
+  End-to-end tiny-llama logits vs `activations.safetensors` max_abs_diff=3.7e-6
+  (tol 2e-4); the per-layer hook emits `embeddings`/`layers.{i}`/`final_norm`/
+  `logits`; the KV invariant now holds at full-model logits (bit-exact).
+  **`model → kvcache` promoted PRIVATE→PUBLIC** in CMake (`model.h` returns
+  `kvcache::CacheGeometry` by value — ADR-002 Amendment 5 clarified);
+  `linear_input:` hook events deferred to M14-T02 (design §11 updated). +15
+  tests (694 green).
 
-Next up: **M5-T07** (Transformer block & full model forward — `DecoderLayer` +
-`Model`, end-to-end logits vs HF).
+Next up: **M5-T08** (Architecture registry — `src/model/registry.h` mapping
+`architectures[0]` → builders; `BuildModel` wraps `ReferenceModel::Create`).

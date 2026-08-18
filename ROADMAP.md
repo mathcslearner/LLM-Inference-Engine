@@ -743,7 +743,7 @@ CPU tensors for now; device-agnostic API.
 > returning a zero-copy slice (`cpu::attention` needs contiguous K/V; this is
 > the M8 gather seam) — design §6.2 updated.
 
-### M5-T07 · Transformer block & full model forward (CPU)
+### M5-T07 · Transformer block & full model forward (CPU) — ✅ DONE (2026-08-17)
 Assemble `DecoderLayer` (attention + MLP + norms + residuals) and `Model` (embedding →
 N layers → final norm → lm_head, honoring tied embeddings). Prefill returns logits for
 the last position (and optionally all positions for testing).
@@ -751,6 +751,17 @@ the last position (and optionally all positions for testing).
 **Acceptance criteria:**
 - Golden test: end-to-end logits for the tiny-Llama fixture match HF within tolerance (report max abs diff; threshold documented in the test).
 - Per-layer debug hook allows dumping intermediate activations (used to localize future regressions).
+
+> **Note (2026-08-17):** landed `Mlp`/`DecoderLayer` (`model/modules.{h,cpp}`),
+> the `Model`/`ActivationHook`/`ForwardRequest` contract (`model/model.h`), and
+> `ReferenceModel` (`model/reference_model.{h,cpp}`). End-to-end tiny-llama
+> logits match `activations.safetensors` at max_abs_diff = 3.7e-6 (tol 2e-4);
+> the per-layer hook emits the fixture-named stages (`embeddings`/`layers.{i}`/
+> `final_norm`/`logits`) and the KV invariant now holds at full-model logits,
+> bit-exact. **`model → kvcache` became a PUBLIC CMake edge** because `model.h`
+> returns `kvcache::CacheGeometry` by value — ADR-002 Amendment 5 clarified.
+> `linear_input:` hook events are deferred to M14-T02 (they need the hook
+> threaded through `Linear`/`Attention`/`Mlp`); the four stage events land here.
 
 ### M5-T08 · Architecture registry
 `src/model/registry.h`: map `architectures[0]` strings (`LlamaForCausalLM`,

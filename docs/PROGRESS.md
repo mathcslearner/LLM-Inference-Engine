@@ -811,3 +811,54 @@ fixture past-blocks through the real `append`), so the prefill-continuation
 goldens now exercise the cache end-to-end; the `FakeKvCache` self-check test
 was dropped (superseded by `simple_cache_test.cpp`). 679 tests green; format +
 scoped tidy clean.
+
+M5-T07 done (2026-08-17: transformer block & full model forward). New
+`src/model/modules.{h,cpp}` gain `Mlp` (SwiGLU — `down(silu(gate(x)) ⊙ up(x))`,
+owns gate/up/down `Linear`s as `unique_ptr<Linear>`, move-only, `Create`
+validates gate/up `[I,E]` + down `[E,I]`) and `DecoderLayer` (pre-norm:
+`h=attn_norm(x); r=x+attn(h); y=r+mlp(mlp_norm(r))`, owns two `RmsNorm`s + one
+`Attention` + one `Mlp`, move-only, `Create` validates all four agree on E,
+threads `layer`/`cache` straight to `Attention`). New `src/model/model.h` — the
+`Model::forward` contract (§5.1): `LogitsMode{kLast,kAll}`, `ForwardRequest`
+(token_ids/positions/cache/logits_mode/hook), the abstract `Model`
+(`forward`/`config`/`cache_geometry`), and the `ActivationHook`/`ActivationEvent`
+seam (§11). New `src/model/reference_model.{h,cpp}` — `ReferenceModel::Create`
+binds every module's weights from `LoadedModel.weights` by canonical name
+(embedding, final norm, lm_head, and per-layer attn/mlp), consuming the map;
+`forward` runs embedding → N `DecoderLayer`s → final norm → lm_head with
+front-loaded validation, `kLast` (project only the last position, [1,V]) vs
+`kAll` ([T,V]), and per-stage hook emission. **Non-obvious decisions:** (1)
+**`model → kvcache` promoted from PRIVATE to PUBLIC** in CMake: `model.h`'s
+`cache_geometry()` returns `kvcache::CacheGeometry` *by value* and
+`ForwardRequest` holds a `kvcache::KvCache*`, so a consumer of model.h needs the
+kvcache headers — modules.h alone (which only forward-declares `KvCache`) would
+have kept it PRIVATE. ADR-002 Amendment 5's "no public model header re-exports
+kvcache types" note is relaxed with a one-line clarification (the `Model`
+contract is itself stated in terms of the cache). No cycle, no new edge — the
+same `model → kvcache` edge, now public. (2) **`linear_input:<name>` hook events
+deferred to M14-T02**: §11 lists them, but emitting them needs the hook threaded
+through `Linear`/`Attention`/`Mlp` forwards (signature changes to landed
+modules); T07's acceptance needs only the four fixture-named stage events
+(`embeddings`/`layers.{i}`/`final_norm`/`logits`), which land here.
+model-execution.md §11 updated to say so. (3) **`Rope` is copied per layer**
+(each `Attention` owns a `Rope` by value) rather than shared — keeps
+`Attention`'s signature untouched; noted as an M6 table-sharing item. (4)
+bias binding reads the weight map, not arch flags: `BuildLinear` attaches
+`.bias` only when `config.attention_bias` *and* the map carries the entry, so
+Qwen2's q/k/v-but-not-o bias pattern (M5-T10) is wiring, not new code. (5)
+the private ctor is wrapped via `make_unique(ReferenceModel(...))` (move), not
+raw `new`, to satisfy the leak analyzer. **Observed max-abs-diff** (fixture =
+HF's fp32 forward of the bf16 checkpoint, the same computation): end-to-end
+logits 3.7e-6; per-stage `layers.0` 5.0e-7, `layers.1` 4.7e-7, `final_norm`
+1.7e-5, `logits` 3.7e-6; `embeddings` bit-exact — all under the 2e-4 tolerance;
+kLast-vs-kAll-last-row and the KV invariant are bit-exact (atol=rtol=0). Tests
+(15): `model_test.cpp` — end-to-end logits (kAll), per-layer hook dump (event
+order/names/layers + each stage vs golden), null-hook zero-cost, stage-isolated
+DecoderLayer/final-norm/lm_head goldens, kLast==kAll-last-row, KV invariant at
+logits (token-by-token, chunked prefill, truncate-then-redecode), `Mlp`
+Create-validation + hand-checked SwiGLU numeric, `DecoderLayer`
+Create-validation, `ReferenceModel::Create` missing-weight → InvalidArgument
+(names it), geometry/config accessors, forward error paths (empty/size-mismatch/
+id-OOR/pos-OOR/null-cache/geometry-mismatch/over-capacity, cache-unchanged).
+Label `model`. `model → kvcache` CMake edge now PUBLIC. 694 tests green; format
++ scoped tidy clean (scoped over every `modules.h`/`model.h` includer).

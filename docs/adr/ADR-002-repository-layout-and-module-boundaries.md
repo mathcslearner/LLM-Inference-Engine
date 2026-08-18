@@ -235,9 +235,21 @@ New allowed edge: **`model → kvcache`** (both layer-2 domain modules; this is
 the layer table's first intra-layer edge in layer 2, which the table's
 "none today; any future edge requires amending this ADR" note anticipated). No
 cycle: `kvcache` is a sibling and never links `model` (it depends only on
-`tensor`/`memory`/`core`). The edge is PRIVATE in CMake and no public `model`
-header re-exports `kvcache` types beyond the `KvCache*` in the forward
-signature.
+`tensor`/`memory`/`core`).
+
+**CMake visibility (clarified 2026-08-17, M5-T07).** The edge was initially
+wired PRIVATE — through M5-T06 only the `Attention` module (`modules.h`) named
+the cache, and it merely forward-declares `KvCache` for a `KvCache&` parameter,
+so no public `model` header re-exported a `kvcache` type. M5-T07's `model.h`
+states the `Model` contract itself in terms of the cache: `cache_geometry()`
+returns `kvcache::CacheGeometry` **by value** and `ForwardRequest` holds a
+`kvcache::KvCache*`. A by-value return is not satisfiable by a forward
+declaration, so a consumer of `model.h` needs the `kvcache` headers, and the
+edge is therefore **PUBLIC** in CMake. This relaxes the original note ("no
+public `model` header re-exports `kvcache` types beyond the `KvCache*`"): the
+`Model` contract legitimately exposes `CacheGeometry` and `KvCache`, because the
+cache is part of that contract. Still the same single `model → kvcache` edge,
+still no cycle; only its CMake visibility changed.
 
 The alternative — placing `Model` in `engine` to keep `model` cache-free — was
 rejected: it contradicts the roadmap's `src/model/registry.h` placement and
