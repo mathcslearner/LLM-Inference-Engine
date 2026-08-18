@@ -338,7 +338,22 @@ behind an existing subsystem):
   **`model → kvcache` promoted PRIVATE→PUBLIC** in CMake (`model.h` returns
   `kvcache::CacheGeometry` by value — ADR-002 Amendment 5 clarified);
   `linear_input:` hook events deferred to M14-T02 (design §11 updated). +15
-  tests (694 green).
+  tests (694 green). T08 Architecture registry: `src/model/registry.{h,cpp}` —
+  `BuildModel(LoadedModel, BuildOptions)` dispatching on
+  `config.architecture_name`; `RegisterArchitecture(string_view, ModelBuilder)
+  → Status` (`AlreadyExists`/`InvalidArgument`); `SupportedArchitectures()`
+  (sorted); unknown arch → `Unimplemented` listing supported. One
+  `BuildReferenceFamily` builder serves both `LlamaForCausalLM` and
+  `Qwen2ForCausalLM` (family diff = `attention_bias`+config values, already
+  handled by `ReferenceModel::Create`) — **both registered in T08**, M5-T10
+  adds only the Qwen fixture. **`enum class Backend` relocated from the sketched
+  `engine/backend.h` into `registry.h`** (`BuildOptions` names it; `model` can't
+  depend on `engine`, ADR-002); `kOptimized` → `Unimplemented` until M6.
+  Built-ins register lazily inside a mutex-guarded `GetRegistry` function-local
+  static (a static-lib TU of self-registering globals would be linker-dropped).
+  `BuildModel` bit-identical to a direct `ReferenceModel::Create` (pass-through).
+  design §2/§8/§9/§13 updated. +7 tests (701 green).
 
-Next up: **M5-T08** (Architecture registry — `src/model/registry.h` mapping
-`architectures[0]` → builders; `BuildModel` wraps `ReferenceModel::Create`).
+Next up: **M5-T09** (Greedy generation loop — `src/engine/generator.h`: prefill +
+autoregressive decode with greedy argmax, EOS/max-new-tokens stopping,
+per-token callback; `engine/backend.h` re-exports `model::Backend`).

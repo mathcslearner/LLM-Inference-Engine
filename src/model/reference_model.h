@@ -17,8 +17,9 @@
 // the `cpu::` ops. Deliberately never optimized (cpu-backend.md §2.1): it is
 // the correctness oracle every M6 kernel validates against.
 //
-// M5-T08 adds the architecture registry (`registry.h`) and `BuildModel` around
-// this; `ReferenceModel::Create` is the family builder those wire up.
+// The architecture registry (`registry.h`, M5-T08) wraps this with `BuildModel`
+// and the HF-arch-string dispatch: `ReferenceModel::Create` is the reference
+// family builder registered for both `LlamaForCausalLM` and `Qwen2ForCausalLM`.
 
 namespace engine::model {
 

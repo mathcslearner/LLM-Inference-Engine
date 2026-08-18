@@ -85,11 +85,11 @@ Files this milestone creates:
 | `src/model/modules.h` / `.cpp` | model | `Linear` (interface) + `ReferenceLinear`, `RmsNorm`, `Embedding`, `Rope`, `Attention`, `Mlp`, `DecoderLayer` | T02–T07 |
 | `src/model/model.h` | model | abstract `Model`, `ForwardRequest`, `LogitsMode`, `ActivationHook` | T07 |
 | `src/model/reference_model.h` / `.cpp` | model | `ReferenceModel` (embedding → N `DecoderLayer` → final norm → lm_head) | T07 |
-| `src/model/registry.h` / `.cpp` | model | HF-architecture-string → builder map; `BuildModel` | T08 |
+| `src/model/registry.h` / `.cpp` | model | HF-architecture-string → builder map; `BuildModel`; `enum class Backend` (relocated here from `engine/backend.h`, §9) | T08 |
 | `src/kvcache/kv_cache.h` | kvcache | abstract `KvCache` interface (§6) + `CacheGeometry`, `KvView` | T05 |
 | `src/kvcache/simple_cache.h` / `.cpp` | kvcache | `SimpleKvCache` — per-sequence contiguous append-only storage | T06 |
 | `src/engine/generator.h` / `.cpp` | engine | `Generate(...)` greedy loop; per-token callback | T09 |
-| `src/engine/backend.h` | engine | `enum class Backend { kReference, kOptimized }`, selection helper (M6 fills the optimized arm) | T09 |
+| `src/engine/backend.h` | engine | re-export of `model::Backend` + a selection helper for the generation loop (the enum itself is defined in `model/registry.h`, §9; M6 fills the optimized arm) | T09 |
 
 ### 2.1 Layering: the edges M5 uses, and the one it adds
 
@@ -676,8 +676,8 @@ runs is a construction-time choice**, invisible to the generation loop and the
 tests above the interface.
 
 ```cpp
-// src/engine/backend.h
-enum class Backend { kReference, kOptimized };   // M5 implements kReference; M6 adds kOptimized
+// src/model/registry.h  (relocated from engine/backend.h; see §9)
+enum class Backend : std::uint8_t { kReference, kOptimized };  // M5: kReference; M6 adds kOptimized
 ```
 
 - **M5** ships `kReference` only: `ReferenceModel` + `ReferenceLinear` + `cpu::`
@@ -705,6 +705,8 @@ enum class Backend { kReference, kOptimized };   // M5 implements kReference; M6
 
 ```cpp
 // src/model/registry.h
+enum class Backend : std::uint8_t { kReference, kOptimized };  // see below
+
 struct BuildOptions {
   Backend backend = Backend::kReference;
 };
@@ -715,11 +717,25 @@ struct BuildOptions {
 
 // Registration (M5-T08): keyed by the HF architecture string. Adding an
 // architecture is one call — no switch to edit (the acceptance criterion).
+// Returns InvalidArgument (empty name) / AlreadyExists (duplicate) rather than
+// void: duplicate registration is a programming bug worth surfacing.
 using ModelBuilder = std::function<core::StatusOr<std::unique_ptr<Model>>(
     LoadedModel, const BuildOptions&)>;
-void RegisterArchitecture(std::string_view hf_arch_name, ModelBuilder builder);
+core::Status RegisterArchitecture(std::string_view hf_arch_name,
+                                  ModelBuilder builder);
+
+// The registered architecture strings, sorted (error message + tests).
+[[nodiscard]] std::vector<std::string> SupportedArchitectures();
 ```
 
+- **`Backend` lives here, not in `engine/backend.h`.** `BuildOptions` (a
+  `BuildModel` parameter, part of the model graph the roadmap fixes in
+  `src/model/registry.h`) names `Backend`, and `model` cannot depend on
+  `engine` (ADR-002: `engine → model`). So M5-T08 **defines `Backend` in
+  `registry.h`**; M5-T09's `engine/backend.h` re-exports it for the
+  generation-loop call sites. (§2's file table and §8 originally sketched the
+  enum in `engine/backend.h`; this ticket relocates the definition and the
+  table/§8 now point here. In M5 `kOptimized` → `Unimplemented`; M6 fills it in.)
 - **Keyed by `config.architecture_name`** (the raw HF string, e.g.
   `"LlamaForCausalLM"`, `"Qwen2ForCausalLM"`), which `ModelConfig` already
   carries. `Architecture` (the enum) selects config-parse behavior in M4;
@@ -729,10 +745,21 @@ void RegisterArchitecture(std::string_view hf_arch_name, ModelBuilder builder);
   registry test constructs a `LoadedModel` directly, bypassing the parser — so
   "adding an architecture requires only a registration call" is verifiable in a
   test-local arch, M5-T08's acceptance.)*
-- **Llama and Qwen2 share one family builder.** The only differences are
-  `attention_bias` (Qwen2 biases q/k/v) and config field values — both flow
-  through the same `DecoderLayer` construction. **M5-T10 registers Qwen2 with
-  the same builder**; the diff is config/wiring, not new layer code.
+- **Built-ins registered lazily, not via static initializers.** `engine_model`
+  is a static library, so a TU whose only content is a global self-registering
+  object would be dropped by the linker. The built-in Llama/Qwen2 entries are
+  therefore populated inside the registry accessor (`GetRegistry`, a
+  function-local static guarded by a mutex) on first use — never by a
+  file-scope constructor. `RegisterArchitecture` and `BuildModel` take the same
+  lock; `BuildModel` copies the resolved builder out under the lock and invokes
+  it unlocked.
+- **Llama and Qwen2 share one family builder, both registered in M5-T08.** The
+  only differences are `attention_bias` (Qwen2 biases q/k/v) and config field
+  values — both flow through the same `ReferenceModel::Create` /
+  `DecoderLayer` construction, so one builder (`BuildReferenceFamily`) serves
+  both and **both arch strings are registered now**. M5-T08's acceptance
+  ("registry resolves both families") needs this; **M5-T10 adds only the Qwen
+  fixture + goldens**, not a new registration or new layer code.
 - The builder validates the config↔registry consistency (head-dim, dtype) —
   M17-T04's "model-support matrix validated at startup" reads this as its
   entry point, though M5 only needs the arch-string check.
@@ -873,7 +900,7 @@ explicitly and records the observed max-abs-diff (CLAUDE.md rule).
 | T05 | `cpu::attention` op vs fixture `ctx` (all cases, tol 1e-4; observed ≤4e-7) + bit-exact-vs-serial (threading), causal-mask-hides-future, GQA-interleave-not-tiling, 7 op error paths; `Attention` module vs fixture `out` (**prefill from empty**, **prefill from non-empty cache** P>0, decode T==1; tol 2e-4, observed ≤2e-5) with the accumulated cache view vs `k_all`/`v_all` (wiring, looser 1e-3 band) + `Create`/`forward` error paths (incl. over-capacity cache → ResourceExhausted); GQA (Hkv<H) covered throughout |
 | T06 | **The KV invariant** (§6.2): token-by-token decode logits == full-prompt recompute at every step, within fp32 tolerance; `truncate`/`reset`/`view`/`length`/`capacity` unit behavior; over-capacity append → `ResourceExhausted` |
 | T07 | **End-to-end** logits for tiny-llama vs `expected/activations.safetensors` (report max-abs-diff; threshold documented); per-layer debug hook dumps the layer tensors; `kLast` vs `kAll` consistency (last row of `kAll` == `kLast`) |
-| T08 | Registry resolves `LlamaForCausalLM` and `Qwen2ForCausalLM`; unknown → `Unimplemented` listing supported; a test-local dummy arch registered by one call builds and runs (extensibility) |
+| T08 | Registry resolves `LlamaForCausalLM` and `Qwen2ForCausalLM`; unknown → `Unimplemented` listing supported; `BuildModel` is **bit-identical** to a direct `ReferenceModel::Create` (the builder is a pass-through, no new numerics); the Qwen2 string routes to the same family builder; a test-local dummy arch registered by one call builds and runs (extensibility); duplicate/empty registration and `kOptimized` are rejected |
 | T09 | Greedy continuation matches HF `generate(do_sample=False)` token-for-token ≥ 32 tokens on tiny-llama; determinism (two runs identical); EOS and max-new-tokens stopping; `on_token` fires once per generated id |
 | T10 | tiny-qwen2 golden logits + greedy generation pass, **reusing the M5 modules** (the diff under review must be config/registration, not new layer classes) |
 

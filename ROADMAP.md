@@ -763,13 +763,26 @@ the last position (and optionally all positions for testing).
 > `linear_input:` hook events are deferred to M14-T02 (they need the hook
 > threaded through `Linear`/`Attention`/`Mlp`); the four stage events land here.
 
-### M5-T08 · Architecture registry
+### M5-T08 · Architecture registry — ✅ DONE (2026-08-17)
 `src/model/registry.h`: map `architectures[0]` strings (`LlamaForCausalLM`,
 `Qwen2ForCausalLM`, …) to model builders; unsupported architectures produce a clean
 error listing supported ones. Builder wires `ModelConfig` + weights → `Model`.
 **Depends on:** M5-T07.
 **Acceptance criteria:**
 - Unit tests: registry resolves both families, rejects unknown; adding an architecture requires only a registration call (verified by a test-local dummy arch).
+
+> **Note (2026-08-17):** `src/model/registry.{h,cpp}` — `BuildModel(LoadedModel,
+> BuildOptions)` dispatching on `config.architecture_name`, `RegisterArchitecture`
+> (returns `Status`: `AlreadyExists`/`InvalidArgument`), `SupportedArchitectures()`.
+> One `BuildReferenceFamily` builder serves both Llama and Qwen2 (the diff is
+> `attention_bias` + config values, both already handled by
+> `ReferenceModel::Create`) and **both are registered in T08** — M5-T10 adds only
+> the Qwen fixture. **`enum class Backend` was relocated from the sketched
+> `engine/backend.h` into `registry.h`** because `BuildOptions` names it and
+> `model` cannot depend on `engine` (ADR-002); `kOptimized` → `Unimplemented`
+> until M6. Built-ins register lazily inside a mutex-guarded `GetRegistry`
+> function-local static (a static-lib TU of self-registering globals would be
+> dropped by the linker). +7 tests (701 green); design §2/§8/§9/§13 updated.
 
 ### M5-T09 · Greedy generation loop
 `src/engine/generator.h`: prefill + autoregressive decode loop with greedy argmax,

@@ -118,6 +118,15 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::model engine::kvcache engine::cpu
   LABELS model)
 
+# registry_test (M5-T08): the architecture registry & builder — both built-in
+# families resolve, unknown → Unimplemented, BuildModel is bit-identical to a
+# direct ReferenceModel::Create, and a test-local dummy arch is addable in one
+# RegisterArchitecture call. Pure portable C++ — no SCALAR_PASS.
+engine_add_tests(TREE unit SOURCES
+  registry_test.cpp
+  DEPS engine::model engine::kvcache engine::cpu
+  LABELS model)
+
 # tokenizer_test parses the committed real tokenizer.json fixtures (design
 # §7.1, §8); the `tokenizer` label lets `ctest -L tokenizer` iterate the
 # golden suite alone. Ordinary portable C++ — no SCALAR_PASS.

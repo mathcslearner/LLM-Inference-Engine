@@ -862,3 +862,47 @@ Create-validation, `ReferenceModel::Create` missing-weight → InvalidArgument
 id-OOR/pos-OOR/null-cache/geometry-mismatch/over-capacity, cache-unchanged).
 Label `model`. `model → kvcache` CMake edge now PUBLIC. 694 tests green; format
 + scoped tidy clean (scoped over every `modules.h`/`model.h` includer).
+
+M5-T08 done (2026-08-17: architecture registry). New
+`src/model/registry.{h,cpp}` — `BuildModel(LoadedModel, BuildOptions) →
+StatusOr<unique_ptr<Model>>` dispatching on `config.architecture_name` (the raw
+HF string); `RegisterArchitecture(string_view, ModelBuilder) → Status`;
+`SupportedArchitectures() → sorted vector<string>`. A single
+`BuildReferenceFamily` builder serves both `LlamaForCausalLM` and
+`Qwen2ForCausalLM` — the only family differences (`attention_bias`, config
+values) already flow through `ReferenceModel::Create`, so **both strings are
+registered in T08**; M5-T10 adds only the Qwen fixture, not a registration or
+new layer code. Unknown arch → `Unimplemented` listing the supported names (same
+wording shape as `ParseArchitecture`). **Non-obvious decisions:** (1) **`enum
+class Backend { kReference, kOptimized }` relocated from the sketched
+`engine/backend.h` into `registry.h`** — `BuildOptions` names it and `model`
+cannot depend on `engine` (ADR-002: `engine → model`); M5-T09's
+`engine/backend.h` will re-export it. `kOptimized` → `Unimplemented` until M6.
+design §2/§8/§9 updated to match. (2) **Built-ins register lazily, not via
+static initializers**: `engine_model` is a *static library*, so a TU whose only
+content is a file-scope self-registering object gets dropped by the linker
+(`--gc-sections`/archive-member selection). Instead a mutex-guarded
+`GetRegistry()` function-local static pre-populates Llama/Qwen2 on first use;
+`BuildModel` copies the resolved builder out under the lock and invokes it
+unlocked (so a builder can't deadlock on re-entrant registration). (3)
+`RegisterArchitecture` returns `Status` (not `void` as §9 sketched):
+`AlreadyExists` on a duplicate name, `InvalidArgument` on empty — duplicate
+registration is a real bug worth surfacing, and it's testable. Added
+`SupportedArchitectures()` for the error string + tests. (4) In the `.cpp` the
+builder is inserted via `try_emplace(key)` then `it->second = std::move(builder)`
+rather than `try_emplace(key, std::move(builder))` — clang-tidy's
+`performance-unnecessary-value-param` doesn't see the move through
+`try_emplace`'s forwarding template, so a direct move-assign both clears the
+false positive and reads clearer. Tests (7): `registry_test.cpp` — both families
+in `SupportedArchitectures` (+ sorted); unknown → `Unimplemented` naming the
+unknown *and* both supported; **`BuildModel` bit-identical to a direct
+`ReferenceModel::Create`** (atol=rtol=0 — the builder is a pure pass-through, no
+new numerics); the Qwen2 string routes to the same family builder (logits ==
+Llama-labelled build of the same checkpoint); `kOptimized` → `Unimplemented`; a
+test-local `DummyModel` + one `RegisterArchitecture` call is visible in
+`SupportedArchitectures` and buildable via `BuildModel` (the extensibility
+criterion); duplicate registration → `AlreadyExists`, empty name →
+`InvalidArgument`. Label `model`, no `SCALAR_PASS` (pure portable C++). Also
+refreshed the stale "M5-T08 adds…" comment in `reference_model.h` to present
+tense. 701 tests green; format + scoped tidy clean (registry.cpp,
+registry_test.cpp, and the `reference_model.h` includers).
