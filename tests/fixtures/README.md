@@ -51,8 +51,19 @@ models/
                                 #   prompts (min top-2 gap > 1e-2), EOS
                                 #   suppressed (docs/design/model-execution.md
                                 #   §10, §12)
-  tiny-qwen2/                   # M5-T10: tiny Qwen2ForCausalLM (QKV biases);
-                                #   same config/weights/expected/ shape
+  tiny-qwen2/                   # M5-T10: tiny Qwen2ForCausalLM mirror of
+    config.json                 #   tiny-llama, distinct on every Qwen axis:
+                                #   q/k/v biases (o_proj bias-free), head_dim=24
+                                #   (!= hidden/heads=16), tied embeddings,
+                                #   rope_theta=1e6, rms_norm_eps=1e-6, no BOS.
+                                #   attention_bias OMITTED (parser default wires it)
+    model.safetensors           #   bf16; lm_head.weight dropped (tied → loader
+                                #   alias); q/k/v biases filled with fixed noise
+    expected/
+      activations.safetensors   #   fp32 forward goldens (same keys as tiny-llama)
+      meta.json                 #   input ids, seed, generator versions
+      generate.json             #   M5-T10: greedy continuations (3 no-BOS
+                                #   prompts, min top-2 gap asserted > 1e-2)
   qwen2-weight-names.json       # real Qwen2 checkpoint name/shape inventory
                                 #   (no bytes) + the config fields the
                                 #   weight-map tests need
@@ -106,6 +117,7 @@ as-shipped tokenizer.json files. Generators assert the per-model ceiling.
 | Fixture | Source (pinned revision) | License |
 |---|---|---|
 | `models/tiny-llama/` | generated locally (`tools/gen_fixtures/`), random weights, seed in `expected/meta.json` | project license |
+| `models/tiny-qwen2/` | generated locally (`tools/gen_fixtures/`), random weights, seed in `expected/meta.json` | project license |
 | `models/qwen2-weight-names.json` | `Qwen/Qwen2-0.5B-Instruct` @ `c540970f9e29518b1d8f06ab8b24cba66ad77b6d` (safetensors header metadata + config fields only) | Apache-2.0 |
 | `tokenizers/qwen2/` | `Qwen/Qwen2-0.5B-Instruct` @ `c540970f9e29518b1d8f06ab8b24cba66ad77b6d` | Apache-2.0 (upstream `LICENSE` committed alongside) |
 | `tokenizers/llama3/` | `NousResearch/Meta-Llama-3-8B-Instruct` @ `53346005fb0ef11d3b6a83b12c895cca40156b6c` — ungated byte-exact mirror of the gated `meta-llama/Meta-Llama-3-8B-Instruct` | Llama 3 Community License; redistribution with notice permitted — the upstream `LICENSE` is committed alongside |

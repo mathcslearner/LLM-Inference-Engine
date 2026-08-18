@@ -814,12 +814,36 @@ callbacks (streaming later).
 > invariant), error paths, backend helpers, and 7 `eos_token_id` config tests.
 > design §10/§12 updated.
 
-### M5-T10 · Qwen-family support (CPU)
+### M5-T10 · Qwen-family support (CPU) — ✅ DONE (2026-08-18)
 Implement Qwen2/2.5 differences (QKV bias, its config fields) on the shared modules;
 add a tiny Qwen-style fixture.
 **Depends on:** M5-T09.
 **Acceptance criteria:**
 - Golden logits + greedy-generation tests pass for the Qwen fixture, reusing existing modules (diff should be config/wiring, not new layer code).
+
+> **Note (2026-08-18):** the ticket was **fixtures + tests, zero `src/` change** —
+> the M5 modules, config parser, weight map, `ReferenceModel::Create`, and registry
+> already carried every Qwen difference (per-arch `attention_bias` default, q/k/v
+> biases with a bias-free o_proj, a `head_dim` decoupled from `hidden_size/heads`,
+> tied embeddings), landed across M5-T02…T08 as the design promised. New
+> `tools/gen_fixtures/tiny_qwen2.py` (`tiny-qwen2`) emits a 2-layer
+> `Qwen2ForCausalLM` mirror of tiny-llama chosen to be distinct on every
+> Qwen-relevant axis: **`head_dim=24` ≠ 64/4=16** (exercises the decoupled path §3.1
+> that tiny-llama can't), **`attention_bias` omitted from config.json** (so the
+> parser's per-arch default is what wires the biases end-to-end), **tied
+> embeddings** (`lm_head.weight` dropped from the checkpoint — safetensors refuses
+> the shared storage — reconstituted via the loader alias), Qwen2 `rope_theta=1e6`/
+> `rms_norm_eps=1e-6`, no BOS. The q/k/v biases are filled with fixed non-zero noise
+> (HF `_init_weights` zeros them, which would make the bias path invisible in the
+> golden). New `tiny_qwen2_generate.py` (`tiny-qwen2-generate`) writes greedy
+> `generate.json` for three **well-separated** prompts (min top-2 logit gap now
+> **asserted** > 1e-2, a tightening over T09's diagnostic-only check; observed
+> ≥0.10), HF `generate` cross-checked vs a manual KV loop. New
+> `tests/unit/qwen2_family_test.cpp` (+8, → 729 green): config/loader wiring
+> assertions, registry routing + bit-identical-to-direct build, end-to-end logits
+> vs golden (max_abs_diff 3.9e-6, tol 2e-4), **biases load-bearing** (dropping them
+> moves logits by ~0.98), greedy match/determinism/KV-invariant. `regen_fixtures.sh
+> --verify` byte-clean; format + scoped tidy clean.
 
 ---
 

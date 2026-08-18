@@ -902,14 +902,19 @@ total). Planned additions under `tests/fixtures/models/`:
 | `tiny-llama/expected/rope.safetensors` | T04 | `tiny_table` cos/sin `[max_pos, d/2]`; `tiny_sparse`/`tiny_contig` apply I/O in token-major `[T, H, d]` at positions {0, 1, 127} and {0..7} (GQA H=4/Hkv=2); `llama3` scaled `inv_freq` + cos/sin from the committed Llama-3.1 config (§7); `linear` scaled `inv_freq` + cos/sin (synthetic factor 4). The end-to-end embedding golden is the existing `activations.safetensors` `embeddings`/`input_ids`. |
 | `tiny-llama/expected/attention.safetensors` | T05 | per case (layer, P, T): the module I/O (`x [T,E]`, `positions [T]`, `out [T,E]`) and the op intermediates (`q_rot [T,H,d]`, `k_all`/`v_all [Hkv,P+T,d]`, `ctx [T,H,d]`), plus `past_k`/`past_v [Hkv,P,d]` when P>0. Cases: `l{0,1}_prefill_empty` (P=0,T=8), `l{0,1}_prefill_continue` (P=5,T=6, HF-seeded past-key-values), `l0_decode` (P=7,T=1). GQA (Hkv=2 < H=4) is inherent; both layers appear (distinct weights). Intermediates captured from HF eager attention (a registered capture wrapper over `eager_attention_forward`). |
 | `tiny-llama/expected/generate.json` | T09 | greedy `generate(do_sample=False)` continuation (40 ids) for three fixed, **well-separated** prompts (min top-2 logit gap > 1e-2; §10); EOS suppressed; each cross-checked against a manual prefill+decode KV loop before commit |
-| `tiny-qwen2/` (new model fixture) | T10 | a tiny `Qwen2ForCausalLM` mirror of tiny-llama: **q/k/v biases**, its config fields, tied or untied embeddings, with the same `expected/` set (logits + greedy) — exercises the Qwen2 wiring on the shared modules |
+| `tiny-qwen2/` (new model fixture) | T10 ✅ | a tiny `Qwen2ForCausalLM` mirror of tiny-llama: **q/k/v biases** (o_proj bias-free), **`head_dim=24` decoupled** from `hidden/heads`, **tied embeddings** (`lm_head.weight` dropped), `rope_theta=1e6`, with the same `expected/` set (logits + greedy) — exercises the Qwen2 wiring on the shared modules |
 
 `tiny-qwen2` is deliberately small (same dims class as tiny-llama) and, to
-exercise the decoupled path, may set `head_dim ≠ hidden_size / num_heads` — a
-config the reference must handle (§3.1) and tiny-llama does not cover. The
-generator, budget assertion, and `meta.json` follow tiny-llama's pattern
-(`tools/gen_fixtures/tiny_llama.py`), and the fixtures README + model-loading.md
-§7.1 layout gain the new files when they land.
+exercise the decoupled path, **sets `head_dim = 24 ≠ hidden_size / num_heads`
+(= 16)** — a config the reference must handle (§3.1) and tiny-llama does not
+cover. The generator, budget assertion, and `meta.json` follow tiny-llama's
+pattern (`tools/gen_fixtures/tiny_qwen2.py`). **Landed T10 (2026-08-18):** the
+q/k/v biases are filled with fixed non-zero noise (HF `_init_weights` zeros
+Linear biases, which would make the bias path invisible in the golden);
+`attention_bias` is omitted from `config.json` so the parser's per-arch default
+is what wires the biases end-to-end; the greedy golden's min top-2 logit gap
+is **asserted** > 1e-2 in the generator (a tightening over T09). fixtures README
+and model-loading.md §7.1 carry the layout.
 
 *(model-loading.md §7.1 and `tests/fixtures/README.md` are updated with this
 ticket to point forward to these additions; the files themselves land with
@@ -937,7 +942,7 @@ explicitly and records the observed max-abs-diff (CLAUDE.md rule).
 | T07 | **End-to-end** logits for tiny-llama vs `expected/activations.safetensors` (report max-abs-diff; threshold documented); per-layer debug hook dumps the layer tensors; `kLast` vs `kAll` consistency (last row of `kAll` == `kLast`) |
 | T08 | Registry resolves `LlamaForCausalLM` and `Qwen2ForCausalLM`; unknown → `Unimplemented` listing supported; `BuildModel` is **bit-identical** to a direct `ReferenceModel::Create` (the builder is a pass-through, no new numerics); the Qwen2 string routes to the same family builder; a test-local dummy arch registered by one call builds and runs (extensibility); duplicate/empty registration and `kOptimized` are rejected |
 | T09 | Greedy continuation matches HF `generate(do_sample=False)` token-for-token ≥ 32 tokens on tiny-llama; determinism (two runs identical); EOS and max-new-tokens stopping; `on_token` fires once per generated id |
-| T10 | tiny-qwen2 golden logits + greedy generation pass, **reusing the M5 modules** (the diff under review must be config/registration, not new layer classes) |
+| T10 ✅ | tiny-qwen2 golden logits (max_abs_diff 3.9e-6, tol 2e-4) + greedy generation (match/determinism/KV-invariant) pass, **reusing the M5 modules** (the change was fixtures + tests + config wiring, **zero `src/` diff**); plus config/loader-wiring assertions and a **biases-are-load-bearing** check (dropping q/k/v biases moves logits ~0.98) — `tests/unit/qwen2_family_test.cpp` |
 
 Labels: an `engine`/`model`/`kvcache` label via `engine_add_tests(… LABELS)`,
 mirroring `model`/`tokenizer`, so `ctest -L engine` iterates the execution

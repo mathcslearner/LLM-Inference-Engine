@@ -140,6 +140,18 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::engine engine::model engine::kvcache nlohmann_json::nlohmann_json
   LABELS engine)
 
+# qwen2_family_test (M5-T10): the Qwen-family reference path on the shared M5
+# modules — the tiny-qwen2 fixture (q/k/v biases, head_dim decoupled from
+# hidden/heads, tied embeddings) validated against its HF golden: config/loader
+# wiring, registry routing, end-to-end logits, the biases being load-bearing, and
+# greedy generation (match/determinism/KV invariant). Builds through the registry
+# and generator (engine::engine), runs on the real SimpleKvCache, replays the
+# activations.safetensors + generate.json goldens. `model` label.
+engine_add_tests(TREE unit SOURCES
+  qwen2_family_test.cpp
+  DEPS engine::engine engine::model engine::kvcache nlohmann_json::nlohmann_json
+  LABELS model)
+
 # tokenizer_test parses the committed real tokenizer.json fixtures (design
 # §7.1, §8); the `tokenizer` label lets `ctest -L tokenizer` iterate the
 # golden suite alone. Ordinary portable C++ — no SCALAR_PASS.

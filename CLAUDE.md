@@ -230,7 +230,7 @@ behind an existing subsystem):
   added; model-loading.md staleness synced). 597 tests green. M4 is
   pushed and CI-green (the first x86-64 CI build surfaced a GCC-only
   `-Wshadow` break in three tokenizer tests, fixed in `fix gcc errors`).
-- **M5 (CPU reference engine) — in progress**: T01
+- **M5 (CPU reference engine) — complete** (2026-08-18): T01
   `docs/design/model-execution.md` — the model-execution contract
   M6/M8/M9/M11–M15 build on: module decomposition (`cpu` reference ops =
   the oracle, links `tensor`+`parallel`, never `kernels`; `model` graph
@@ -370,8 +370,26 @@ behind an existing subsystem):
   regions make greedy trajectories ill-conditioned — HF generate vs a manual KV
   loop diverge there; well-separated prompts make token-for-token robust), EOS
   suppressed, HF `generate` cross-checked vs manual loop. design §10/§12 updated.
-  +20 tests (721 green).
+  +20 tests (721 green). T10 Qwen-family support: **zero `src/` change** — the
+  config parser, weight map, `ReferenceModel::Create`, `Attention::Create`, and
+  registry already carried every Qwen difference (per-arch `attention_bias`
+  default, q/k/v biases with bias-free o_proj, `head_dim` decoupled from
+  `hidden_size/heads`, tied embeddings), so T10 is a model fixture + goldens +
+  tests. New `tools/gen_fixtures/tiny_qwen2.py` (`tiny-qwen2`): a 2-layer
+  `Qwen2ForCausalLM` distinct from tiny-llama on every Qwen axis — **`head_dim=24`
+  ≠ 64/4=16** (decoupled path §3.1), **`attention_bias` omitted from config.json**
+  (parser default wires the biases), **tied embeddings** (`lm_head.weight` dropped
+  — safetensors refuses shared storage — restored via loader alias), θ=1e6/eps=1e-6/
+  no BOS; q/k/v biases filled with fixed non-zero noise (HF zero-inits them, which
+  would make the bias path invisible in the golden). New `tiny_qwen2_generate.py`
+  (`tiny-qwen2-generate`) → `generate.json`, three no-BOS prompts, min top-2 gap
+  now **asserted** > 1e-2 (observed ≥0.10), HF `generate` vs manual KV loop
+  cross-checked. New `tests/unit/qwen2_family_test.cpp`: config/loader wiring,
+  registry routing + bit-identical build, end-to-end logits vs golden
+  (max_abs_diff 3.9e-6, tol 2e-4), **biases load-bearing** (dropping them moves
+  logits ~0.98), greedy match/determinism/KV-invariant. `--verify` byte-clean;
+  format + scoped tidy clean. +8 tests (729 green).
 
-Next up: **M5-T10** (Qwen-family support — Qwen2/2.5 QKV-bias wiring on the shared
-modules + a tiny `Qwen2ForCausalLM` fixture with golden logits & greedy
-generation; diff should be config/fixtures, not new layer code).
+Next up: **M6-T01** (design doc `docs/design/optimized-cpu-execution.md`: packed
+tile layout, dtype/threading/workspace policy, backend selection, kernel-validation
+methodology — the contract M6-T02+ optimized kernels build on).

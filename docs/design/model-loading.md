@@ -884,9 +884,13 @@ tests/fixtures/
         # M5 adds more op-level goldens alongside activations.safetensors —
         # generate.json — each landing with the ticket that consumes it
         # (model-execution.md §12).
-    tiny-qwen2/                   # M5-T10: a tiny Qwen2ForCausalLM mirror
-        …                         #   (QKV biases, its config fields); same
-                                  #   config/weights/expected/ shape as tiny-llama
+    tiny-qwen2/                   # M5-T10: a tiny Qwen2ForCausalLM mirror of
+      config.json                 #   tiny-llama — q/k/v biases (o_proj bias-free),
+      model.safetensors           #   head_dim=24 (decoupled, != hidden/heads),
+      expected/                   #   tied embeddings (lm_head dropped), theta 1e6.
+        activations.safetensors   #   attention_bias omitted → parser default.
+        meta.json                 #   No sharded copy (an M4 concern tiny-llama
+        generate.json             #   already covers); greedy goldens like T09.
     qwen2-weight-names.json       # name inventory only — weight-map tests
     configs/                      # real config.json files — M4-T03 goldens
       llama3/  { config.json, LICENSE }   # Llama-3.1 (rope_scaling presence)

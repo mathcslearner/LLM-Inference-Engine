@@ -1,0 +1,29 @@
+{
+  "description": "fp32 forward of tiny-qwen2 (bf16 weights cast to fp32) on input_ids; tensors: input_ids [1,seq] i32, embeddings/layers.{i}/final_norm [1,seq,hidden] f32, logits [1,seq,vocab] f32. Qwen2: q/k/v biases, head_dim=24 (decoupled), tied embeddings, rope_theta=1e6.",
+  "generator_versions": {
+    "safetensors": "0.8.0",
+    "tokenizers": "0.22.2",
+    "torch": "2.13.0",
+    "transformers": "5.14.1"
+  },
+  "input_ids": [
+    17,
+    402,
+    5,
+    233,
+    88,
+    300,
+    1,
+    461,
+    39,
+    128,
+    274,
+    6,
+    500,
+    42,
+    213,
+    90
+  ],
+  "regenerate": "tools/.venv/bin/python -m gen_fixtures tiny-qwen2",
+  "seed": 20260818
+}

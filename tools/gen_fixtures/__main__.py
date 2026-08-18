@@ -10,6 +10,8 @@ from . import (
     tiny_llama_generate,
     tiny_llama_ops,
     tiny_llama_rope,
+    tiny_qwen2,
+    tiny_qwen2_generate,
     tokenizer_vectors,
 )
 
@@ -26,6 +28,8 @@ def main() -> None:
     tiny_llama_rope.register(subparsers)
     tiny_llama_attention.register(subparsers)
     tiny_llama_generate.register(subparsers)
+    tiny_qwen2.register(subparsers)
+    tiny_qwen2_generate.register(subparsers)
     qwen2_names.register(subparsers)
     tokenizer_vectors.register(subparsers)
     model_configs.register(subparsers)

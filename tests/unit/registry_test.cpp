@@ -155,10 +155,11 @@ TEST(RegistryTest, LlamaBuildMatchesDirectReferenceModel) {
   EXPECT_EQ(r.max_abs_diff, 0.0);
 }
 
-// The Qwen2 arch string routes to the same family builder. tiny-llama has no
-// attention bias, so its weight set satisfies the (bias-free) binding; M5-T10
-// swaps in the real Qwen fixture. Here we only assert the string resolves and
-// builds — logits equal the Llama-labelled build of the same checkpoint.
+// The Qwen2 arch string routes to the same family builder. This uses tiny-llama
+// relabelled (bias-free binding) to isolate the *routing* decision; the real
+// Qwen fixture — biases, decoupled head_dim, tied lm_head, golden logits — is
+// exercised end-to-end in qwen2_family_test.cpp (M5-T10). Here we only assert
+// the string resolves and builds — logits equal the Llama-labelled build.
 TEST(RegistryTest, Qwen2ArchStringRoutesToFamilyBuilder) {
   LoadedModel loaded = LoadTiny();
   loaded.config.architecture_name = "Qwen2ForCausalLM";

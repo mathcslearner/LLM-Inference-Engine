@@ -961,3 +961,63 @@ the real Llama-3.1 and Qwen2 config goldens. Label `engine` (`ctest -L engine`);
 no `SCALAR_PASS` (portable C++, calls the interfaces not `kernels::`). Format +
 scoped tidy clean (generator.{cpp} + test, config.{cpp} + test, and the
 `model/config.h` direct-includer TUs).
+
+M5-T10 done (2026-08-18: Qwen-family support). **Zero `src/` change** — the
+milestone's promise was that Qwen support would be config/wiring, and it held: the
+config parser (`Qwen2ForCausalLM` → `kQwen2`, `attention_bias` per-arch default,
+explicit `head_dim`), weight map (q/k/v `.bias` rows, o_proj bias-free, tied
+`lm_head`→`embed_tokens` alias), `ReferenceModel::Create` (per-projection
+`BuildLinear(has_bias=config.attention_bias)`), `Attention::Create` (validates
+`H·d` without assuming `E==H·d`), and the registry (`Qwen2ForCausalLM` routed to
+the shared `BuildReferenceFamily`) had all landed across M5-T02…T08. So T10 is
+**a new model fixture, its greedy-generation golden, and one end-to-end test
+suite**. New `tools/gen_fixtures/tiny_qwen2.py` (subcommand `tiny-qwen2`): a
+random-weight 2-layer `Qwen2ForCausalLM` under the pinned toolchain
+(transformers 5.14.1 / torch 2.13.0), deliberately distinct from tiny-llama on
+every Qwen-relevant axis so the test can't pass vacuously — **`head_dim=24` ≠
+`hidden_size/num_heads` (64/4=16)** so q_proj is `[96,64]`, kv `[48,64]`, o
+`[64,96]` (the decoupled path design §3.1 flags but tiny-llama never covers);
+**`attention_bias` omitted from config.json** so the parser's per-arch default is
+what supplies the biases end-to-end; **tied embeddings** — `tie_word_embeddings:
+true`, and because safetensors refuses to serialize the shared `lm_head`/`embed`
+storage, the checkpoint **omits `lm_head.weight`** exactly like a real Qwen2-0.5B
+export and the loader's tied-alias path reconstitutes it; Qwen2 defaults
+`rope_theta=1e6`, `rms_norm_eps=1e-6`, no BOS, single-int `eos_token_id`. **The
+non-obvious fixture decision:** HF `_init_weights` **zero-inits every Linear
+bias**, so a freshly built Qwen2 has all-zero q/k/v biases — which would make the
+bias path invisible (dropping the biases wouldn't move a logit, and the golden
+wouldn't actually test bias addition). `_build_model` fills the q/k/v biases with
+fixed small-magnitude noise (`randn * 0.5`, a dedicated seeded generator so it's
+independent of the model-init RNG) so the golden genuinely exercises bias add and
+the load-bearing test is meaningful; no sharded copy (an M4 concern tiny-llama
+covers). New `tiny_qwen2_generate.py` (`tiny-qwen2-generate`) writes
+`expected/generate.json`: three prompts (no BOS) 40-token greedy continuations,
+HF `generate(do_sample=False)` cross-checked against a manual `DynamicCache`
+prefill+decode loop (lowest-index argmax) before writing, EOS suppressed. Prompts
+were chosen (offline search over random candidates) for a **well-separated**
+trajectory — and unlike T09, the minimum top-2 logit gap (>1e-2, four orders above
+the ~4e-6 reference error) is now **asserted** in the generator, not merely
+printed; the committed prompts observe ≥0.10. Both subcommands registered in
+`__main__.py` and `regen_fixtures.sh`; `--verify` confirms every committed fixture
+(the new tiny-qwen2 tree included) regenerates byte-identically. New
+`tests/unit/qwen2_family_test.cpp` (+8 tests → **729 green**, label `model`):
+(1) config carries the Qwen2 defaults (arch `kQwen2`, `attention_bias` true by
+default, `head_dim==24≠16`, tied, θ=1e6, eps=1e-6, `eos_token_ids=={3}`);
+(2) loader binds q/k/v biases with a bias-free o_proj and aliases the tied lm_head
+onto the embed handle (same `.data()`); (3) the registry builds `Qwen2ForCausalLM`
+with `cache_geometry().head_dim==24` and is **bit-identical** to a direct
+`ReferenceModel::Create`; (4) **end-to-end logits vs the golden** (max_abs_diff
+**3.9e-6**, tol 2e-4); (5) **biases are load-bearing** — rebuilding with
+`attention_bias=false` moves the logits ~0.98 out of tolerance, proving the bias
+path is exercised and not silently skipped; (6) greedy continuation matches
+`generate.json` token-for-token (40 ids, ≥32 asserted), (7) is deterministic
+across two runs, and (8) the KV invariant holds on the Qwen path (a split
+prefill/continue equals a single full run). Caught in review-of-own-work: the
+golden-case loader first hit the **C++20 dangling-temporary range-for** bug
+(iterating `GenerateGoldenRoot().at("cases")` over a destroyed temporary — the
+same footgun CLAUDE.md records being fixed in the tokenizer tests) → fixed by
+binding the root to a local. `registry_test.cpp`'s synthetic
+`Qwen2ArchStringRoutesToFamilyBuilder` (tiny-llama relabelled, bias forced off)
+kept as the isolated routing check, its stale "M5-T10 swaps in the real Qwen
+fixture" comment pointed at the new suite. Format + scoped tidy clean
+(`qwen2_family_test.cpp`, `registry_test.cpp`).
