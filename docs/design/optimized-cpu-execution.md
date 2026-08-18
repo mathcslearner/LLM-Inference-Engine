@@ -283,6 +283,26 @@ sit in L1d on the smaller (x86) target; `kNc`/`kMc` sized to L2. These are
 starting points with a stated budget, not tuned numbers (that is M12-T02, with a
 sweep).
 
+> **M6-T02 implementation note (amends this section).** As built
+> (`src/kernels/gemm.{h,cpp}`, `{scalar,neon,avx2}/gemm.cpp`): the ISA variant
+> is a **tile function** — it computes one output tile *rows `[m0,m1)` × panels
+> `[p0,p1)` over all K* and is the single-threaded chunk body; the tile grid and
+> dtype dispatch live in `gemm.cpp`. Within a tile the micro-kernel holds the
+> **full-K accumulation in `MR × NR` registers** (`MR = 4` NEON `kMr`, `6` AVX2
+> `kMr`; `NR = kNr = 16`) and stores once — it does **not** re-enter `y` per
+> `k`-block. This is the same ascending-`k` single-accumulator order the section
+> requires (so still bit-identical across thread counts and tile shapes, §10),
+> just realized register-resident rather than via a `kKc`-reload from `y`; the
+> reload form the paragraph sketched is one valid alternative, and an explicit
+> `kKc` loop stays available to M12-T02's sweep. Blocking is therefore only
+> **`kMc = 64` rows × `kNc = 8` panels** per parallel tile (grain
+> `kGemmTileGrain = 1`), sized so a panel-block's weights stay hot across the
+> m-blocks that reuse them; K is streamed once per tile. GEMV (decode) is
+> `PackedGemm` routing `M == 1` to `PackedGemv`, which threads panel chunks
+> (`kGemvPanelGrain = 8`) with the same tile variant at `m1 = 1` — one packed
+> layout, a code path, not a second layout (§3.4). Measured 8.76× the naive
+> `cpu::gemm` at 4096³ bf16 (BASELINES.md), clearing the ≥5× target.
+
 ### 3.5 Bias
 
 Bias `[N]` is converted to **fp32 once at pack time** (stored alongside `Wp` as a
@@ -710,7 +730,13 @@ the merge gate is cross-*thread* bit-identity + cross-ISA tolerance, cpu-backend
   (advisory), in BASELINES.md; a sanity comparison vs Accelerate/BLAS on the same
   shape recorded for context (not a target). Any BLAS comparison lives in
   `benchmarks/` behind an optional CMake `find_package` — **never linked into
-  `src/`** (ADR-002; the engine ships no BLAS dependency).
+  `src/`** (ADR-002; the engine ships no BLAS dependency). *Landed 2026-08-18 at
+  8.76× (bf16) / 8.48× (f32) on the M2, ~112 GFLOP/s (BASELINES.md). The BLAS
+  context number could not be captured on the dev machine: Homebrew LLVM 20 (the
+  pinned toolchain) rejects the CommandLineTools SDK's Accelerate headers with
+  `-Welaborated-enum-base` (the broken-CLT situation); the `-DENGINE_BENCH_BLAS`
+  wiring is in place for a capable host and the number is context-only, so it is
+  deferred rather than blocking.*
 - M6-T04: prefill attention time vs the reference at 2k context, in BASELINES.md.
 - M6-T08: `bench_generate` prefill tok/s and decode tok/s on the 1B model, ±5%
   run-to-run, with a hardware + thread-count fingerprint, and a same-model

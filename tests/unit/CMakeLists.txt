@@ -63,6 +63,17 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::model engine::cpu
   LABELS model)
 
+# packed_linear_test (M6-T02): the optimized PackedLinear vs ReferenceLinear
+# (the cpu::gemm oracle) through the shared Linear interface, on random and real
+# checkpoint weights. The dispatched PackedGemm runs inside, so this `model`
+# suite opts into SCALAR_PASS — the first model-labelled suite covered by the
+# forced-scalar pass (design §9).
+engine_add_tests(TREE unit SOURCES
+  packed_linear_test.cpp
+  DEPS engine::model engine::cpu
+  LABELS model
+  SCALAR_PASS)
+
 # rmsnorm_test / activation_test (M5-T03): cpu::rmsnorm/softmax/silu_mul/add
 # goldens + the RmsNorm module. Both read the ops.safetensors golden via
 # engine::model's SafetensorsFile; rmsnorm_test additionally uses the loader for
@@ -191,6 +202,18 @@ engine_add_tests(TREE unit SOURCES
   reduce_test.cpp
   convert_test.cpp
   DEPS engine::kernels
+  LABELS kernels
+  SCALAR_PASS)
+
+# packed_gemm_test (M6-T02): the packed-weight GEMM/GEMV kernels vs the
+# cpu::gemm oracle across model shapes/dtypes, the pack layout, tiling/threading
+# bit-identity vs the un-tiled variant, GEMV==GEMM, and the ops.safetensors
+# goldens. Reads the golden via engine::model's SafetensorsFile and calls both
+# engine::kernels and engine::cpu, so it depends on both; SCALAR_PASS runs it
+# under forced-scalar too (design §9). `kernels` label.
+engine_add_tests(TREE unit SOURCES
+  packed_gemm_test.cpp
+  DEPS engine::kernels engine::cpu engine::model
   LABELS kernels
   SCALAR_PASS)
 

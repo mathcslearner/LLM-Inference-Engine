@@ -18,10 +18,12 @@ add_library(engine_kernels STATIC
   elementwise.cpp
   reduce.cpp
   convert.cpp
+  gemm.cpp
   scalar/probe.cpp
   scalar/elementwise.cpp
   scalar/reduce.cpp
-  scalar/convert.cpp)
+  scalar/convert.cpp
+  scalar/gemm.cpp)
 add_library(engine::kernels ALIAS engine_kernels)
 
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" engine_processor)
@@ -31,14 +33,16 @@ if(engine_processor MATCHES "^(arm64|aarch64)$")
     neon/probe.cpp
     neon/elementwise.cpp
     neon/reduce.cpp
-    neon/convert.cpp)
+    neon/convert.cpp
+    neon/gemm.cpp)
 elseif(engine_processor MATCHES "^(x86_64|amd64)$")
   target_compile_definitions(engine_kernels PUBLIC ENGINE_ARCH_X86_64)
   set(engine_kernels_avx2_sources
     avx2/probe.cpp
     avx2/elementwise.cpp
     avx2/reduce.cpp
-    avx2/convert.cpp)
+    avx2/convert.cpp
+    avx2/gemm.cpp)
   target_sources(engine_kernels PRIVATE ${engine_kernels_avx2_sources})
   set_source_files_properties(${engine_kernels_avx2_sources}
     PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")

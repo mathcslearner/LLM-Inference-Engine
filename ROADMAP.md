@@ -873,7 +873,7 @@ stated per kernel since fp32-accumulation order differs).
 **Acceptance criteria:**
 - Doc specifies the packed tile layout with a worked example, the workspace sizing formula, and where bitwise-vs-tolerance equality is expected and why.
 
-### M6-T02 · Packed-weight GEMM & GEMV
+### M6-T02 · Packed-weight GEMM & GEMV — ✅ DONE (2026-08-18)
 `src/kernels/`: cache-blocked, register-tiled, `parallel_for`-threaded GEMM
 (activations fp32 × packed fp16/bf16 weights, fp32 accumulate) and a decode-shaped
 GEMV path (batch of single rows). Load-time weight repacking into the documented

@@ -42,3 +42,38 @@ reductions' 6.7–8× and the fp16 conversions' 2.9–4.1× are the cases where
 the fixed accumulation convention and the hardware conversion unit
 respectively beat what the auto-vectorizer may do. Revisit-with-numbers
 belongs to M12 (kernel tuning).
+
+## M6-T02 — packed-weight GEMM (2026-08-18)
+
+**Host:** Apple M2 (8 physical cores), macOS, dev machine.
+**Toolchain:** Homebrew clang 20, `-O3` Release.
+**Command:** `build/benchmarks/gemm_bench 4096 4096 4096 3` (best of 3, all
+paths threaded through the default pool).
+
+| Path | time | GFLOP/s | speedup vs naive |
+|---|---:|---:|---:|
+| `cpu::gemm` naive bf16 (M5 baseline) | 10.704 s | 12.84 | 1.00× |
+| `cpu::gemm` naive f32 (M5 baseline) | 10.422 s | 13.19 | 1.03× |
+| **`PackedGemm` bf16** | **1.221 s** | **112.52** | **8.76×** |
+| **`PackedGemm` f32** | 1.229 s | 111.81 | 8.48× |
+
+The M6-T02 acceptance target — packed GEMM ≥ 5× the M5 naive `cpu::gemm` at
+4096×4096×4096 (advisory) — is met with margin (8.76× bf16). The win is
+register tiling: the naive kernel re-streams the whole weight matrix once per
+output row (`M` passes over `B`), while the `MR×NR` micro-kernel reuses each
+widened weight vector across `MR` activation rows and each `A` slab across a
+panel-block, cutting weight-memory traffic by roughly `M/MR` and keeping the
+FMA units fed. bf16 and f32 land within noise of each other — both are FMA
+throughput bound at this size, not weight-bandwidth bound, once packed.
+
+**BLAS sanity number (Accelerate) — not captured on this machine.** The
+optional `-DENGINE_BENCH_BLAS=ON` context comparison could not be built on the
+dev machine: Homebrew LLVM 20 (the pinned toolchain, CLAUDE.md) rejects the
+CommandLineTools SDK's Accelerate headers with `-Welaborated-enum-base` hard
+errors (the same broken-CLT situation that blocks Apple-clang C++ here). The
+CMake wiring (`ENGINE_BENCH_BLAS`, benchmark-only, never linked into `src/`)
+is in place for a capable environment (a working Accelerate SDK, or a Linux
+`find_package(BLAS)` host); the number is for context only and parity is an
+M12 goal, not M6-T02's — so it is deferred rather than blocking. Methodology:
+`cblas_sgemm(RowMajor, NoTrans, Trans, …)` computing `A·Wᵀ` on the same f32
+inputs, best of 3.

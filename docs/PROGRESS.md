@@ -1090,3 +1090,70 @@ model-execution.md §4.3/§5.2/§8/§14 and cpu-backend.md §3.2/§6.3/§7 all p
 here with dated notes (never a silent divergence). ROADMAP M6-T01 ticked; CLAUDE.md
 status + "Next up: M6-T02" refreshed. No `src/` change, no test-count change
 (729 green); no build/tidy impact (docs-only).
+
+M6-T02 done (2026-08-18: packed-weight GEMM & GEMV + `PackedLinear`). The first
+optimized compute kernels, validated against the `cpu::gemm` oracle. What landed:
+
+- **Packed layout & pack routine** (`src/kernels/gemm.{h,cpp}`): `kNr = 16`
+  (fixed across ISAs), `PackedPanels`/`PackedWeightElements`, and
+  `PackWeightPanels` — a pure gather + `+0.0` zero-pad of the checkpoint weight
+  `W[N,K]` into K-major panels `Wp[P=ceil(N/16), K, 16]`, dtype-preserving
+  (bf16/f16 via a `std::uint16_t` overload, f32 via a `float` overload),
+  threaded over panels (result thread-independent). Verified layout-exact
+  (`Wp[p,k,r] == W[p·16+r,k]`, pad = 0) in tests.
+- **Micro-kernels** (`{scalar,neon,avx2}/gemm.cpp` behind the M3-T05 dispatch,
+  `internal/gemm_impl.h` decls + `detail::*TileVariant` test seams,
+  `internal/gemm_common.h` shared `StorePanelBlock` for bias + pad-column
+  masking): the ISA seam is a **tile** — rows `[m0,m1)` × panels `[p0,p1)`, all
+  K, single-threaded chunk body. Register-tiled `MR×NR` fp32 accumulators
+  (`MR = 4` NEON via `vfmaq_n_f32` + `vshll`/`vcvt_f32_f16` widen; `MR = 6`
+  AVX2 via `_mm256_fmadd_ps` + F16C/`cvtepu16`+shift widen), full-K held in
+  registers (no `y` reload — simpler than the doc's sketched `kKc` reload, same
+  ascending-`k` single accumulator; **design §3.4 amended in place**). Scalar is
+  bit-identical to a naive triple loop (same accumulator, order, `half.h`
+  widen); NEON/AVX2 are Class T (FMA contraction).
+- **Dispatch & threading** (`gemm.cpp`): three per-dtype `KernelTable`s, a
+  `TileRunner` closing over `wp`'s dtype so the loops are written once.
+  `PackedGemm` tiles the `(m-block=kMc=64, panel-block=kNc=8)` grid across
+  threads (grain 1); routes `M == 1` to `PackedGemv`, which threads panel chunks
+  (`kGemvPanelGrain = 8`). One layout serves prefill/skinny/decode. Raw-pointer
+  entries CHECK preconditions; recoverable validation is `PackedLinear`'s job so
+  the parallel region does only arithmetic.
+- **`PackedLinear`** (`src/model/packed_linear.{h,cpp}`, a third `Linear`
+  alongside `ReferenceLinear`/future `QuantizedLinear`): `Create` validates
+  weight/bias exactly as `ReferenceLinear` (same messages), repacks the weight,
+  converts bias → fp32 once (§3.5), and **drops the checkpoint handle** (packed
+  copy authoritative). `forward` front-loads all shape/dtype/contiguity checks
+  then calls `PackedGemm`. Header stays kernels-free (`packed_weight()` exposes
+  only a `tensor::Tensor`), so the **`model → kernels` edge is PRIVATE** (a
+  downward layer-2→layer-1 edge, no ADR amendment — design §2.1). CMake:
+  `engine::kernels` PRIVATE on `engine_model`.
+- **Tests** (`+30`, → 759 green). `packed_gemm_test` (kernels label, SCALAR_PASS):
+  pack layout; PackedGemm/GEMV vs `cpu::gemm` across 12 model/1B shapes ×
+  {f32,f16,bf16} × {bias,no-bias} within `atol = 1e-5·√K, rtol = 1e-4` (scalar
+  exact); tiling/threading bit-identity vs the un-tiled variant (rtol=atol=0);
+  GEMV row == GEMM row (decode==prefill); the vector-slot vacuity guard; the 10
+  `ops.safetensors` goldens replayed. `packed_linear_test` (**model label,
+  SCALAR_PASS — first model suite in the forced-scalar pass**): Create/features/
+  packed shape, malformed-input rejection, forward vs `ReferenceLinear` across
+  dtypes/shapes/bias + real tiny-llama bf16 checkpoint, decode shape, bad
+  activation rejection.
+- **Benchmark** (`benchmarks/kernels/gemm_bench.cpp`, `gemm_bench` target;
+  optional `-DENGINE_BENCH_BLAS`, benchmark-only, never in `src/`): at 4096³ on
+  the M2, **8.76× bf16 / 8.48× f32** the naive `cpu::gemm`, ~112 GFLOP/s —
+  clears the ≥5× advisory (BASELINES.md). The Accelerate context number could
+  not be built on the dev machine (Homebrew LLVM 20 vs the CommandLineTools SDK
+  Accelerate headers → `-Welaborated-enum-base`, the broken-CLT situation); the
+  BLAS wiring is in place for a capable host and the number is context-only, so
+  it is deferred, not blocking (recorded in BASELINES.md + design §10).
+
+Non-obvious decisions: (1) the variant boundary is a whole tile, not a leaf
+micro-op — keeps the register-tiled k-loop and MR-blocking per-ISA while the
+tile grid, dtype dispatch, and pad-masked store are written once. (2) Bit-identity
+across thread counts is tested as `PackedGemm == un-tiled variant` (the single
+process can't vary `DefaultPool` size), the same technique `cpu::gemm`'s
+tiling-invariance test uses. (3) `PackedLinear::Create` takes the weight by
+`const&` (it repacks, never retains — the honest signature for a non-retaining
+builder, unlike `ReferenceLinear` which moves-to-store). `regen_fixtures.sh` not
+run (no fixture change). Format clean; scoped tidy clean on the six new/edited
+TUs (AVX2 reviewed by hand — not in the arm64 compile DB).

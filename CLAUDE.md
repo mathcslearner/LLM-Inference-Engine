@@ -414,9 +414,29 @@ behind an existing subsystem):
   a determinism-safe worker-index `parallel_for` overload lands with M6-T04;
   optimized suites register `SCALAR_PASS`. Cross-doc notes added to
   model-execution.md (§4.3/§5.2/§8/§14) and cpu-backend.md (§3.2/§6.3/§7). No
-  `src/` change (729 green unchanged).
+  `src/` change (729 green unchanged). T02 packed-weight GEMM & GEMV +
+  `PackedLinear`: `src/kernels/gemm.{h,cpp}` — `kNr=16` (fixed across ISAs),
+  `PackWeightPanels` (pure gather+zero-pad of `W[N,K]` → K-major panels
+  `[ceil(N/16),K,16]`, dtype-preserving), and `PackedGemm`/`PackedGemv` behind a
+  tile-shaped ISA seam (`{scalar,neon,avx2}/gemm.cpp`, `internal/gemm_impl.h` +
+  `gemm_common.h`): register-tiled `MR×NR` (`MR=4` NEON, `6` AVX2, full-K in
+  registers — design §3.4 amended), scalar bit-identical to a naive loop,
+  NEON/AVX2 Class T; `PackedGemm` threads the `(kMc=64, kNc=8)` tile grid and
+  routes `M==1` to panel-threaded `PackedGemv`. `src/model/packed_linear.{h,cpp}`
+  — `PackedLinear` (third `Linear`): repacks at `Create`, bias→fp32 once, drops
+  the checkpoint handle, `forward`=`PackedGemm`; header kernels-free so
+  **`model → kernels` links PRIVATE** (downward edge, no ADR amendment). Tests
+  (+30, → 759 green): `packed_gemm_test` (kernels, SCALAR_PASS) vs the
+  `cpu::gemm` oracle across shapes/dtypes + layout/threading/GEMV-vs-GEMM
+  invariants + `ops.safetensors` goldens; `packed_linear_test` (**model,
+  SCALAR_PASS — first model suite in the forced-scalar pass**) vs
+  `ReferenceLinear`. Bench: **8.76× bf16 / 8.48× f32** the naive `cpu::gemm` at
+  4096³ (~112 GFLOP/s on the M2), ≥5× target met (BASELINES.md); the optional
+  Accelerate context number couldn't build on the dev machine (Homebrew-clang vs
+  CLT SDK, `-Welaborated-enum-base`) so it's deferred, wiring in place behind
+  `-DENGINE_BENCH_BLAS`. Format + scoped tidy clean.
 
-Next up: **M6-T02** (packed-weight GEMM & GEMV: cache-blocked, register-tiled,
-`parallel_for`-threaded GEMM + decode GEMV over the `optimized-cpu-execution.md`
-§3 packed tile; load-time repacking; tests vs the M5 reference across shapes on
-all ISAs + forced-scalar; ≥5× the naive GEMM at 4096³ recorded in BASELINES.md).
+Next up: **M6-T03** (vectorized norm, activation & RoPE kernels: NEON/AVX2
+RMSNorm, SiLU-and-mul, residual add, numerically-stable softmax, RoPE apply —
+all behind the M3-T05 dispatch, tested vs the M5 scalar reference per kernel with
+documented tolerances; the vector `expf` polynomial gets its own ≤2-ulp sweep).
