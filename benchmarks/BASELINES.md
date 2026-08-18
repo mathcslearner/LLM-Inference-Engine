@@ -77,3 +77,49 @@ is in place for a capable environment (a working Accelerate SDK, or a Linux
 M12 goal, not M6-T02's — so it is deferred rather than blocking. Methodology:
 `cblas_sgemm(RowMajor, NoTrans, Trans, …)` computing `A·Wᵀ` on the same f32
 inputs, best of 3.
+
+## M6-T03 — norm/activation/softmax/RoPE kernels (2026-08-18)
+
+**Host:** Apple M2 (8 physical cores), macOS, dev machine.
+**Toolchain:** Homebrew clang 20, `-O3` Release.
+**Command:** `build/benchmarks/kernels_bench` (default `n = 2^20`, best of 20).
+Each row is the single-threaded per-ISA *chunk body* (scalar vs the selected
+vector variant, NEON here) — an apples-to-apples ISA comparison with no thread
+noise, exactly like the M3-T06 rows. The shaped kernels reshape the flat buffer
+to a model-like hidden size (RMSNorm/Softmax over `[256, 4096]`; RoPE over
+`[1024, 8, 128]`); ns/elem is over the total element count.
+
+| Kernel | scalar ns/elem | NEON ns/elem | speedup |
+|---|---:|---:|---:|
+| ExpF32 (poly) | 0.459 | 0.428 | 1.07× |
+| SiluMulF32 | 0.587 | 0.562 | 1.05× |
+| RmsNormF32 | 0.962 | 0.457 | **2.10×** |
+| SoftmaxF32 | 2.161 | 0.701 | **3.08×** |
+| RopeApplyF32 | 0.096 | 0.137 | 0.70× |
+
+M6-T03 has no perf target (the design's only hard GEMM target is M6-T02's 5×);
+these numbers exist because the kernels are performance-motivated and CLAUDE.md
+forbids a perf claim without a delta. Reading them:
+
+- **RMSNorm 2.1× / Softmax 3.1×** are the real wins — both reduce over a row and
+  then re-scan it, and the vector max/sum reductions plus vectorized scale/exp
+  beat the scalar per-element path clearly. Softmax gains most (its body is two
+  reductions plus a vector-exp map).
+- **ExpF32 / SiluMul ~1.05×** are modest because clang `-O3` already
+  auto-vectorizes the branch-light scalar polynomial well, and at `n = 2^20`
+  both are streaming a 4 MB buffer, so the body is closer to memory-bound than
+  compute-bound. The absolute throughput (≈18–21 GB/s) is what matters for the
+  forward pass; the ISA ratio is secondary here.
+- **RoPE 0.70× — the vector body is currently *slower* than scalar.** The
+  scalar half-rotation is a clean countable loop clang auto-vectorizes into
+  essentially the same NEON, and the hand-written variant carries a little extra
+  overhead (separate `vmul`+`vfma` rather than a fused sequence, and the
+  `v[j]` / `v[j+half]` split loads). Recorded honestly — not claimed as a
+  speedup. Correctness is unaffected (Class T within tolerance, all thread
+  counts bit-identical); closing this gap is an M12-T02 tuning item (the tile /
+  fusion pass), not an M6 obligation.
+
+Cross-ISA note: these are NEON-only numbers (the dev machine). The AVX2 bodies
+mirror the NEON structure and are proven correct + warnings-clean by CI; their
+throughput is not measured here (no x86-64 dev machine), consistent with the
+prior kernel baselines.

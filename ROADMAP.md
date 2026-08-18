@@ -883,7 +883,7 @@ tile layout.
 - Tests vs the M5 reference GEMM across model shapes (qkv/o/gate/up/down/lm_head, k=1, skinny/wide) within documented tolerance, all ISAs plus forced-scalar.
 - Bench: ≥ 5× the M5 naive GEMM at 4096×4096×4096 on the dev machine (advisory), recorded in BASELINES.md; a sanity comparison against Accelerate/BLAS on the same shape is documented for context (not a target).
 
-### M6-T03 · Vectorized norm, activation & RoPE kernels
+### M6-T03 · Vectorized norm, activation & RoPE kernels — ✅ DONE (2026-08-18)
 NEON/AVX2 variants of RMSNorm (fp32 accumulation), SiLU-and-mul (SwiGLU combine),
 residual add, numerically-stable softmax, and RoPE application (arbitrary per-token
 positions, supporting later batched/paged use) — all behind the M3-T05 dispatch.

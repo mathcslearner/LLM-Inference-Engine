@@ -434,9 +434,36 @@ behind an existing subsystem):
   4096³ (~112 GFLOP/s on the M2), ≥5× target met (BASELINES.md); the optional
   Accelerate context number couldn't build on the dev machine (Homebrew-clang vs
   CLT SDK, `-Welaborated-enum-base`) so it's deferred, wiring in place behind
-  `-DENGINE_BENCH_BLAS`. Format + scoped tidy clean.
+  `-DENGINE_BENCH_BLAS`. Format + scoped tidy clean. T03 vectorized
+  norm/activation/softmax/RoPE kernels: NEON/AVX2 (behind M3-T05 dispatch) +
+  scalar for `RmsNormF32`/`SiluMulF32`/`SoftmaxF32`/`RopeApplyF32`
+  (`src/kernels/{norm,activation,softmax,rope}.{h,cpp}` + per-ISA TUs), each
+  validated against its `cpu::` oracle within a stated tolerance on the host ISA
+  **and** the forced-scalar pass. The **vector `expf` polynomial** is the one new
+  numerical algorithm (`internal/exp_common.h` scalar spec + `neon_exp.h`/
+  `avx2_exp.h` lane helpers, Cephes/`avx_mathfun` lineage): shared by all three
+  ISAs (scalar embeds it too, so forced-scalar exercises the shipped numeric
+  code), with its **own** ≤2-ulp sweep (`vector_exp_test`, observed max **1
+  ulp**) independent of the softmax/SiLU kernels that use it; `x < kExpLo` →
+  exactly `+0.0` makes softmax's `-inf → 0` mask contract exact. RMSNorm uses an
+  **exact** `1/sqrtf` (no raw `rsqrte`, §10); SiLU uses **exact** division; RoPE
+  takes arbitrary per-token positions (batched/paged-ready). **Residual add reuses
+  the existing Class-E `kernels::AddF32`** (no new kernel; parity-tested vs
+  `cpu::add`). All kernels **bit-identical across thread counts** (no split
+  reduction; tested threaded-vs-serial-variant). `exp` ships no public kernel —
+  softmax/SiLU embed the lane helpers; `exp.cpp`+`internal/exp_impl.h` expose
+  array-form variants only for the sweep. Observed vs-oracle (NEON): softmax
+  6.0e-7, RMSNorm 2.4e-6, SiLU 9.5e-7, RoPE 2.4e-7 across sizes {odd,1024,4096},
+  large-magnitude/causal softmax, positions {0,1,large}/unsorted and head-dims
+  {24,64,128}; HF goldens replayed through each kernel. Bench (BASELINES.md
+  M6-T03): NEON vs scalar — RMSNorm 2.10×, Softmax 3.08×; ExpF32/SiLU ~1.05×
+  (streaming-bound / scalar auto-vectorizes); RoPE 0.70× recorded honestly (a
+  M12 tuning item, correctness unaffected). AVX2 TUs written blind, hand-reviewed,
+  proven by CI's x86-64 build. +64 test registrations → **823 green**.
 
-Next up: **M6-T03** (vectorized norm, activation & RoPE kernels: NEON/AVX2
-RMSNorm, SiLU-and-mul, residual add, numerically-stable softmax, RoPE apply —
-all behind the M3-T05 dispatch, tested vs the M5 scalar reference per kernel with
-documented tolerances; the vector `expf` polynomial gets its own ≤2-ulp sweep).
+Next up: **M6-T04** (optimized prefill attention: blocked causal attention with
+flash-style online softmax — tiled QKᵀ/AV over key blocks with running
+max/sum renormalization, fp32 accumulation, GQA via KV-head indexing, threaded
+across (head, query-block), continuing from a non-empty cache; tested vs the M5
+reference attention across sequence lengths {1,17,512,2048} and GQA configs,
+with a 2k-context time recorded in BASELINES.md).

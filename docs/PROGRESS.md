@@ -1157,3 +1157,76 @@ tiling-invariance test uses. (3) `PackedLinear::Create` takes the weight by
 builder, unlike `ReferenceLinear` which moves-to-store). `regen_fixtures.sh` not
 run (no fixture change). Format clean; scoped tidy clean on the six new/edited
 TUs (AVX2 reviewed by hand — not in the arm64 compile DB).
+
+---
+
+M6-T03 done (2026-08-18: vectorized norm, activation, softmax & RoPE kernels).
+NEON/AVX2 (behind the M3-T05 dispatch) + always-present scalar for RMSNorm,
+SiLU-and-mul, numerically-stable softmax, and RoPE-apply — each validated
+against its `cpu::` oracle within a stated tolerance, on the host ISA and the
+forced-scalar pass. What landed:
+
+- **Vector `expf` polynomial — the one new numerical algorithm (design §10).**
+  `src/kernels/internal/exp_common.h` is the shared scalar spec (Cephes/
+  `avx_mathfun` lineage: two-part Cody-Waite `ln2` range reduction, degree-5
+  minimax for `eʳ`, `2ⁿ` by exponent-field write); `neon_exp.h` / `avx2_exp.h`
+  are the lane helpers mirroring it, included **only** from per-ISA TUs (the
+  intrinsic-header rule). Domain contract: ≤2 ulp on `[-87.34, 88.38]`
+  (**observed max 1 ulp**, scalar and NEON); `x < kExpLo` (incl. `-inf`) →
+  exactly `+0.0` — `n` never drops below −126 so the pow2 trick can't break, and
+  this makes softmax's `-inf → 0` mask contract exact; `x > kExpHi` → finite
+  saturation (immaterial to callers). Its dedicated sweep (`vector_exp_test`,
+  2M-point) is **independent of the kernels that use it** (design §10).
+- **All three ISAs run one exp algorithm** (scalar embeds the polynomial too,
+  not `std::exp`): the forced-scalar pass then actually exercises the shipped
+  numerical code, and the only scalar-vs-vector difference is FMA/lane order.
+- **RMSNorm** (`norm.{h,cpp}` + per-ISA `RmsNormRows`): fp32 weight (the
+  optimized backend pre-converts norm scales, §4 — no per-element widen on the
+  hot path), 16-lane sum-of-squares, an **exact** scalar `1/sqrtf` (design §10
+  forbids a raw `rsqrte`). **Softmax** (`softmax.{h,cpp}`): row max + exp + sum
+  + normalize, the exp via the polynomial. **SiLU-and-mul** (`activation.{h,cpp}`):
+  `silu(g)·up` with **exact division** (never a reciprocal estimate, §10).
+  **RoPE** (`rope.{h,cpp}`): in-place HF half-rotation, arbitrary per-token
+  positions (unsorted/repeated → batched/paged-ready, §8).
+- **Residual add is the pre-existing `kernels::AddF32`** (Class E, M3-T06) — design
+  §10 names its oracle as `cpu::add`, so no new kernel; a bit-equality parity
+  test in `activation_kernel_test` closes the ticket's residual-add box.
+- **`exp` ships no public kernel** — softmax/SiLU embed the lane helpers. A small
+  `exp.cpp` + `internal/exp_impl.h` expose array-form variants **only** for the
+  ulp sweep's `detail::ExpF32Variant` seam.
+
+Threading (design §5): row-parallel (norm/softmax), token-parallel (RoPE), flat
+(SiLU), all grain-`1`/element-chunked, no reduction split across threads — so
+every kernel is **bit-identical across thread counts**, tested by comparing the
+threaded public entry against a single serial variant call over the whole
+problem (the M6-T02 idiom), plus, for softmax, an explicit arbitrary
+row-chunking. Observed vs-oracle max-abs-diff (NEON, thresholds set above):
+softmax 6.0e-7 (`atol 1e-6, rtol 1e-4`), RMSNorm 2.4e-6 (`rtol 1e-5, atol 1e-6`),
+SiLU 9.5e-7 (`rtol 1e-5, atol 1e-6`), RoPE 2.4e-7 (`rtol 1e-5, atol 1e-6`) —
+across hidden sizes {odd, 1024, 4096}, large-magnitude/causal-masked softmax,
+RoPE positions {0, 1, large}/unsorted/repeated and head-dims {24, 64, 128} with
+GQA head counts. Each kernel also replays the M5 HF-derived goldens
+(`ops.safetensors` rmsnorm/silu_mul/softmax, `rope.safetensors` apply) through
+the optimized path, tying it to the HF chain, not just the reference.
+
+Bench (`kernels_bench`, BASELINES.md M6-T03): NEON vs scalar single-threaded on
+the M2 — RMSNorm **2.10×**, Softmax **3.08×** (the row-reduction wins);
+ExpF32/SiLU ~1.05× (clang auto-vectorizes the branch-light scalar polynomial and
+both are streaming-bound at 1M elements); RoPE **0.70×** — the vector body is
+currently *slower* than the auto-vectorized scalar loop, recorded honestly
+(correctness unaffected), a tuning item for M12-T02, not an M6 obligation. No
+perf *target* for T03 (the design's only hard GEMM target is M6-T02's 5×); the
+delta is recorded because the kernels are performance-motivated (CLAUDE.md).
+
+Non-obvious decisions: (1) scalar variants use the polynomial exp, not
+`std::exp`, so the forced-scalar pass covers the shipped numerical code and
+cross-ISA divergence is FMA-only. (2) `-inf → 0` is delivered by the exp flush,
+not a special case in softmax — one contract, one test surface. (3) RoPE takes a
+token offset so the threaded chunks pass `positions + begin`, keeping positions
+and `x` aligned per chunk. AVX2 TUs written blind (no x86-64 dev machine),
+mirroring the NEON structure 1:1, reviewed by hand against `.clang-format`/
+`.clang-tidy`; CI's x86-64 build (warnings-as-errors) + the exp sweep + all
+suites are the AVX2 proof (the accepted arm64-CI gap, CLAUDE.md). `regen_fixtures.sh`
+not run (no fixture change). +64 test registrations (32 new cases × SCALAR_PASS;
+6 forced-scalar slot-guards `GTEST_SKIP`) → **823 green**. Format clean; scoped
+tidy clean on the new/edited TUs.

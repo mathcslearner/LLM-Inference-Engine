@@ -1,9 +1,14 @@
 #include "kernels/convert.h"
 #include "kernels/dispatch.h"
 #include "kernels/elementwise.h"
+#include "kernels/internal/activation_impl.h"
 #include "kernels/internal/convert_impl.h"
 #include "kernels/internal/elementwise_impl.h"
+#include "kernels/internal/exp_impl.h"
+#include "kernels/internal/norm_impl.h"
 #include "kernels/internal/reduce_impl.h"
+#include "kernels/internal/rope_impl.h"
+#include "kernels/internal/softmax_impl.h"
 #include "kernels/reduce.h"
 
 #include <fmt/format.h>
@@ -160,6 +165,17 @@ int main(int argc, char** argv) {
       [&] { k::scalar::Fp32ToBf16(a.data(), out_u16.data(), n); },
       [&] { vec::Fp32ToBf16(a.data(), out_u16.data(), n); });
 
+  // M6-T03 flat kernels (per-element bodies, benched single-threaded per ISA).
+  // ExpF32 exercises the new polynomial; SiluMulF32 is exp-bound (it embeds
+  // it).
+  add_row(
+      "ExpF32", 8, [&] { k::scalar::ExpF32(a.data(), out_f32.data(), n); },
+      [&] { vec::ExpF32(a.data(), out_f32.data(), n); });
+  add_row(
+      "SiluMulF32", 12,
+      [&] { k::scalar::SiluMul(a.data(), b.data(), out_f32.data(), n); },
+      [&] { vec::SiluMul(a.data(), b.data(), out_f32.data(), n); });
+
   for (const Row& row : rows) {
     const double scalar_seconds = BestSeconds(row.scalar_fn, iterations);
     Report(row.name + " scalar", scalar_seconds, n, row.bytes_per_elem,
@@ -171,5 +187,74 @@ int main(int argc, char** argv) {
     }
     sink = sink + out_f32[0] + static_cast<float>(out_u16[0]);
   }
+
+  // M6-T03 shaped kernels (row/token-parallel bodies, benched single-threaded
+  // per ISA over the flat buffer reshaped to a model-like hidden size). ns/elem
+  // is over the total element count so the throughput is comparable across
+  // rows.
+  constexpr std::int64_t kE = 4096;  // a model-like hidden dim.
+  if (n >= kE) {
+    const std::int64_t rows_c = n / kE;
+    const std::int64_t total = rows_c * kE;
+    std::vector<float> w(static_cast<std::size_t>(kE), 1.0F);
+
+    const auto shaped = [&](const std::string& name, std::int64_t bytes,
+                            const std::function<void()>& scalar_fn,
+                            const std::function<void()>& vector_fn) {
+      const double ss = BestSeconds(scalar_fn, iterations);
+      Report(name + " scalar", ss, total, bytes, ss);
+      if (have_vector) {
+        const double vs = BestSeconds(vector_fn, iterations);
+        Report(name + " " + VariantName(), vs, total, bytes, ss);
+      }
+      sink = sink + out_f32[0];
+    };
+
+    shaped(
+        "RmsNormF32", 8,
+        [&] {
+          k::scalar::RmsNormRows(a.data(), w.data(), 1e-5F, rows_c, kE,
+                                 out_f32.data());
+        },
+        [&] {
+          vec::RmsNormRows(a.data(), w.data(), 1e-5F, rows_c, kE,
+                           out_f32.data());
+        });
+    shaped(
+        "SoftmaxF32", 8,
+        [&] { k::scalar::SoftmaxRows(a.data(), out_f32.data(), rows_c, kE); },
+        [&] { vec::SoftmaxRows(a.data(), out_f32.data(), rows_c, kE); });
+
+    // RoPE: reshape to [t, hx, d] with d = 128, hx = 8 (stride 1024).
+    constexpr std::int64_t kD = 128;
+    constexpr std::int64_t kHx = 8;
+    constexpr std::int64_t kStride = kHx * kD;
+    if (n >= kStride) {
+      const std::int64_t t = n / kStride;
+      std::vector<std::int32_t> pos(static_cast<std::size_t>(t));
+      for (std::int64_t i = 0; i < t; ++i) {
+        pos[static_cast<std::size_t>(i)] = static_cast<std::int32_t>(i);
+      }
+      // cos²+sin² = 1 keeps the in-place rotation norm-preserving, so repeated
+      // rotations over the timing loop neither overflow nor underflow.
+      const float kC = 0.6F;
+      const float kS = 0.8F;
+      std::vector<float> cos(static_cast<std::size_t>(t * (kD / 2)), kC);
+      std::vector<float> sin(static_cast<std::size_t>(t * (kD / 2)), kS);
+      std::vector<float> rx(a.begin(), a.begin() + (t * kStride));
+      shaped(
+          "RopeApplyF32", 4,
+          [&] {
+            k::scalar::RopeRows(rx.data(), t, kHx, kD, pos.data(), cos.data(),
+                                sin.data());
+          },
+          [&] {
+            vec::RopeRows(rx.data(), t, kHx, kD, pos.data(), cos.data(),
+                          sin.data());
+          });
+      sink = sink + rx[0];
+    }
+  }
+
   return sink < 1e100 ? 0 : 1;  // Use sink so it cannot be dropped.
 }

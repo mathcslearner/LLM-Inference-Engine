@@ -89,6 +89,7 @@ Files this milestone creates:
 |---|---|---|---|
 | `src/kernels/gemm.h` / `.cpp` + `internal/gemm_impl.h` + `{scalar,neon,avx2}/gemm.cpp` | kernels | packed-weight GEMM + GEMV entry points; the pack routine | T02 |
 | `src/kernels/norm.h`, `activation.h`, `softmax.h`, `rope.h` (+ per-ISA TUs) | kernels | RMSNorm, SiLU-and-mul, numerically-stable softmax, RoPE-apply | T03 |
+| `src/kernels/internal/exp_common.h`, `neon_exp.h`, `avx2_exp.h`, `exp_impl.h` + `exp.cpp` + `{scalar,neon,avx2}/exp.cpp` | kernels | the shared vector-`expf` polynomial (§10): a scalar spec + NEON/AVX2 lane helpers, plus array-form variants exposed only for the ulp sweep. `exp` is not a public kernel — softmax/SiLU embed the lane helpers. Residual add reuses the existing Class-E `kernels::AddF32` (no new kernel). | T03 |
 | `src/kernels/attention.h` / per-ISA TUs | kernels | blocked prefill attention (online softmax) + decode attention | T04, T05 |
 | `src/kernels/embedding.h` / per-ISA TUs | kernels | packed-layout-aware embedding lookup + the lm_head logits path | T06 |
 | `src/model/packed_linear.h` / `.cpp` | model | `PackedLinear` (repack at construction; GEMM/GEMV in `forward`) | T02 |
@@ -691,14 +692,33 @@ why:**
   the Newton-refined `rsqrt` or a true `1/sqrtf` must land within ~1 ulp of the
   reference's `1/sqrtf`); tolerance `rtol = 1e-5`. The one place the doc forbids a
   fast-but-loose intrinsic in M6 (a raw NEON `vrsqrte` is ~2^-8 accurate — far
-  outside tolerance; M12 may revisit with an error budget).
+  outside tolerance; M12 may revisit with an error budget). *Landed (M6-T03): the
+  shipped variants use a scalar `1.0f/sqrtf`; observed max-abs-diff vs the oracle
+  2.4e-6 at E=4096 (`rtol 1e-5, atol 1e-6`).*
 - **Vector `exp` (softmax, SiLU):** the one *new numerical algorithm* M6
-  introduces — a per-ISA polynomial `expf` approximation replacing `std::expf`.
-  It gets its **own dedicated sweep test** vs `std::expf` over a wide input range
-  (including the large-magnitude / near-overflow regime softmax's stability path
-  exercises), with a stated **ulp bound** (target ≤ 2 ulp), independent of the
-  kernels that use it. Softmax/SiLU tolerances vs the reference are then derived
-  from that bound.
+  introduces — a polynomial `expf` approximation replacing `std::expf`,
+  **shared verbatim by all three ISAs** (scalar spec in `internal/exp_common.h`,
+  NEON/AVX2 lane helpers mirroring it), so the only cross-ISA difference is FMA
+  contraction. It gets its **own dedicated sweep test** (`vector_exp_test`) vs a
+  correctly-rounded reference (`std::exp` in double → float, stricter than
+  `std::expf`), with a stated **ulp bound (≤ 2 ulp)**, independent of the kernels
+  that use it. *Landed (M6-T03): the Cephes/`avx_mathfun` lineage — two-part
+  (Cody-Waite) `ln2` range reduction `x = n·ln2 + r`, a degree-5 minimax for
+  `eʳ`, `2ⁿ` by exponent-field write. Domain contract: `[kExpLo, kExpHi] =
+  [-87.3365, 88.3762]` → ≤ 2 ulp (**observed max 1 ulp**, scalar and NEON);
+  `x < kExpLo` (incl. `-inf`) → exactly `+0.0` (`n` stays ≥ -126 so no denormal
+  trick breaks, and this makes softmax's `-inf → 0` mask contract exact — the
+  flushed band's true value is ≤ FLT_MIN); `x > kExpHi` → finite saturation
+  (immaterial: softmax inputs are ≤ 0 post-max-subtraction, SiLU's `exp(-v)`
+  tail underflows in `1/(1+e)`).* Softmax/SiLU tolerances vs the reference are
+  derived from that bound.
+
+  **The scalar variants embed the polynomial too** (not `std::exp`): keeping one
+  exp algorithm across all ISAs means the forced-scalar pass actually exercises
+  the shipped numerical code, and the only scalar-vs-vector difference is
+  FMA/lane order. The (small) cost is that scalar softmax/SiLU are Class T vs the
+  oracle rather than near-exact — well inside the stated tolerances (observed
+  below).
 - **Attention:** `rtol = 1e-4, atol = 1e-5` on the context output vs
   `cpu::attention` (the reference's observed op-level agreement with HF is ≤4e-7,
   model-execution.md §13 T05, so the reference is effectively exact and the
@@ -711,6 +731,17 @@ why:**
   logit gap > 1e-2, model-execution.md §10) is what makes token-for-token robust
   for the optimized backend too — the reference-vs-optimized logit gap is orders
   of magnitude below that separation, so the argmax never flips.
+
+**M6-T03 observed (NEON, dev machine; thresholds set above these):** softmax
+max-abs-diff 6.0e-7 at n=4096 (`atol 1e-6, rtol 1e-4`); SiLU-and-mul 9.5e-7 at
+n=32771 (`rtol 1e-5, atol 1e-6`); RoPE 2.4e-7 across head-dims {24, 64, 128} and
+GQA head counts (`rtol 1e-5, atol 1e-6`); RMSNorm and vector-`exp` as noted
+above. Every M6-T03 kernel is **bit-identical across thread counts** — asserted
+by comparing the threaded public entry against a single serial variant call over
+the whole problem (the M6-T02 idiom), plus, for softmax, an arbitrary manual
+row-chunking. The **residual add is the pre-existing `kernels::AddF32`** (Class E,
+bit-identical to `cpu::add`), so no new kernel — the ticket's residual-add box is
+closed by a bit-equality parity test in `activation_kernel_test`.
 
 **Recorded alternative (rejected for M6): cross-ISA bit-identity via
 FMA-everywhere.** One could force every scalar multiply-add through `std::fma` and
