@@ -26,9 +26,12 @@ models/
                                 #   logits (all f32)
       meta.json                 # input ids, seed, generator versions
       ops.safetensors           # M5-T02: cpu::gemm goldens (per-case a/b/c
-                                #   [+bias]); rope/attention append in T03–T05
-      ops_meta.json             # ops case manifest (shapes, dtypes, seed)
-      # M5 adds more op-level goldens here (rope/attention.safetensors,
+                                #   [+bias]); M5-T03: cpu::rmsnorm/softmax/
+                                #   silu_mul/add goldens (rmsnorm_*/softmax_*/
+                                #   silu_mul_*/add_* cases); rope appends in T04
+      ops_meta.json             # ops case manifest (cases + rmsnorm_cases +
+                                #   softmax_cases + elementwise_cases; seed)
+      # M5 adds more op-level goldens here (rope.safetensors, attention.safetensors,
       # generate.json), each landing with the ticket that consumes it —
       # docs/design/model-execution.md §12.
   tiny-qwen2/                   # M5-T10: tiny Qwen2ForCausalLM (QKV biases);

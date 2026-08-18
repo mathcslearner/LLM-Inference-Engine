@@ -704,7 +704,7 @@ optional bias).
 - Unit tests vs fixture GEMM results across shapes (including k=1, skinny/wide) within fp32 tolerance.
 - A 512×512×512 GEMM completes in < 1 s (sanity, not perf).
 
-### M5-T03 · CPU normalization & activation ops
+### M5-T03 · CPU normalization & activation ops — ✅ DONE (2026-08-17)
 RMSNorm (with epsilon, weight), SiLU, elementwise multiply (for SwiGLU), residual
 add, and numerically-stable softmax — all CPU, fp32 accumulation.
 **Depends on:** M5-T02.

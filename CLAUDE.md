@@ -254,6 +254,17 @@ behind an existing subsystem):
   `ReferenceLinear` (zero-copy checkpoint weight, `y` caller-allocated).
   New `tiny-llama/expected/ops.safetensors` (`tiny-llama-ops` subcommand,
   10 GEMM cases incl. real bf16 weights, k==1, skinny/wide, widening);
-  +12 tests (609 green).
+  +12 tests (609 green). T03 CPU norm/activation ops: `src/cpu/`
+  `rmsnorm.cpp`/`activation.cpp` (silu_mul+add)/`softmax.cpp` + shared
+  `detail.h` — `cpu::rmsnorm` (per-row `x*rsqrt(mean(x²)+eps)*weight`, HF
+  order, f32/f16/bf16 `x`+weight widened, the pure fp32 forward with no HF
+  `.to(input_dtype)` round-trip), `cpu::silu_mul` (SwiGLU, saturating
+  silu), `cpu::add` (residual), `cpu::softmax` (max-subtracted, `-inf`→0
+  for M5-T05's mask); all `parallel_for`-threaded with single-accumulator
+  per-row reductions → bit-identical across threads, `y` caller-allocated,
+  aliasing allowed. `src/model/modules.{h,cpp}` — `RmsNorm` module
+  (zero-copy `[E]` weight + eps, f32-activation `forward`). 10 new
+  `ops.safetensors` cases appended after the GEMM draws (GEMM bytes
+  unchanged, `--verify` byte-clean); +23 tests (632 green).
 
-Next up: **M5-T03** (CPU normalization & activation ops).
+Next up: **M5-T04** (Embedding & RoPE, CPU).

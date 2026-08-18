@@ -63,6 +63,20 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::model engine::cpu
   LABELS model)
 
+# rmsnorm_test / activation_test (M5-T03): cpu::rmsnorm/softmax/silu_mul/add
+# goldens + the RmsNorm module. Both read the ops.safetensors golden via
+# engine::model's SafetensorsFile; rmsnorm_test additionally uses the loader for
+# a real bf16 norm weight.
+engine_add_tests(TREE unit SOURCES
+  rmsnorm_test.cpp
+  DEPS engine::cpu engine::model
+  LABELS cpu)
+
+engine_add_tests(TREE unit SOURCES
+  activation_test.cpp
+  DEPS engine::cpu engine::model
+  LABELS cpu)
+
 # tokenizer_test parses the committed real tokenizer.json fixtures (design
 # §7.1, §8); the `tokenizer` label lets `ctest -L tokenizer` iterate the
 # golden suite alone. Ordinary portable C++ — no SCALAR_PASS.

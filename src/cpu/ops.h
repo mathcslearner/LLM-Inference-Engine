@@ -52,4 +52,59 @@ namespace engine::cpu {
                                 const tensor::Tensor& b,
                                 const tensor::Tensor* bias, tensor::Tensor& c);
 
+// y[T, E] = rmsnorm(x)[T, E] * weight[E], per HF LlamaRMSNorm computed in fp32
+// (model-execution.md §4.2): for each row, `y = x * rsqrt(mean(x²) + eps) *
+// weight`, the mean-of-squares taken over the hidden dimension E in a single
+// ascending fp32 accumulator. This is the *pure fp32 forward* — it deliberately
+// omits HF's intermediate `.to(input_dtype)` round-trip, matching the fixture
+// goldens, which are the fp32 forward of the checkpoint (fixtures README,
+// §3.3).
+//
+//   x      : [T, E], contiguous, dtype kFloat32 / kFloat16 / kBFloat16. The op
+//            accepts half storage (the "RMSNorm on bf16 input" criterion, §12)
+//            and widens per element; the M5 model graph only ever passes f32.
+//   weight : [E], contiguous, dtype kFloat32 / kFloat16 / kBFloat16 (checkpoint
+//            storage; widened per element).
+//   eps    : added to the mean of squares before rsqrt (config.rms_norm_eps).
+//   y      : [T, E], contiguous, dtype kFloat32, caller-allocated — fully
+//            overwritten. Aliasing y with x is allowed only when x is f32.
+//
+// T >= 1, E >= 1. Rows are independent and each reduces in a single fp32
+// accumulator, so the result is bit-identical across thread counts. Malformed
+// inputs — wrong rank/dtype/shape, non-contiguous operand, E mismatch between x
+// and weight, wrong y — are recoverable InvalidArgument naming the offending
+// input (ADR-003). Undefined handles are a programmer error (CHECK).
+[[nodiscard]] core::Status rmsnorm(const tensor::Tensor& x,
+                                   const tensor::Tensor& weight, float eps,
+                                   tensor::Tensor& y);
+
+// y[T, I] = silu(gate)[T, I] (elementwise *) up[T, I] — the SwiGLU activation
+// (model-execution.md §4.2). `silu(v) = v / (1 + exp(-v))` (HF `F.silu`),
+// computed in fp32; large-magnitude gates are handled without overflow to NaN
+// (a saturating exp is finite). All of gate/up/y are [T, I] contiguous
+// kFloat32 (activations are fp32, §3.3); y is caller-allocated and may alias
+// gate or up. Malformed inputs are recoverable InvalidArgument (ADR-003);
+// undefined handles are CHECK.
+[[nodiscard]] core::Status silu_mul(const tensor::Tensor& gate,
+                                    const tensor::Tensor& up,
+                                    tensor::Tensor& y);
+
+// y[T, E] = a[T, E] + b[T, E] — the residual add (model-execution.md §4.2).
+// All of a/b/y are [T, E] contiguous kFloat32; y is caller-allocated and may
+// alias a or b. Malformed inputs are recoverable InvalidArgument (ADR-003);
+// undefined handles are CHECK.
+[[nodiscard]] core::Status add(const tensor::Tensor& a, const tensor::Tensor& b,
+                               tensor::Tensor& y);
+
+// y[R, N] = softmax(x)[R, N] over the last dimension, numerically stable
+// (model-execution.md §4.2): per row, subtract the row max, exponentiate, and
+// divide by the fp32 sum of exponentials. A `-inf` entry maps to exactly 0
+// (what M5-T05's causal mask relies on); a row that is entirely `-inf` yields
+// NaN and is a caller error (torch does likewise). x and y are [R, N]
+// contiguous kFloat32 (attention scores are fp32, §3.1); y is caller-allocated
+// and may alias x. Rows are independent — bit-identical across thread counts.
+// Malformed inputs are recoverable InvalidArgument (ADR-003); undefined handles
+// are CHECK.
+[[nodiscard]] core::Status softmax(const tensor::Tensor& x, tensor::Tensor& y);
+
 }  // namespace engine::cpu

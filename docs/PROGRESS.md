@@ -604,3 +604,56 @@ through `Linear&`, T==1 GEMV, bad x/y shapes, and a real bf16 `q_proj`
 loaded end-to-end via `load_model` matching the golden. Labels: gemm_test
 `cpu`, linear_test `model`; ordinary portable tests (call `cpu::`
 directly, no SCALAR_PASS). 609 tests green; format + scoped tidy clean.)
+
+M5-T03 done (2026-08-17: CPU normalization & activation ops). Four new
+reference ops in `src/cpu/` (one `.cpp` each: `rmsnorm.cpp`,
+`activation.cpp` = silu_mul + add, `softmax.cpp`) plus a private
+`src/cpu/detail.h` sharing widening/validation helpers (`Widen`,
+`RequireContiguousRank`, `RequireF32`) across the new ops; `gemm.cpp`
+keeps its own battle-tested local helpers untouched. **`cpu::rmsnorm(x,
+weight, eps, y)`** — per-row `y = x * rsqrt(mean(x²)+eps) * weight`, HF
+LlamaRMSNorm order, mean-of-squares in a single ascending fp32
+accumulator; `x` accepts f32/f16/bf16 (the "RMSNorm on bf16 input"
+criterion) and `weight` f32/f16/bf16, each widened per element via
+`half.h` (dispatched on the (x,weight) dtype pair, `cpu` never links
+`kernels`); this is the **pure fp32 forward** — it deliberately omits HF's
+intermediate `.to(input_dtype)` round-trip, matching the fp32-forward
+goldens. **`cpu::silu_mul(gate, up, y)`** — SwiGLU `silu(gate) ⊙ up`,
+`silu(v)=v/(1+exp(-v))` (saturating exp → no NaN on large-magnitude
+gates), f32. **`cpu::add(a, b, y)`** — residual add, f32. **`cpu::softmax
+(x, y)`** — row-wise last-dim, max-subtracted for stability; a `-inf`
+entry maps to exactly 0 (the property M5-T05's causal mask needs), an
+all-`-inf` row yields NaN (documented caller error). All are
+`parallel_for`-threaded over rows with single-accumulator per-row
+reductions, so **bit-identical across thread counts**; `y` is
+caller-allocated and (silu_mul/add/softmax/rmsnorm-with-f32-x) may alias
+an input. Recoverable `Status` naming the offending input for every
+malformed shape/dtype/contiguity; undefined handles are `CHECK`.
+`src/model/modules.{h,cpp}`: the **`RmsNorm` module** (concrete class, no
+interface — unlike `Linear`) holding the zero-copy `[E]` weight + eps from
+`config.rms_norm_eps`; `forward` requires fp32 activations (the M5 graph's
+invariant) and calls `cpu::rmsnorm`. Non-obvious decisions: the op accepts
+bf16 `x` at the boundary while the *module* enforces f32 (op-level
+criterion vs graph invariant); softmax/add/silu are f32-only (attention
+scores and activations are always f32 — §3.1/§3.3), only rmsnorm widens;
+`Mlp` left to M5-T07 (this ticket is norms+activations, T07 composes the
+MLP). Fixtures: extended `tools/gen_fixtures/tiny_llama_ops.py`
+(`tiny-llama-ops`) with 10 new cases appended to `ops.safetensors`/
+`ops_meta.json` **after** the GEMM draws so the committed GEMM tensors
+stay byte-identical (verified: all 32 unchanged; `regen_fixtures.sh
+--verify` byte-clean) — rmsnorm_f32/rmsnorm_bf16/rmsnorm_eps (eps 0.5),
+softmax_typical/large(±1e4)/causal(-inf), silu_mul/silu_mul_unit(up=ones →
+pure SiLU)/silu_mul_large(±100)/add_basic; ground truth all fp32
+(`xf*rsqrt(mean(xf²)+eps)*w.float()`, `torch.softmax`, `F.silu(gate)*up`,
+`a+b`). Tests (23): `rmsnorm_test.cpp` (11) — fixture goldens across
+dtype/eps, on-the-fly-widening bit-exact vs `ops::cast`-then-rmsnorm,
+threading bit-exact vs serial, in-place==out-of-place, eps-applied +
+zero-row-finite, 6 error paths, RmsNorm module accessors/rejections/
+forward==op/bad-activation/real-bf16-`attn_norm.weight`-loaded-via-
+`load_model`; `activation_test.cpp` (12) — silu_mul/add/softmax fixture
+goldens, aliasing bit-exact, softmax rows-sum-to-1 / causal-masked-exactly-
+zero / in-place / N==1==1.0 / large-magnitude-finite, error paths. Observed
+max-abs-diff: rmsnorm ≤9.5e-7 (tol 1e-4), silu_mul ≤2.4e-7 (tol 1e-4),
+softmax ≤3.0e-8 (tol 1e-5). Labels: both `cpu`; ordinary portable tests
+(call `cpu::` directly, no SCALAR_PASS). 632 tests green; format + scoped
+tidy clean.

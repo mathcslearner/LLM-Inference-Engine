@@ -104,4 +104,53 @@ core::Status ReferenceLinear::forward(const tensor::Tensor& x,
   return cpu::gemm(x, weight_, bias, y);
 }
 
+core::StatusOr<RmsNorm> RmsNorm::Create(tensor::Tensor weight, float eps) {
+  if (!weight.defined()) {
+    return core::InvalidArgumentError("RmsNorm: weight is undefined");
+  }
+  if (weight.shape().rank() != 1) {
+    return core::InvalidArgumentError(
+        "RmsNorm: weight must be rank-1 [E], got rank-{}",
+        weight.shape().rank());
+  }
+  if (!weight.is_contiguous()) {
+    return core::InvalidArgumentError("RmsNorm: weight must be contiguous");
+  }
+  if (!IsSupportedFloat(weight.dtype())) {
+    return core::InvalidArgumentError(
+        "RmsNorm: weight dtype must be f32/f16/bf16, got {}",
+        tensor::to_string(weight.dtype()));
+  }
+  const std::int64_t hidden_size = weight.shape().dim(0);
+  return RmsNorm(std::move(weight), eps, hidden_size);
+}
+
+core::Status RmsNorm::forward(const tensor::Tensor& x,
+                              tensor::Tensor& y) const {
+  // Validate the activation tensors here so the messages name `x`/`y`; the
+  // per-element widening and reduction happen in cpu::rmsnorm, which
+  // re-validates cheaply. The M5 graph passes fp32 activations.
+  if (!x.defined()) {
+    return core::InvalidArgumentError("RmsNorm::forward: x is undefined");
+  }
+  if (x.shape().rank() != 2 || x.shape().dim(1) != hidden_size_) {
+    return core::InvalidArgumentError(
+        "RmsNorm::forward: x must be [T, {}], got {}", hidden_size_, x.shape());
+  }
+  if (x.dtype() != tensor::DataType::kFloat32) {
+    return core::InvalidArgumentError("RmsNorm::forward: x must be f32, got {}",
+                                      tensor::to_string(x.dtype()));
+  }
+  if (!y.defined()) {
+    return core::InvalidArgumentError("RmsNorm::forward: y is undefined");
+  }
+  if (y.shape().rank() != 2 || y.shape().dim(0) != x.shape().dim(0) ||
+      y.shape().dim(1) != hidden_size_) {
+    return core::InvalidArgumentError(
+        "RmsNorm::forward: y must be caller-allocated [{}, {}], got {}",
+        x.shape().dim(0), hidden_size_, y.shape());
+  }
+  return cpu::rmsnorm(x, weight_, eps_, y);
+}
+
 }  // namespace engine::model

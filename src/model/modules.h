@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
 
 // Model graph modules (M5; design: docs/design/model-execution.md §4). Each
 // module owns its weight handles (borrowed, zero-copy, into the mapped
@@ -88,6 +89,38 @@ class ReferenceLinear final : public Linear {
   std::optional<tensor::Tensor> bias_;  // [out], borrowed; nullopt when absent
   std::int64_t in_features_ = 0;
   std::int64_t out_features_ = 0;
+};
+
+// RMSNorm (M5-T03; design: docs/design/model-execution.md §4.2). Holds the
+// `[E]` scale weight as a zero-copy checkpoint handle and the epsilon from
+// `config.rms_norm_eps`; `forward` computes `y = x * rsqrt(mean(x²) + eps) *
+// weight` per token in fp32 via `cpu::rmsnorm`. A plain concrete class (no
+// interface needed in M5 — unlike `Linear`, which M13 specializes).
+class RmsNorm {
+ public:
+  // Validates the weight `[E]` (rank-1, contiguous, f32/f16/bf16). `eps` is the
+  // model's `rms_norm_eps`. Malformed weight → InvalidArgument naming the
+  // problem.
+  [[nodiscard]] static core::StatusOr<RmsNorm> Create(tensor::Tensor weight,
+                                                      float eps);
+
+  // y[T, E] = rmsnorm(x[T, E]) * weight. `x` and `y` are caller-allocated
+  // contiguous fp32 [T, E] (activations are fp32 in the M5 graph); a
+  // wrong-shape/dtype `x`/`y`, or a hidden dim disagreeing with the weight, is
+  // InvalidArgument.
+  [[nodiscard]] core::Status forward(const tensor::Tensor& x,
+                                     tensor::Tensor& y) const;
+
+  [[nodiscard]] std::int64_t hidden_size() const { return hidden_size_; }
+  [[nodiscard]] float eps() const { return eps_; }
+
+ private:
+  RmsNorm(tensor::Tensor weight, float eps, std::int64_t hidden_size)
+      : weight_(std::move(weight)), eps_(eps), hidden_size_(hidden_size) {}
+
+  tensor::Tensor weight_;  // [E], borrowed checkpoint handle
+  float eps_ = 0.0F;
+  std::int64_t hidden_size_ = 0;
 };
 
 }  // namespace engine::model
