@@ -1,0 +1,61 @@
+{
+  "description": "HF RoPE goldens (M5-T04). tiny_table.cos/sin [max_pos, d/2] f32. tiny_sparse/tiny_contig.{positions [T] i32, q [T,H,d], k [T,Hkv,d], q_out, k_out} f32 = apply_rotary_pos_emb (half-rotation). llama3.{inv_freq [d/2], positions [P] i32, cos/sin [P,d/2]} from the committed Llama-3.1 llama3 rope_scaling. linear.{inv_freq, positions, cos, sin} from a synthetic linear rope_scaling (factor 4.0). Reference forms angles in fp64, stores fp32 — agreement is Class T (tolerances in rope_test.cpp).",
+  "generator_versions": {
+    "safetensors": "0.8.0",
+    "tokenizers": "0.22.2",
+    "torch": "2.13.0",
+    "transformers": "5.14.1"
+  },
+  "linear": {
+    "factor": 4.0,
+    "head_dim": 16,
+    "positions": [
+      0,
+      1,
+      127
+    ],
+    "theta": 10000.0
+  },
+  "llama3": {
+    "head_dim": 128,
+    "positions": [
+      0,
+      1,
+      512,
+      2048,
+      8192
+    ],
+    "rope_scaling": {
+      "factor": 8.0,
+      "high_freq_factor": 4.0,
+      "low_freq_factor": 1.0,
+      "original_max_position_embeddings": 8192,
+      "rope_type": "llama3"
+    },
+    "theta": 500000.0
+  },
+  "regenerate": "tools/.venv/bin/python -m gen_fixtures tiny-llama-rope",
+  "seed": 20260818,
+  "tiny": {
+    "contig_positions": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "head_dim": 16,
+    "heads": 4,
+    "kv_heads": 2,
+    "max_pos": 128,
+    "sparse_positions": [
+      0,
+      1,
+      127
+    ],
+    "theta": 10000.0
+  }
+}

@@ -1,11 +1,14 @@
 #pragma once
 
 #include "core/status.h"
+#include "model/config.h"
 #include "tensor/tensor.h"
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <utility>
+#include <vector>
 
 // Model graph modules (M5; design: docs/design/model-execution.md §4). Each
 // module owns its weight handles (borrowed, zero-copy, into the mapped
@@ -121,6 +124,97 @@ class RmsNorm {
   tensor::Tensor weight_;  // [E], borrowed checkpoint handle
   float eps_ = 0.0F;
   std::int64_t hidden_size_ = 0;
+};
+
+// Token-embedding table (M5-T04; design: docs/design/model-execution.md §4,
+// §7). Holds the `[V, E]` embedding weight as a zero-copy checkpoint handle
+// (bf16/f16 storage preserved — M4 never up-converts at load) and gathers rows
+// widened to fp32. A plain concrete class like `RmsNorm`; the natural seam for
+// M6-T06's tied-weight sharing (lookup vs projection may hold *different*
+// physical layouts of the same logical weight), so the lookup goes through a
+// module rather than a bare op in `ReferenceModel`.
+class Embedding {
+ public:
+  // Validates the weight `[V, E]` (rank-2, contiguous, f32/f16/bf16). Malformed
+  // weight → InvalidArgument naming the problem.
+  [[nodiscard]] static core::StatusOr<Embedding> Create(tensor::Tensor weight);
+
+  // y[T, E] = table[ids[t], :] widened to fp32. `ids` are absolute token ids in
+  // [0, V) (the `ForwardRequest.token_ids` span, passed straight through); `y`
+  // is caller-allocated contiguous fp32 [T, E]. An out-of-range id, or a
+  // wrong-shape/dtype `y`, is InvalidArgument. Calls `cpu::embedding_lookup`.
+  [[nodiscard]] core::Status forward(std::span<const std::int32_t> ids,
+                                     tensor::Tensor& y) const;
+
+  [[nodiscard]] std::int64_t vocab_size() const { return vocab_size_; }
+  [[nodiscard]] std::int64_t hidden_size() const { return hidden_size_; }
+
+ private:
+  Embedding(tensor::Tensor weight, std::int64_t vocab_size,
+            std::int64_t hidden_size)
+      : weight_(std::move(weight)),
+        vocab_size_(vocab_size),
+        hidden_size_(hidden_size) {}
+
+  tensor::Tensor weight_;  // [V, E], borrowed checkpoint handle
+  std::int64_t vocab_size_ = 0;
+  std::int64_t hidden_size_ = 0;
+};
+
+// Rotary position embeddings (M5-T04; design: docs/design/model-execution.md
+// §7). Precomputes the `cos`/`sin` tables `[num_positions, head_dim/2]` at
+// construction from `config.rope_theta` and any `rope_scaling`, then `apply`
+// rotates Q and K in place using each token's absolute position — the
+// HF-Llama half-rotation layout. A plain concrete class like `RmsNorm`.
+//
+// The frequencies obey `inv_freq[i] = 1 / theta^(2i/d)` (fp32), with
+// `rope_scaling` interpreted per §7: absent/`"default"` → identity, `"linear"`
+// → `inv_freq /= factor`, `"llama3"` → HF's `_compute_llama3_parameters`
+// piecewise wavelength scaling. Any other `rope_type` is `Unimplemented` (the
+// executor rejects what it can't honor).
+class Rope {
+ public:
+  // `head_dim` must be even and >= 2; `theta` finite and > 0; `num_positions`
+  // >= 1 (the builder passes `config.max_position_embeddings`; tests pass
+  // explicit small counts). `scaling` is `config.rope_scaling` (nullopt →
+  // default). A malformed argument, or an unsupported/ill-formed `rope_type`,
+  // → InvalidArgument / Unimplemented naming the problem.
+  [[nodiscard]] static core::StatusOr<Rope> Create(
+      int head_dim, float theta, const std::optional<RopeScaling>& scaling,
+      std::int64_t num_positions);
+
+  // Rotates `q [T, H, d]` and `k [T, Hkv, d]` in place by their tokens'
+  // absolute `positions` (each in [0, num_positions)). q/k must be contiguous
+  // fp32 rank-3 with `dim(2) == head_dim`; `positions.size() == T`. Malformed
+  // q/k or an out-of-range position → InvalidArgument. Calls `cpu::rope_apply`
+  // once per tensor (RoPE and the KV-cache write stay separate observable steps
+  // for the reference — §4.2).
+  [[nodiscard]] core::Status apply(
+      tensor::Tensor& q, tensor::Tensor& k,
+      std::span<const std::int32_t> positions) const;
+
+  [[nodiscard]] const tensor::Tensor& cos() const { return cos_; }
+  [[nodiscard]] const tensor::Tensor& sin() const { return sin_; }
+  // inv_freq `[head_dim/2]`, fp32 — exposed so the llama3/linear scaling
+  // goldens can validate the frequency computation directly (§12).
+  [[nodiscard]] std::span<const float> inv_freq() const { return inv_freq_; }
+  [[nodiscard]] int head_dim() const { return head_dim_; }
+  [[nodiscard]] std::int64_t num_positions() const { return num_positions_; }
+
+ private:
+  Rope(tensor::Tensor cos, tensor::Tensor sin, std::vector<float> inv_freq,
+       int head_dim, std::int64_t num_positions)
+      : cos_(std::move(cos)),
+        sin_(std::move(sin)),
+        inv_freq_(std::move(inv_freq)),
+        head_dim_(head_dim),
+        num_positions_(num_positions) {}
+
+  tensor::Tensor cos_;           // [num_positions, head_dim/2], fp32
+  tensor::Tensor sin_;           // [num_positions, head_dim/2], fp32
+  std::vector<float> inv_freq_;  // [head_dim/2], fp32
+  int head_dim_ = 0;
+  std::int64_t num_positions_ = 0;
 };
 
 }  // namespace engine::model

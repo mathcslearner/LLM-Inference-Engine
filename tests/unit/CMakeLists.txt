@@ -77,6 +77,20 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::cpu engine::model
   LABELS cpu)
 
+# embedding_test / rope_test (M5-T04): cpu::embedding_lookup / cpu::rope_apply
+# goldens + the Embedding/Rope modules. Both read the ops/rope safetensors
+# goldens via engine::model's SafetensorsFile; embedding_test additionally uses
+# the loader for the real bf16 embed table and the activations golden.
+engine_add_tests(TREE unit SOURCES
+  embedding_test.cpp
+  DEPS engine::cpu engine::model
+  LABELS cpu)
+
+engine_add_tests(TREE unit SOURCES
+  rope_test.cpp
+  DEPS engine::cpu engine::model
+  LABELS cpu)
+
 # tokenizer_test parses the committed real tokenizer.json fixtures (design
 # §7.1, §8); the `tokenizer` label lets `ctest -L tokenizer` iterate the
 # golden suite alone. Ordinary portable C++ — no SCALAR_PASS.

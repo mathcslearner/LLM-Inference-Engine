@@ -28,10 +28,17 @@ models/
       ops.safetensors           # M5-T02: cpu::gemm goldens (per-case a/b/c
                                 #   [+bias]); M5-T03: cpu::rmsnorm/softmax/
                                 #   silu_mul/add goldens (rmsnorm_*/softmax_*/
-                                #   silu_mul_*/add_* cases); rope appends in T04
+                                #   silu_mul_*/add_* cases); M5-T04:
+                                #   embedding_edge (bf16 embed table gather)
       ops_meta.json             # ops case manifest (cases + rmsnorm_cases +
-                                #   softmax_cases + elementwise_cases; seed)
-      # M5 adds more op-level goldens here (rope.safetensors, attention.safetensors,
+                                #   softmax_cases + elementwise_cases +
+                                #   embedding_cases; seed)
+      rope.safetensors          # M5-T04: cpu::rope_apply / Rope goldens —
+                                #   tiny_table cos/sin, tiny_sparse/tiny_contig
+                                #   apply I/O, llama3 & linear scaled inv_freq
+                                #   + cos/sin (docs/design/model-execution.md §7)
+      rope_meta.json            # rope config params (tiny/llama3/linear; seed)
+      # M5 adds more op-level goldens here (attention.safetensors,
       # generate.json), each landing with the ticket that consumes it —
       # docs/design/model-execution.md §12.
   tiny-qwen2/                   # M5-T10: tiny Qwen2ForCausalLM (QKV biases);

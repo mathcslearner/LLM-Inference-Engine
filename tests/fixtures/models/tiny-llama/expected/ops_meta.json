@@ -83,7 +83,7 @@
       "weight_dtype": "bfloat16"
     }
   ],
-  "description": "CPU reference-op goldens (M5-T02/T03). GEMM (cases): <name>.a [M,K] f32, <name>.b [N,K] weight-dtype, optional <name>.bias [N], <name>.c [M,N] f32 = a @ b.float().T (+ bias.float()). RMSNorm (rmsnorm_cases): <name>.x [R,E] x-dtype, <name>.weight [E], <name>.y [R,E] f32 = xf * rsqrt(mean(xf^2)+eps) * weight.float(). Softmax (softmax_cases): <name>.x [R,N] f32, <name>.y [R,N] f32 = softmax(x,-1). Elementwise (elementwise_cases): silu_mul <name>.gate/.up/.y = F.silu(gate)*up; add <name>.a/.b/.y = a+b. All ground truth is fp32; the reference converts f16/bf16 storage on the fly.",
+  "description": "CPU reference-op goldens (M5-T02/T03). GEMM (cases): <name>.a [M,K] f32, <name>.b [N,K] weight-dtype, optional <name>.bias [N], <name>.c [M,N] f32 = a @ b.float().T (+ bias.float()). RMSNorm (rmsnorm_cases): <name>.x [R,E] x-dtype, <name>.weight [E], <name>.y [R,E] f32 = xf * rsqrt(mean(xf^2)+eps) * weight.float(). Softmax (softmax_cases): <name>.x [R,N] f32, <name>.y [R,N] f32 = softmax(x,-1). Elementwise (elementwise_cases): silu_mul <name>.gate/.up/.y = F.silu(gate)*up; add <name>.a/.b/.y = a+b. All ground truth is fp32; the reference converts f16/bf16 storage on the fly. Embedding (embedding_cases): <name>.ids [T] i32, <name>.weight [V,E] weight-dtype, <name>.y [T,E] f32 = weight.float()[ids].",
   "elementwise_cases": [
     {
       "cols": 176,
@@ -108,6 +108,21 @@
       "kind": "add",
       "name": "add_basic",
       "rows": 16
+    }
+  ],
+  "embedding_cases": [
+    {
+      "e": 64,
+      "ids": [
+        0,
+        511,
+        42,
+        42,
+        255
+      ],
+      "name": "embedding_edge",
+      "vocab": 512,
+      "weight_dtype": "bfloat16"
     }
   ],
   "generator_versions": {

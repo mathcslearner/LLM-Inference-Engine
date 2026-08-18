@@ -82,7 +82,7 @@ Files this milestone creates:
 | File | Module | Contents | Ticket |
 |---|---|---|---|
 | `src/cpu/ops.h` / per-op `.cpp` | cpu | reference op entries (`gemm`, `rmsnorm`, `silu_mul`, `add`, `softmax`, `embedding_lookup`, `rope_apply`, `attention`) | T02–T05 |
-| `src/model/modules.h` / `.cpp` | model | `Linear` (interface) + `ReferenceLinear`, `RmsNorm`, `Rope`, `Attention`, `Mlp`, `DecoderLayer` | T02–T07 |
+| `src/model/modules.h` / `.cpp` | model | `Linear` (interface) + `ReferenceLinear`, `RmsNorm`, `Embedding`, `Rope`, `Attention`, `Mlp`, `DecoderLayer` | T02–T07 |
 | `src/model/model.h` | model | abstract `Model`, `ForwardRequest`, `LogitsMode`, `ActivationHook` | T07 |
 | `src/model/reference_model.h` / `.cpp` | model | `ReferenceModel` (embedding → N `DecoderLayer` → final norm → lm_head) | T07 |
 | `src/model/registry.h` / `.cpp` | model | HF-architecture-string → builder map; `BuildModel` | T08 |
@@ -276,9 +276,21 @@ parallel implementations behind `Model`, §8):
   `y = x / sqrt(mean(x²) + eps) · weight` in fp32, per HF Llama
   (`x * rsqrt(mean(x*x, -1) + eps)` then scale), `eps = config.rms_norm_eps`.
   Mean is over the hidden dimension per token. Reference calls `cpu::rmsnorm`.
-- **`Rope`** (M5-T04): holds precomputed cos/sin tables (§7); `apply(Q, K,
-  positions)` rotates in place. Positions are a **per-token vector**, not a
-  scalar start (M6-T03/M11 need arbitrary positions).
+- **`Embedding`** (M5-T04): holds the `[V, E]` table (zero-copy checkpoint
+  handle, bf16/f16 storage preserved); `forward(ids) → y` gathers rows widened
+  to fp32 via `cpu::embedding_lookup`. Added as a concrete module (the design
+  originally treated the lookup as a bare op in `ReferenceModel`) so it is the
+  seam for M6-T06's tied-weight sharing — lookup and lm_head projection can hold
+  *different physical layouts* of the same logical weight behind separate
+  modules. `ids` is the `ForwardRequest.token_ids` span, passed straight
+  through.
+- **`Rope`** (M5-T04): precomputes cos/sin tables `[num_positions, d/2]` at
+  construction from `config.rope_theta` and any `rope_scaling` (§7), exposing
+  `inv_freq` for the scaling goldens; `apply(Q, K, positions)` rotates in place
+  via `cpu::rope_apply` (once per tensor). Positions are a **per-token vector**,
+  not a scalar start (M6-T03/M11 need arbitrary positions). Table construction
+  (config interpretation) lives in the module; the stateless `cpu::rope_apply`
+  takes the tables as inputs.
 - **`Attention`** (M5-T05): owns q/k/v/o `Linear`s and a `Rope`. Its `forward`
   projects QKV, applies RoPE, **appends new K/V to the cache** (§6), reads the
   accumulated `[Hkv, P+T, d]` K/V back, computes causal-masked GQA attention
@@ -596,13 +608,20 @@ its explicit statement here.
 tables at model build (or lazily up to the max position seen); `apply` indexes
 by each token's absolute position from `ForwardRequest.positions`. Arbitrary
 per-token positions (not a contiguous `0..T`) are required for M6-T03 and M11.
+Only the first half `d/2` is stored — the half-rotation reuses `cos[p,j]` for
+both elements of a pair. `inv_freq` and the angle `p · inv_freq[j]` are formed
+in **fp64** for accuracy and stored fp32; HF forms them in fp32, so the tables
+agree with the HF goldens as **Class T** (the fp32-`cosf` vs fp64-`cos` range
+reduction diverges as the position grows — negligible at the tiny fixture's max
+position 127, ~5e-3 at position 131071). `inv_freq` itself agrees to ~1 ulp, so
+the scaling goldens (which target `inv_freq` directly) stay tight.
 
 **`rope_scaling`** (parsed in M4, model-loading.md §3.2; interpreted here):
 
 | `rope_type` | Effect on `inv_freq` / angle |
 |---|---|
 | absent / `"default"` | none (identity) |
-| `"linear"` | angle uses `p / factor` (position interpolation) |
+| `"linear"` | `inv_freq /= factor` (position interpolation). Equivalent to scaling the angle `p / factor` since `angle = p · inv_freq`; the reference divides `inv_freq` to match HF's `_compute_linear_scaling_rope_parameters` arithmetic exactly. |
 | `"llama3"` | HF's piecewise low/high-frequency wavelength scaling: below `low_freq_factor` wavelength unscaled, above `high_freq_factor` divided by `factor`, a smooth ramp between — the exact HF `_compute_llama3_parameters` formula, using `factor`, `low_freq_factor`, `high_freq_factor`, `original_max_position_embeddings` from `RopeScaling` |
 | anything else | `Unimplemented` at build (the executor rejects what it can't honor, model-loading.md §3.2) |
 
@@ -773,8 +792,8 @@ total). Planned additions under `tests/fixtures/models/`:
 
 | Fixture | Consumed by | Contents |
 |---|---|---|
-| `tiny-llama/expected/ops.safetensors` | T02–T04 | GEMM cases (incl. `k==1`, skinny, wide); RMSNorm on bf16 input → fp32 out; softmax on large-magnitude logits (e.g. ±1e4); SiLU-and-mul; embedding rows for given ids |
-| `tiny-llama/expected/rope.safetensors` | T04 | RoPE input/output at positions {0, 1, 127}; and a llama3-scaled cos/sin table golden from the committed Llama-3.1 config (§7) |
+| `tiny-llama/expected/ops.safetensors` | T02–T04 | GEMM cases (incl. `k==1`, skinny, wide); RMSNorm on bf16 input → fp32 out; softmax on large-magnitude logits (e.g. ±1e4); SiLU-and-mul; `embedding_edge` — real bf16 embed table gathered at edge ids {0, V−1, duplicate} |
+| `tiny-llama/expected/rope.safetensors` | T04 | `tiny_table` cos/sin `[max_pos, d/2]`; `tiny_sparse`/`tiny_contig` apply I/O in token-major `[T, H, d]` at positions {0, 1, 127} and {0..7} (GQA H=4/Hkv=2); `llama3` scaled `inv_freq` + cos/sin from the committed Llama-3.1 config (§7); `linear` scaled `inv_freq` + cos/sin (synthetic factor 4). The end-to-end embedding golden is the existing `activations.safetensors` `embeddings`/`input_ids`. |
 | `tiny-llama/expected/attention.safetensors` | T05 | per-layer attention input/output for **prefill from empty** and **prefill continuing from a non-empty cache** (P>0, produced via HF with a seeded past-key-values) — GQA (Hkv < H) exercised by tiny-llama's 4 heads / 2 kv heads |
 | `tiny-llama/expected/generate.json` | T09 | greedy `generate(do_sample=False)` continuation (≥ 32 ids) for a few fixed prompts |
 | `tiny-qwen2/` (new model fixture) | T10 | a tiny `Qwen2ForCausalLM` mirror of tiny-llama: **q/k/v biases**, its config fields, tied or untied embeddings, with the same `expected/` set (logits + greedy) — exercises the Qwen2 wiring on the shared modules |

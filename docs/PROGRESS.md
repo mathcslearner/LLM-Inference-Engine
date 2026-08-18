@@ -657,3 +657,59 @@ max-abs-diff: rmsnorm ≤9.5e-7 (tol 1e-4), silu_mul ≤2.4e-7 (tol 1e-4),
 softmax ≤3.0e-8 (tol 1e-5). Labels: both `cpu`; ordinary portable tests
 (call `cpu::` directly, no SCALAR_PASS). 632 tests green; format + scoped
 tidy clean.
+
+M5-T04 done (2026-08-17: Embedding & RoPE, CPU). Two new reference ops in
+`src/cpu/` (`embedding.cpp`, `rope.cpp`), two new modules in
+`src/model/modules.{h,cpp}`. **`cpu::embedding_lookup(table, ids, y)`** —
+gathers `table[ids[t]]` widened f32/f16/bf16→fp32 per element (zero-copy
+bf16 checkpoint table never up-converted at load); `ids` is a
+`std::span<const std::int32_t>` (the `ForwardRequest.token_ids` span, passed
+straight through — no i64 copy). Out-of-range id → `InvalidArgument` naming
+index *and* value (pre-scanned before the threaded gather so no OOB read).
+**`cpu::rope_apply(x, positions, cos, sin)`** — in-place HF half-rotation
+RoPE on `x[T, Hx, d]` (Q with Hx=H, K with Hx=Hkv, called once per tensor):
+per pair `(j, j+d/2)` rotated by `cos[p,j]`/`sin[p,j]`, both halves read
+before either is written (in-place-safe). `positions` bounds pre-scanned →
+`InvalidArgument` naming index/value (this is where §5's
+`max(positions) < max_position_embeddings` materializes for the reference).
+Both ops `parallel_for`-threaded over tokens with per-element maps →
+bit-identical across thread counts. **`Embedding` module** (concrete, like
+`RmsNorm`) — zero-copy `[V,E]` table, `forward(ids) → y` via the op;
+introduced as a module (the design originally had the lookup as a bare op in
+`ReferenceModel`) to be M6-T06's tied-weight sharing seam — design §4.2
+updated to record the addition. **`Rope` module** — `Create(head_dim, theta,
+rope_scaling, num_positions)` precomputes `cos`/`sin` `[num_positions, d/2]`
+(only the first half stored; half-rotation reuses `cos[p,j]` for both
+elements of a pair) and exposes `inv_freq`; `apply(q, k, positions)` calls
+`cpu::rope_apply` twice. `rope_scaling`: absent/`default` → identity,
+`linear` → `inv_freq /= factor` (HF `_compute_linear_scaling` form, not the
+doc's literal `p/factor` — §7 clarified), `llama3` → exact HF
+`_compute_llama3_parameters` piecewise wavelength scaling (validated
+`factor>0`, `high≠low`, `orig_max_pos>0`); any other `rope_type` →
+`Unimplemented` listing supported. **Non-obvious decisions:** `inv_freq` and
+the angle `p·inv_freq[j]` formed in **fp64** (accuracy) and stored fp32,
+while HF uses fp32 → agreement is Class T (fp32-`cosf` vs fp64-`cos` range
+reduction diverges with position: negligible at the tiny fixture's max 127,
+~5e-3 at 131071); `inv_freq` itself agrees to ~1 ulp so the scaling goldens
+(which target `inv_freq`) stay tight; table construction is config
+interpretation and lives in the `Rope` module, not in the stateless `cpu`
+op. Fixtures: new `tools/gen_fixtures/tiny_llama_rope.py`
+(`tiny-llama-rope` subcommand → `rope.safetensors`/`rope_meta.json`) — HF
+`LlamaRotaryEmbedding`/`apply_rotary_pos_emb` goldens: `tiny_table` cos/sin
+`[128,8]`, `tiny_sparse`/`tiny_contig` apply I/O in token-major `[T,H,d]`
+(positions {0,1,127} with GQA H=4/Hkv=2, and {0..7}), `llama3` scaled
+`inv_freq [64]` + cos/sin `[5,64]` from the committed Llama-3.1 config,
+`linear` scaled `inv_freq [8]` + cos/sin (synthetic factor 4); plus one
+`embedding_edge` case appended to `ops.safetensors` (real bf16 embed table,
+ids {0, V−1, 42, 42, 255}) after the existing draws so the M5-T02/T03 GEMM/
+norm bytes are untouched (verified byte-identical; `regen_fixtures.sh
+--verify` clean). Observed max-abs-diff: embedding bit-exact (widening copy,
+tol 0); rope tiny cos/sin ≤1.6e-6 (tol 1e-4), tiny apply ≤2.1e-6 (tol 1e-4),
+llama3 inv_freq 6.0e-8 (tol 1e-6), llama3 cos/sin ≤4.7e-4 (tol 1e-3, the
+range-reduction band). Tests (26): `embedding_test.cpp` (12) — ops +
+activations goldens, widening equivalence, threading bit-exact, module
+forward, 6 error paths; `rope_test.cpp` (14, incl. the 2 parameterized
+apply cases) — tiny table/apply goldens, half-rotation-not-interleaved
+guard, position-0 identity (bit-exact), threading bit-exact, llama3/linear
+scaling goldens, 7 Create/apply error paths. Labels: both `cpu`; ordinary
+portable tests. 658 tests green; format + scoped tidy clean.

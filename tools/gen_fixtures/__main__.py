@@ -7,6 +7,7 @@ from . import (
     qwen2_names,
     tiny_llama,
     tiny_llama_ops,
+    tiny_llama_rope,
     tokenizer_vectors,
 )
 
@@ -20,6 +21,7 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
     tiny_llama.register(subparsers)
     tiny_llama_ops.register(subparsers)
+    tiny_llama_rope.register(subparsers)
     qwen2_names.register(subparsers)
     tokenizer_vectors.register(subparsers)
     model_configs.register(subparsers)

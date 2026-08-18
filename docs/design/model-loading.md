@@ -866,10 +866,13 @@ tests/fixtures/
         activations.safetensors   # per-layer + end-to-end outputs (M5 consumes)
         meta.json                 # input ids, seed, generator versions
         ops.safetensors           # M5-T02: cpu::gemm goldens; M5-T03: cpu::
-                                  #   rmsnorm/softmax/silu_mul/add (+ ops_meta.json)
+                                  #   rmsnorm/softmax/silu_mul/add; M5-T04:
+                                  #   embedding_edge (+ ops_meta.json)
+        rope.safetensors          # M5-T04: cpu::rope_apply / Rope goldens
+                                  #   (+ rope_meta.json; model-execution.md §7)
         # M5 adds more op-level goldens alongside activations.safetensors —
-        # rope.safetensors, attention.safetensors, generate.json — each landing
-        # with the ticket that consumes it (model-execution.md §12).
+        # attention.safetensors, generate.json — each landing with the ticket
+        # that consumes it (model-execution.md §12).
     tiny-qwen2/                   # M5-T10: a tiny Qwen2ForCausalLM mirror
         …                         #   (QKV biases, its config fields); same
                                   #   config/weights/expected/ shape as tiny-llama

@@ -265,6 +265,24 @@ behind an existing subsystem):
   aliasing allowed. `src/model/modules.{h,cpp}` — `RmsNorm` module
   (zero-copy `[E]` weight + eps, f32-activation `forward`). 10 new
   `ops.safetensors` cases appended after the GEMM draws (GEMM bytes
-  unchanged, `--verify` byte-clean); +23 tests (632 green).
+  unchanged, `--verify` byte-clean); +23 tests (632 green). T04 Embedding &
+  RoPE: `src/cpu/embedding.cpp` (`cpu::embedding_lookup` — gather +
+  f32/f16/bf16→fp32 widen, `ids` as the `ForwardRequest.token_ids` span,
+  out-of-range id pre-scanned → InvalidArgument naming index+value) and
+  `src/cpu/rope.cpp` (`cpu::rope_apply` — in-place HF half-rotation on
+  `[T,Hx,d]`, pairs `(j,j+d/2)` rotated by precomputed `cos`/`sin`, position
+  bounds pre-scanned; both ops token-parallel and bit-identical across
+  threads); `src/model/modules.{h,cpp}` — `Embedding` module (zero-copy
+  `[V,E]` table; added as the M6-T06 tied-weight seam, design §4.2 updated)
+  and `Rope` module (`Create` precomputes `cos`/`sin` `[num_pos, d/2]` +
+  `inv_freq` from theta and `rope_scaling`: default/`linear`
+  (`inv_freq/=factor`)/`llama3` (exact HF `_compute_llama3_parameters`),
+  other → Unimplemented; `apply` rotates Q and K). inv_freq/angle formed in
+  fp64, stored fp32 → Class T vs HF (range reduction diverges with position:
+  negligible ≤127, ~5e-3 at 131071; inv_freq ~1 ulp). New
+  `tools/gen_fixtures/tiny_llama_rope.py` (`tiny-llama-rope` →
+  `rope.safetensors`: tiny table/apply, llama3 & linear scaled inv_freq +
+  cos/sin) + one `embedding_edge` case appended to `ops.safetensors` (existing
+  bytes byte-identical, `--verify` clean); +26 tests (658 green).
 
-Next up: **M5-T04** (Embedding & RoPE, CPU).
+Next up: **M5-T05** (Causal attention, CPU).

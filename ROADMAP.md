@@ -711,7 +711,7 @@ add, and numerically-stable softmax — all CPU, fp32 accumulation.
 **Acceptance criteria:**
 - Golden tests vs fixture outputs for each op (including RMSNorm on bf16 inputs, softmax with large-magnitude logits).
 
-### M5-T04 · Embedding & RoPE (CPU)
+### M5-T04 · Embedding & RoPE (CPU) — ✅ DONE (2026-08-17)
 Token-embedding lookup; rotary position embeddings matching HF Llama exactly
 (half-rotation layout, configurable theta, optional scaling factors parsed in M4-T03).
 Precompute cos/sin tables.

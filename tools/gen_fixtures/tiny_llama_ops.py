@@ -47,6 +47,7 @@ def _real_weights():
         "gate_proj": sd["model.layers.0.mlp.gate_proj.weight"],   # [176, 64]
         "down_proj": sd["model.layers.0.mlp.down_proj.weight"],   # [64, 176]
         "lm_head": sd["lm_head.weight"],                          # [512, 64]
+        "embed_tokens": sd["model.embed_tokens.weight"],          # [512, 64]
     }
 
 
@@ -230,6 +231,28 @@ def _record_ops(out_dir) -> None:
             {"name": name, "kind": kind, "rows": t0.shape[0], "cols": t0.shape[1]}
         )
 
+    # --- Embedding lookup (M5-T04): real bf16 embed table, edge-case ids. ---
+    # Ids cover 0, V-1 (boundary), and a duplicate (42 twice) — the gather is
+    # independent per id. Ground truth is weight.float()[ids] (widen-then-gather
+    # == gather-then-widen for a lossless bf16->f32 widening). Uses the real
+    # weight (not `gen`), so the RNG stream above is unchanged.
+    embed_manifest = []
+    embed_ids = [0, 511, 42, 42, 255]
+    embed_weight = _real_weights()["embed_tokens"]  # [512, 64] bf16
+    embed_y = embed_weight.float()[embed_ids]
+    tensors["embedding_edge.ids"] = torch.tensor(embed_ids, dtype=torch.int32)
+    tensors["embedding_edge.weight"] = embed_weight.contiguous().clone()
+    tensors["embedding_edge.y"] = embed_y.contiguous().clone()
+    embed_manifest.append(
+        {
+            "name": "embedding_edge",
+            "ids": embed_ids,
+            "vocab": embed_weight.shape[0],
+            "e": embed_weight.shape[1],
+            "weight_dtype": str(embed_weight.dtype).removeprefix("torch."),
+        }
+    )
+
     common.save_safetensors(tensors, out_dir / "ops.safetensors")
     common.dump_json(
         {
@@ -241,12 +264,15 @@ def _record_ops(out_dir) -> None:
             "(softmax_cases): <name>.x [R,N] f32, <name>.y [R,N] f32 = "
             "softmax(x,-1). Elementwise (elementwise_cases): silu_mul <name>.gate/"
             ".up/.y = F.silu(gate)*up; add <name>.a/.b/.y = a+b. All ground truth "
-            "is fp32; the reference converts f16/bf16 storage on the fly.",
+            "is fp32; the reference converts f16/bf16 storage on the fly. "
+            "Embedding (embedding_cases): <name>.ids [T] i32, <name>.weight "
+            "[V,E] weight-dtype, <name>.y [T,E] f32 = weight.float()[ids].",
             "seed": SEED,
             "cases": manifest,
             "rmsnorm_cases": rmsnorm_manifest,
             "softmax_cases": softmax_manifest,
             "elementwise_cases": elementwise_manifest,
+            "embedding_cases": embed_manifest,
             "regenerate": "tools/.venv/bin/python -m gen_fixtures tiny-llama-ops",
             "generator_versions": common.generator_versions(),
         },
