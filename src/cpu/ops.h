@@ -168,4 +168,44 @@ namespace engine::cpu {
                                       const tensor::Tensor& cos,
                                       const tensor::Tensor& sin);
 
+// out[T, H, d] = softmax(scale · Q·Kᵀ + causal_mask) · V — naive causal GQA
+// self-attention (model-execution.md §3.1–3.2, §6.3). This is the one op with
+// a materialized intermediate: the scores `[H·T, P+T]` are formed, causal-
+// masked, softmaxed (via `cpu::softmax`, so the `-inf → 0` mask contract is the
+// same op the goldens pin), then contracted against V. Clarity-first — the
+// oracle every M6 attention kernel validates against, deliberately unoptimized.
+//
+// GQA by KV-head indexing, **no materialized repeat** (§3.2): with `g = H /
+// Hkv`, query head `h` reads kv head `h / g` (repeat_interleave — HF's
+// `repeat_kv`), matching M6-T04's "GQA via KV head indexing" requirement.
+//
+// Prefill-continuation (§6.3): the cache K/V hold `L = P + T` positions — `P`
+// already-cached, then this call's `T` new tokens. New query `t` (absolute
+// position `P + t`) attends to key positions `[0, P + t]` inclusive: all `P`
+// cached plus the causal prefix of the new block. Decode (`T == 1`), prefill
+// from empty (`P == 0`), and prefix-cache hits are all `(P, T)` choices of this
+// single path. `L == T` is the empty-cache case; `L > T` continues a cache.
+//
+//   q     : [T, H, d], contiguous, dtype kFloat32 (post-RoPE queries).
+//   k, v  : [Hkv, L, d], contiguous, dtype kFloat32 — the head-major cache view
+//           (kvcache::KvView), K and V identical shape, L >= T.
+//   scale : the score multiplier, applied to Q·Kᵀ *after* the dot (HF order:
+//           `matmul(q, kᵀ) * scaling`). The caller passes 1/sqrt(d) (the
+//           `Attention` module computes it; the op stays policy-free).
+//   out   : [T, H, d], contiguous, dtype kFloat32, caller-allocated — fully
+//           overwritten. Reshaped to [T, H·d] by the caller before o_proj.
+//
+// H must be a positive multiple of Hkv; d matches across q/k/v/out; all of
+// T,H,Hkv,d >= 1 and L >= T. Each output element sums its terms (the K·d dot,
+// and the length-L context) in a single ascending fp32 accumulator, and rows
+// are independent — so the result is bit-identical across thread counts, and
+// Class T against HF (which reduces in its own order). Malformed inputs — wrong
+// rank/dtype/shape, non-contiguous operand, `H % Hkv != 0`, a d/L disagreement,
+// wrong `out` — are recoverable InvalidArgument naming the offending input
+// (ADR-003). Undefined handles are a programmer error (CHECK).
+[[nodiscard]] core::Status attention(const tensor::Tensor& q,
+                                     const tensor::Tensor& k,
+                                     const tensor::Tensor& v, float scale,
+                                     tensor::Tensor& out);
+
 }  // namespace engine::cpu

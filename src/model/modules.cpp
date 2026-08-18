@@ -2,6 +2,7 @@
 
 #include "core/status.h"
 #include "cpu/ops.h"
+#include "kvcache/kv_cache.h"
 #include "model/config.h"
 #include "tensor/dtype.h"
 #include "tensor/ops.h"
@@ -10,6 +11,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <numbers>
 #include <optional>
 #include <span>
@@ -359,6 +361,165 @@ core::Status Rope::apply(tensor::Tensor& q, tensor::Tensor& k,
   }
   RETURN_IF_ERROR(cpu::rope_apply(q, positions, cos_, sin_));
   return cpu::rope_apply(k, positions, cos_, sin_);
+}
+
+core::StatusOr<Attention> Attention::Create(std::unique_ptr<Linear> q_proj,
+                                            std::unique_ptr<Linear> k_proj,
+                                            std::unique_ptr<Linear> v_proj,
+                                            std::unique_ptr<Linear> o_proj,
+                                            Rope rope, int num_heads,
+                                            int num_kv_heads, int head_dim) {
+  if (q_proj == nullptr || k_proj == nullptr || v_proj == nullptr ||
+      o_proj == nullptr) {
+    return core::InvalidArgumentError(
+        "Attention: q/k/v/o projections must all be non-null");
+  }
+  if (num_heads < 1 || num_kv_heads < 1 || head_dim < 1) {
+    return core::InvalidArgumentError(
+        "Attention: num_heads/num_kv_heads/head_dim must be >= 1, got {}/{}/{}",
+        num_heads, num_kv_heads, head_dim);
+  }
+  if (num_heads % num_kv_heads != 0) {
+    return core::InvalidArgumentError(
+        "Attention: num_heads ({}) must be a positive multiple of num_kv_heads "
+        "({})",
+        num_heads, num_kv_heads);
+  }
+  if (rope.head_dim() != head_dim) {
+    return core::InvalidArgumentError(
+        "Attention: rope head_dim ({}) must equal head_dim ({})",
+        rope.head_dim(), head_dim);
+  }
+
+  const std::int64_t q_rows = static_cast<std::int64_t>(num_heads) * head_dim;
+  const std::int64_t kv_rows =
+      static_cast<std::int64_t>(num_kv_heads) * head_dim;
+  // Hidden size E is the shared projection input width; it is NOT assumed equal
+  // to H·d (a decoupled head_dim is honored — model-execution.md §3.1).
+  const std::int64_t hidden = q_proj->in_features();
+
+  if (q_proj->out_features() != q_rows) {
+    return core::InvalidArgumentError(
+        "Attention: q_proj out_features {} must equal num_heads·head_dim {}",
+        q_proj->out_features(), q_rows);
+  }
+  if (k_proj->out_features() != kv_rows) {
+    return core::InvalidArgumentError(
+        "Attention: k_proj out_features {} must equal num_kv_heads·head_dim {}",
+        k_proj->out_features(), kv_rows);
+  }
+  if (v_proj->out_features() != kv_rows) {
+    return core::InvalidArgumentError(
+        "Attention: v_proj out_features {} must equal num_kv_heads·head_dim {}",
+        v_proj->out_features(), kv_rows);
+  }
+  if (k_proj->in_features() != hidden || v_proj->in_features() != hidden) {
+    return core::InvalidArgumentError(
+        "Attention: q/k/v_proj must share in_features (hidden size); got q={} "
+        "k={} v={}",
+        hidden, k_proj->in_features(), v_proj->in_features());
+  }
+  if (o_proj->in_features() != q_rows) {
+    return core::InvalidArgumentError(
+        "Attention: o_proj in_features {} must equal num_heads·head_dim {}",
+        o_proj->in_features(), q_rows);
+  }
+  if (o_proj->out_features() != hidden) {
+    return core::InvalidArgumentError(
+        "Attention: o_proj out_features {} must equal the hidden size {}",
+        o_proj->out_features(), hidden);
+  }
+
+  return Attention(std::move(q_proj), std::move(k_proj), std::move(v_proj),
+                   std::move(o_proj), std::move(rope), num_heads, num_kv_heads,
+                   head_dim, hidden);
+}
+
+core::Status Attention::forward(const tensor::Tensor& x,
+                                std::span<const std::int32_t> positions,
+                                int layer, kvcache::KvCache& cache,
+                                tensor::Tensor& y) const {
+  // Front-load all input validation (ADR-003) so a failure never leaves a
+  // half-appended layer: nothing touches the cache until every check passes.
+  if (!x.defined()) {
+    return core::InvalidArgumentError("Attention::forward: x is undefined");
+  }
+  if (x.shape().rank() != 2 || x.shape().dim(1) != hidden_size_) {
+    return core::InvalidArgumentError(
+        "Attention::forward: x must be [T, {}], got {}", hidden_size_,
+        x.shape());
+  }
+  if (x.dtype() != tensor::DataType::kFloat32) {
+    return core::InvalidArgumentError(
+        "Attention::forward: x must be f32, got {}",
+        tensor::to_string(x.dtype()));
+  }
+  const std::int64_t t_dim = x.shape().dim(0);
+  const auto num_positions = static_cast<std::int64_t>(positions.size());
+  if (num_positions != t_dim) {
+    return core::InvalidArgumentError(
+        "Attention::forward: positions length {} must equal T {}",
+        num_positions, t_dim);
+  }
+  if (!y.defined()) {
+    return core::InvalidArgumentError("Attention::forward: y is undefined");
+  }
+  if (y.shape().rank() != 2 || y.shape().dim(0) != t_dim ||
+      y.shape().dim(1) != hidden_size_) {
+    return core::InvalidArgumentError(
+        "Attention::forward: y must be caller-allocated [{}, {}], got {}",
+        t_dim, hidden_size_, y.shape());
+  }
+
+  const std::int64_t q_rows = static_cast<std::int64_t>(num_heads_) * head_dim_;
+  const std::int64_t kv_rows =
+      static_cast<std::int64_t>(num_kv_heads_) * head_dim_;
+
+  // Project QKV into freshly allocated fp32 work tensors (the reference
+  // allocates freely; M6/M12 provide workspaces). q [T, H·d], k/v [T, Hkv·d].
+  ASSIGN_OR_RETURN(tensor::Tensor q_flat,
+                   tensor::ops::zeros(tensor::Shape{t_dim, q_rows},
+                                      tensor::DataType::kFloat32));
+  ASSIGN_OR_RETURN(tensor::Tensor k_flat,
+                   tensor::ops::zeros(tensor::Shape{t_dim, kv_rows},
+                                      tensor::DataType::kFloat32));
+  ASSIGN_OR_RETURN(tensor::Tensor v_flat,
+                   tensor::ops::zeros(tensor::Shape{t_dim, kv_rows},
+                                      tensor::DataType::kFloat32));
+  RETURN_IF_ERROR(q_proj_->forward(x, q_flat));
+  RETURN_IF_ERROR(k_proj_->forward(x, k_flat));
+  RETURN_IF_ERROR(v_proj_->forward(x, v_flat));
+
+  // Reshape to head-split [T, heads, d] views (contiguous → zero-copy). RoPE
+  // rotates Q and K in place (V is not rotated).
+  ASSIGN_OR_RETURN(tensor::Tensor q3,
+                   q_flat.reshape(tensor::Shape{t_dim, num_heads_, head_dim_}));
+  ASSIGN_OR_RETURN(tensor::Tensor k3, k_flat.reshape(tensor::Shape{
+                                          t_dim, num_kv_heads_, head_dim_}));
+  ASSIGN_OR_RETURN(
+      const tensor::Tensor v3,
+      v_flat.reshape(tensor::Shape{t_dim, num_kv_heads_, head_dim_}));
+  RETURN_IF_ERROR(rope_.apply(q3, k3, positions));
+
+  // Append this call's K/V (token-major [T, Hkv, d]) and read the accumulated
+  // [Hkv, P+T, d] head-major view back — RoPE and the cache write stay separate
+  // observable steps for the reference (§4.2).
+  RETURN_IF_ERROR(cache.append(layer, k3, v3));
+  ASSIGN_OR_RETURN(const kvcache::KvView kv, cache.view(layer));
+
+  // Causal-masked GQA attention → context [T, H, d], then o_proj. Scale is
+  // 1/sqrt(d) formed in double and cast to fp32 (HF's head_dim**-0.5).
+  ASSIGN_OR_RETURN(
+      tensor::Tensor ctx3,
+      tensor::ops::zeros(tensor::Shape{t_dim, num_heads_, head_dim_},
+                         tensor::DataType::kFloat32));
+  const auto scale =
+      static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim_)));
+  RETURN_IF_ERROR(cpu::attention(q3, kv.k, kv.v, scale, ctx3));
+
+  ASSIGN_OR_RETURN(const tensor::Tensor ctx2,
+                   ctx3.reshape(tensor::Shape{t_dim, q_rows}));
+  return o_proj_->forward(ctx2, y);
 }
 
 }  // namespace engine::model

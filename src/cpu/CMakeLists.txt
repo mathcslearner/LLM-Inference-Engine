@@ -8,7 +8,7 @@
 # implementation detail (threading is invisible in the op signatures) and stays
 # PRIVATE.
 add_library(engine_cpu STATIC gemm.cpp rmsnorm.cpp activation.cpp softmax.cpp
-                              embedding.cpp rope.cpp)
+                              embedding.cpp rope.cpp attention.cpp)
 add_library(engine::cpu ALIAS engine_cpu)
 target_include_directories(engine_cpu PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(engine_cpu

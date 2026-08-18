@@ -713,3 +713,55 @@ apply cases) — tiny table/apply goldens, half-rotation-not-interleaved
 guard, position-0 identity (bit-exact), threading bit-exact, llama3/linear
 scaling goldens, 7 Create/apply error paths. Labels: both `cpu`; ordinary
 portable tests. 658 tests green; format + scoped tidy clean.
+
+M5-T05 done (2026-08-17: Causal attention, CPU). New reference op
+`src/cpu/attention.cpp` (`cpu::attention`), new `Attention` module in
+`src/model/modules.{h,cpp}`, and the KV-cache interface header
+`src/kvcache/kv_cache.h`. **`cpu::attention(q, k, v, scale, out)`** — naive
+causal GQA self-attention: q `[T,H,d]`, head-major cache k/v `[Hkv,L,d]`
+(L=P+T), out `[T,H,d]`. Materializes scores `[H·T,L]`, causal-masks with
+`-inf` (new query `t` at cache position `P+t` attends keys `[0,P+t]`),
+softmaxes via `cpu::softmax` (reusing its documented `-inf → 0` mask
+contract), then contracts against V. GQA by **KV-head indexing** — query head
+`h` reads kv head `h/g` (`g=H/Hkv`, repeat_interleave), **no materialized
+repeat**. `scale` (=1/sqrt(d)) multiplies the completed dot (HF order: matmul
+then scaling). Two `parallel_for` passes over `(h,t)` rows, each output a
+single ascending fp32 accumulator → bit-identical across thread counts. The
+op's compute is split into `ScorePass`/`ContextPass` helpers (cognitive-
+complexity budget). **`Attention` module** — owns q/k/v/o `Linear`s as owning
+`std::unique_ptr<Linear>` (so M6 `PackedLinear`/M13 `QuantizedLinear` slot in;
+the class is move-only) plus a `Rope`; `Create` validates projection shapes
+against (H, Hkv, d) without assuming `E==H·d` (decoupled head_dim honored);
+`forward(x, positions, layer, cache, y)` projects QKV → reshapes to
+`[T,heads,d]` → RoPE on Q/K → `cache.append` (token-major `[T,Hkv,d]`) →
+`cache.view` (head-major `[Hkv,P+T,d]`) → `cpu::attention` → reshape ctx →
+`o_proj`. Validation front-loaded so a failure never half-appends; cache
+errors propagate. **`src/kvcache/kv_cache.h`** — the abstract `KvCache`
+interface + `CacheGeometry`/`KvView` (§6.1), landed here (not T06) because
+`Attention` consumes it; the `model → kvcache` CMake edge (ADR-002 Amendment
+5) wired PRIVATE, modules.h only forward-declares `KvCache`. `SimpleKvCache`
++ the token-by-token KV invariant remain M5-T06; T05 exercised the interface
+through a test-local `FakeKvCache` double. **Non-obvious decisions:** the
+score scale is applied *after* the dot (HF `matmul * scaling`, not seeded into
+the accumulator); the cache-view golden comparison uses a looser 1e-3 band
+(it's the raw projection+RoPE output, before o_proj/softmax average the GEMM
+Class-T spread down) while the final `out` holds tight (2e-4, observed
+≤2e-5); attention's masked scores use exact `-inf` (→ softmax 0), numerically
+identical to HF's `finfo.min` additive mask. Fixtures: new
+`tools/gen_fixtures/tiny_llama_attention.py` (`tiny-llama-attention` →
+`attention.safetensors`/`attention_meta.json`) — drives each layer's
+`self_attn` directly (fp32 tiny-llama, `_attn_implementation="eager"` via a
+registered capture wrapper over `eager_attention_forward`, explicit additive
+causal mask, `DynamicCache`-seeded past for P>0), storing per case (layer,P,T)
+the module I/O and op intermediates. 5 cases: `l{0,1}_prefill_empty` (P=0,T=8),
+`l{0,1}_prefill_continue` (P=5,T=6), `l0_decode` (P=7,T=1); GQA H=4/Hkv=2
+inherent, both layers (distinct weights). 49 KB, `regen_fixtures.sh --verify`
+byte-clean (existing ops/rope bytes untouched). Observed max-abs-diff: op
+`ctx` ≤3.6e-7 (tol 1e-4); module `out` ≤1.8e-5 (tol 2e-4); cache view ≤5.8e-4
+(tol 1e-3); bit-exact-vs-serial atol=rtol=0. Tests (9): `attention_test.cpp`
+— op goldens (5 cases), bit-exact-vs-serial (threading), causal-mask-hides-
+future, GQA-interleave-not-tiling, 7 op error paths; module goldens (5 cases,
+incl. accumulated-cache-view check + length), `Create` shape validation, 4
+`forward` error paths (incl. over-capacity → ResourceExhausted), `FakeKvCache`
+self-check. Label `cpu`; ordinary portable tests. 667 tests green; format +
+scoped tidy clean.

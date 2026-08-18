@@ -719,7 +719,7 @@ Precompute cos/sin tables.
 **Acceptance criteria:**
 - Golden tests: RoPE output matches fixture for positions {0, 1, large}, head dims from config; embedding lookup matches fixture rows.
 
-### M5-T05 · Causal attention (CPU)
+### M5-T05 · Causal attention (CPU) — ✅ DONE (2026-08-17)
 Naive causal self-attention with GQA: project QKV, apply RoPE, scores = QKᵀ/√d with
 causal mask, softmax, weighted sum, output projection. Supports prefill (T tokens)
 against an existing cache of length P.

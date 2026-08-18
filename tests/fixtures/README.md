@@ -38,9 +38,15 @@ models/
                                 #   apply I/O, llama3 & linear scaled inv_freq
                                 #   + cos/sin (docs/design/model-execution.md §7)
       rope_meta.json            # rope config params (tiny/llama3/linear; seed)
-      # M5 adds more op-level goldens here (attention.safetensors,
-      # generate.json), each landing with the ticket that consumes it —
-      # docs/design/model-execution.md §12.
+      attention.safetensors     # M5-T05: cpu::attention / Attention goldens —
+                                #   per case x/positions/past_k/past_v/q_rot/
+                                #   k_all/v_all/ctx/out (prefill empty, prefill
+                                #   continue P>0, decode); GQA H=4/Hkv=2
+                                #   (docs/design/model-execution.md §12)
+      attention_meta.json       # attention case manifest (cases, dims, scale,
+                                #   seed)
+      # M5 adds more op-level goldens here (generate.json), each landing with
+      # the ticket that consumes it — docs/design/model-execution.md §12.
   tiny-qwen2/                   # M5-T10: tiny Qwen2ForCausalLM (QKV biases);
                                 #   same config/weights/expected/ shape
   qwen2-weight-names.json       # real Qwen2 checkpoint name/shape inventory

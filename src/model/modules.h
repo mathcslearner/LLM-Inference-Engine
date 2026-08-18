@@ -5,10 +5,20 @@
 #include "tensor/tensor.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <utility>
 #include <vector>
+
+// The Attention module holds a `kvcache::KvCache&` in its forward (the new
+// `model → kvcache` edge, ADR-002 Amendment 5). Only a reference is used in the
+// header, so a forward declaration keeps this header from re-exporting kvcache
+// types (the ADR's PRIVATE-edge requirement); modules.cpp includes the full
+// interface.
+namespace engine::kvcache {
+class KvCache;
+}  // namespace engine::kvcache
 
 // Model graph modules (M5; design: docs/design/model-execution.md §4). Each
 // module owns its weight handles (borrowed, zero-copy, into the mapped
@@ -215,6 +225,79 @@ class Rope {
   std::vector<float> inv_freq_;  // [head_dim/2], fp32
   int head_dim_ = 0;
   std::int64_t num_positions_ = 0;
+};
+
+// Causal self-attention with GQA (M5-T05; design:
+// docs/design/model-execution.md §4.2, §3.1–3.2, §6.3). Owns the q/k/v/o
+// projection `Linear`s and a `Rope`; `forward` projects QKV, applies RoPE to Q
+// and K, appends the new K/V to the cache, reads the accumulated `[Hkv, P+T,
+// d]` K/V back, computes causal-masked GQA attention via `cpu::attention`, and
+// projects the context through o_proj. This is the one module that touches
+// `KvCache`.
+//
+// The projections are held behind the `Linear` interface (as owning handles) so
+// M13's `QuantizedLinear` and M6's `PackedLinear` slot in unchanged, and so
+// Qwen2's q/k/v biases are the projections' business (the builder constructs
+// biased `Linear`s from `config.attention_bias`) — M5-T10 support is wiring,
+// not new layer code. Holding `std::unique_ptr<Linear>` makes the module
+// move-only.
+class Attention {
+ public:
+  // Validates the projection shapes against (num_heads H, num_kv_heads Hkv,
+  // head_dim d): H a positive multiple of Hkv; q_proj out == H·d; k/v_proj out
+  // == Hkv·d; o_proj in == H·d; q/k/v_proj share in_features == E (the hidden
+  // size) and o_proj out == E; rope.head_dim() == d. A null projection, a shape
+  // disagreement, or a rope/head_dim mismatch → InvalidArgument naming the
+  // problem. `E == H·d` is *not* assumed — the dims come from the projections
+  // (model-execution.md §3.1), so a decoupled head_dim is honored.
+  [[nodiscard]] static core::StatusOr<Attention> Create(
+      std::unique_ptr<Linear> q_proj, std::unique_ptr<Linear> k_proj,
+      std::unique_ptr<Linear> v_proj, std::unique_ptr<Linear> o_proj, Rope rope,
+      int num_heads, int num_kv_heads, int head_dim);
+
+  // y[T, E] = attention(x[T, E]) for one layer. Projects QKV, rotates Q/K by
+  // `positions`, appends the new K/V to `cache` at `layer`, reads the
+  // accumulated K/V back, runs causal-masked GQA attention (scale = 1/sqrt(d)),
+  // and projects through o_proj. `x` and `y` are caller-allocated contiguous
+  // fp32 [T, E]; `positions.size() == T`. A wrong-shape/dtype `x`/`y`, a
+  // `positions`/T disagreement, or an out-of-range position → InvalidArgument;
+  // an over-capacity or geometry-mismatched cache surfaces the cache's Status.
+  // Validation is front-loaded (ADR-003) so a failure never leaves a
+  // half-appended layer.
+  [[nodiscard]] core::Status forward(const tensor::Tensor& x,
+                                     std::span<const std::int32_t> positions,
+                                     int layer, kvcache::KvCache& cache,
+                                     tensor::Tensor& y) const;
+
+  [[nodiscard]] int num_heads() const { return num_heads_; }
+  [[nodiscard]] int num_kv_heads() const { return num_kv_heads_; }
+  [[nodiscard]] int head_dim() const { return head_dim_; }
+  [[nodiscard]] std::int64_t hidden_size() const { return hidden_size_; }
+
+ private:
+  Attention(std::unique_ptr<Linear> q_proj, std::unique_ptr<Linear> k_proj,
+            std::unique_ptr<Linear> v_proj, std::unique_ptr<Linear> o_proj,
+            Rope rope, int num_heads, int num_kv_heads, int head_dim,
+            std::int64_t hidden_size)
+      : q_proj_(std::move(q_proj)),
+        k_proj_(std::move(k_proj)),
+        v_proj_(std::move(v_proj)),
+        o_proj_(std::move(o_proj)),
+        rope_(std::move(rope)),
+        num_heads_(num_heads),
+        num_kv_heads_(num_kv_heads),
+        head_dim_(head_dim),
+        hidden_size_(hidden_size) {}
+
+  std::unique_ptr<Linear> q_proj_;
+  std::unique_ptr<Linear> k_proj_;
+  std::unique_ptr<Linear> v_proj_;
+  std::unique_ptr<Linear> o_proj_;
+  Rope rope_;
+  int num_heads_ = 0;
+  int num_kv_heads_ = 0;
+  int head_dim_ = 0;
+  std::int64_t hidden_size_ = 0;  // E == q/k/v_proj in_features
 };
 
 }  // namespace engine::model

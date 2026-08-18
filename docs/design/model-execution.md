@@ -86,7 +86,7 @@ Files this milestone creates:
 | `src/model/model.h` | model | abstract `Model`, `ForwardRequest`, `LogitsMode`, `ActivationHook` | T07 |
 | `src/model/reference_model.h` / `.cpp` | model | `ReferenceModel` (embedding → N `DecoderLayer` → final norm → lm_head) | T07 |
 | `src/model/registry.h` / `.cpp` | model | HF-architecture-string → builder map; `BuildModel` | T08 |
-| `src/kvcache/kv_cache.h` | kvcache | abstract `KvCache` interface (§6) + `CacheGeometry`, `KvView` | T06 |
+| `src/kvcache/kv_cache.h` | kvcache | abstract `KvCache` interface (§6) + `CacheGeometry`, `KvView` | T05 |
 | `src/kvcache/simple_cache.h` / `.cpp` | kvcache | `SimpleKvCache` — per-sequence contiguous append-only storage | T06 |
 | `src/engine/generator.h` / `.cpp` | engine | `Generate(...)` greedy loop; per-token callback | T09 |
 | `src/engine/backend.h` | engine | `enum class Backend { kReference, kOptimized }`, selection helper (M6 fills the optimized arm) | T09 |
@@ -291,11 +291,24 @@ parallel implementations behind `Model`, §8):
   not a scalar start (M6-T03/M11 need arbitrary positions). Table construction
   (config interpretation) lives in the module; the stateless `cpu::rope_apply`
   takes the tables as inputs.
-- **`Attention`** (M5-T05): owns q/k/v/o `Linear`s and a `Rope`. Its `forward`
-  projects QKV, applies RoPE, **appends new K/V to the cache** (§6), reads the
-  accumulated `[Hkv, P+T, d]` K/V back, computes causal-masked GQA attention
-  via `cpu::attention`, and projects the context through `o_proj`. This is the
-  one module that touches `KvCache`.
+- **`Attention`** (M5-T05): owns q/k/v/o `Linear`s (as owning
+  `std::unique_ptr<Linear>` handles, so M6/M13 slot `PackedLinear`/
+  `QuantizedLinear` in — the class is move-only) and a `Rope`.
+  `Create(q,k,v,o, rope, H, Hkv, d)` validates the projection shapes against the
+  head counts (`q_proj out == H·d`, `k/v_proj out == Hkv·d`, `o_proj in == H·d`,
+  q/k/v share `in == E`, `o_proj out == E`, `rope.head_dim() == d`, `H % Hkv ==
+  0`) — `E == H·d` is *not* assumed, so a decoupled head_dim is honored.
+  `forward(x, positions, layer, cache, y)` projects QKV, applies RoPE to Q and K,
+  **appends new K/V to the cache** (§6), reads the accumulated `[Hkv, P+T, d]`
+  K/V back, computes causal-masked GQA attention via `cpu::attention` (scale =
+  `1/sqrt(d)` formed in double, cast to fp32 — HF's `head_dim**-0.5`), and
+  projects the context through `o_proj`. Input validation is front-loaded so a
+  failure never leaves a half-appended layer; cache errors (geometry/capacity)
+  propagate as their own `Status`. This is the one module that touches
+  `KvCache`. The `cpu::attention` op materializes the scores `[H·T, L]`,
+  causal-masks with `-inf`, softmaxes via `cpu::softmax` (reusing its `-inf → 0`
+  mask contract), and contracts against V; GQA is by KV-head indexing (query
+  head `h` → kv head `h / g`), no materialized repeat.
 - **`Mlp`** (M5-T03/T07): owns gate/up/down `Linear`s; SwiGLU —
   `down(silu(gate(x)) ⊙ up(x))`, fp32, via `cpu::silu_mul` + `cpu::gemm`.
 - **`DecoderLayer`** (M5-T07): `attn_norm → Attention → residual add →
@@ -442,6 +455,12 @@ Per-sequence, all layers, device-agnostic. One `KvCache` object holds the K/V
 for **one sequence across all layers**; the engine owns one per active sequence
 (M9-T02's `Sequence` holds a per-sequence cache handle, so the object is
 per-sequence from day one, not a global store).
+
+**This header (`src/kvcache/kv_cache.h`) landed with M5-T05, not T06**, because
+the `Attention` module consumes it — its `forward` takes a `KvCache&`. T06 adds
+the concrete `SimpleKvCache` (§6.2) and the token-by-token KV invariant test;
+T05 exercised the interface through a test-local `FakeKvCache` double
+(head-major storage, append transposes token-major `[T,Hkv,d]` → `[Hkv,len,d]`).
 
 ```cpp
 // src/kvcache/kv_cache.h
@@ -794,7 +813,7 @@ total). Planned additions under `tests/fixtures/models/`:
 |---|---|---|
 | `tiny-llama/expected/ops.safetensors` | T02–T04 | GEMM cases (incl. `k==1`, skinny, wide); RMSNorm on bf16 input → fp32 out; softmax on large-magnitude logits (e.g. ±1e4); SiLU-and-mul; `embedding_edge` — real bf16 embed table gathered at edge ids {0, V−1, duplicate} |
 | `tiny-llama/expected/rope.safetensors` | T04 | `tiny_table` cos/sin `[max_pos, d/2]`; `tiny_sparse`/`tiny_contig` apply I/O in token-major `[T, H, d]` at positions {0, 1, 127} and {0..7} (GQA H=4/Hkv=2); `llama3` scaled `inv_freq` + cos/sin from the committed Llama-3.1 config (§7); `linear` scaled `inv_freq` + cos/sin (synthetic factor 4). The end-to-end embedding golden is the existing `activations.safetensors` `embeddings`/`input_ids`. |
-| `tiny-llama/expected/attention.safetensors` | T05 | per-layer attention input/output for **prefill from empty** and **prefill continuing from a non-empty cache** (P>0, produced via HF with a seeded past-key-values) — GQA (Hkv < H) exercised by tiny-llama's 4 heads / 2 kv heads |
+| `tiny-llama/expected/attention.safetensors` | T05 | per case (layer, P, T): the module I/O (`x [T,E]`, `positions [T]`, `out [T,E]`) and the op intermediates (`q_rot [T,H,d]`, `k_all`/`v_all [Hkv,P+T,d]`, `ctx [T,H,d]`), plus `past_k`/`past_v [Hkv,P,d]` when P>0. Cases: `l{0,1}_prefill_empty` (P=0,T=8), `l{0,1}_prefill_continue` (P=5,T=6, HF-seeded past-key-values), `l0_decode` (P=7,T=1). GQA (Hkv=2 < H=4) is inherent; both layers appear (distinct weights). Intermediates captured from HF eager attention (a registered capture wrapper over `eager_attention_forward`). |
 | `tiny-llama/expected/generate.json` | T09 | greedy `generate(do_sample=False)` continuation (≥ 32 ids) for a few fixed prompts |
 | `tiny-qwen2/` (new model fixture) | T10 | a tiny `Qwen2ForCausalLM` mirror of tiny-llama: **q/k/v biases**, its config fields, tied or untied embeddings, with the same `expected/` set (logits + greedy) — exercises the Qwen2 wiring on the shared modules |
 
@@ -826,7 +845,7 @@ explicitly and records the observed max-abs-diff (CLAUDE.md rule).
 | T02 | `cpu::gemm` vs fixture across shapes incl. `k==1`, skinny (`m≫n`), wide (`n≫m`); a 512×512×512 GEMM < 1 s (sanity); `ReferenceLinear` forward with/without bias; fp16 & bf16 weight → fp32 conversion path exercised |
 | T03 | RMSNorm vs fixture (incl. **bf16 input**); SiLU-and-mul; residual add; softmax vs fixture with **large-magnitude logits** (numerical stability) — each tolerance stated |
 | T04 | RoPE vs fixture at positions {0, 1, large}, config head dims; embedding lookup vs fixture rows; llama3-scaled table vs its golden |
-| T05 | Attention layer vs fixture: **prefill from empty** and **prefill from non-empty cache** (P>0); GQA (Hkv<H) covered; tolerance stated |
+| T05 | `cpu::attention` op vs fixture `ctx` (all cases, tol 1e-4; observed ≤4e-7) + bit-exact-vs-serial (threading), causal-mask-hides-future, GQA-interleave-not-tiling, 7 op error paths; `Attention` module vs fixture `out` (**prefill from empty**, **prefill from non-empty cache** P>0, decode T==1; tol 2e-4, observed ≤2e-5) with the accumulated cache view vs `k_all`/`v_all` (wiring, looser 1e-3 band) + `Create`/`forward` error paths (incl. over-capacity cache → ResourceExhausted); GQA (Hkv<H) covered throughout |
 | T06 | **The KV invariant** (§6.2): token-by-token decode logits == full-prompt recompute at every step, within fp32 tolerance; `truncate`/`reset`/`view`/`length`/`capacity` unit behavior; over-capacity append → `ResourceExhausted` |
 | T07 | **End-to-end** logits for tiny-llama vs `expected/activations.safetensors` (report max-abs-diff; threshold documented); per-layer debug hook dumps the layer tensors; `kLast` vs `kAll` consistency (last row of `kAll` == `kLast`) |
 | T08 | Registry resolves `LlamaForCausalLM` and `Qwen2ForCausalLM`; unknown → `Unimplemented` listing supported; a test-local dummy arch registered by one call builds and runs (extensibility) |

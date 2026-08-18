@@ -283,6 +283,26 @@ behind an existing subsystem):
   `tools/gen_fixtures/tiny_llama_rope.py` (`tiny-llama-rope` →
   `rope.safetensors`: tiny table/apply, llama3 & linear scaled inv_freq +
   cos/sin) + one `embedding_edge` case appended to `ops.safetensors` (existing
-  bytes byte-identical, `--verify` clean); +26 tests (658 green).
+  bytes byte-identical, `--verify` clean); +26 tests (658 green). T05 Causal
+  attention: `src/cpu/attention.cpp` (`cpu::attention` — naive causal GQA:
+  scores `[H·T,L]` materialized, `-inf` causal mask with new query `t` at cache
+  position `P+t` attending keys `[0,P+t]`, softmax via `cpu::softmax` reusing
+  its `-inf→0` contract, context contraction; GQA by KV-head indexing `h/g`, no
+  materialized repeat; `scale` multiplies the completed dot per HF order; two
+  `parallel_for` passes, single-accumulator → bit-identical across threads);
+  `src/model/modules.{h,cpp}` — `Attention` module (owns q/k/v/o `Linear`s as
+  `unique_ptr<Linear>` so M6/M13 slot in, move-only; `Create` validates shapes
+  vs (H,Hkv,d) without assuming `E==H·d`; `forward` projects QKV → RoPE Q/K →
+  `cache.append` → `cache.view` → `cpu::attention` → `o_proj`, validation
+  front-loaded so no half-append); `src/kvcache/kv_cache.h` — abstract `KvCache`
+  interface + `CacheGeometry`/`KvView` (§6.1), landed here (not T06) because
+  `Attention` consumes it — `model → kvcache` edge (ADR-002 Amdt 5) wired
+  PRIVATE, forward-declared in modules.h. `SimpleKvCache` + KV invariant stay
+  T06; T05 used a test-local `FakeKvCache`. New
+  `tools/gen_fixtures/tiny_llama_attention.py` (`tiny-llama-attention` →
+  `attention.safetensors`: 5 cases (layer,P,T) — prefill-empty, prefill-continue
+  P>0, decode T=1 — module I/O + op intermediates captured from HF eager
+  attention; existing bytes untouched, `--verify` clean). +9 tests (667 green).
 
-Next up: **M5-T05** (Causal attention, CPU).
+Next up: **M5-T06** (KV cache v0 — `SimpleKvCache` + the token-by-token KV
+invariant).

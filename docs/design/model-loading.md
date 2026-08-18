@@ -870,9 +870,12 @@ tests/fixtures/
                                   #   embedding_edge (+ ops_meta.json)
         rope.safetensors          # M5-T04: cpu::rope_apply / Rope goldens
                                   #   (+ rope_meta.json; model-execution.md §7)
+        attention.safetensors     # M5-T05: cpu::attention / Attention goldens
+                                  #   (+ attention_meta.json; model-execution.md
+                                  #   §12)
         # M5 adds more op-level goldens alongside activations.safetensors —
-        # attention.safetensors, generate.json — each landing with the ticket
-        # that consumes it (model-execution.md §12).
+        # generate.json — each landing with the ticket that consumes it
+        # (model-execution.md §12).
     tiny-qwen2/                   # M5-T10: a tiny Qwen2ForCausalLM mirror
         …                         #   (QKV biases, its config fields); same
                                   #   config/weights/expected/ shape as tiny-llama

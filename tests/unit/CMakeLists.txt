@@ -91,6 +91,15 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::cpu engine::model
   LABELS cpu)
 
+# attention_test (M5-T05): cpu::attention op goldens/properties + the Attention
+# module over the loaded checkpoint, with a test-local KvCache double (the real
+# SimpleKvCache is M5-T06). Reads attention.safetensors via engine::model's
+# SafetensorsFile and the loader; engine::kvcache supplies the interface.
+engine_add_tests(TREE unit SOURCES
+  attention_test.cpp
+  DEPS engine::cpu engine::model engine::kvcache
+  LABELS cpu)
+
 # tokenizer_test parses the committed real tokenizer.json fixtures (design
 # §7.1, §8); the `tokenizer` label lets `ctest -L tokenizer` iterate the
 # golden suite alone. Ordinary portable C++ — no SCALAR_PASS.

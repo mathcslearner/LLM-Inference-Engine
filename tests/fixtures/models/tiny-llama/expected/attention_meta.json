@@ -1,0 +1,89 @@
+{
+  "cases": [
+    {
+      "P": 0,
+      "T": 8,
+      "layer": 0,
+      "name": "l0_prefill_empty",
+      "positions": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    {
+      "P": 0,
+      "T": 8,
+      "layer": 1,
+      "name": "l1_prefill_empty",
+      "positions": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    {
+      "P": 5,
+      "T": 6,
+      "layer": 0,
+      "name": "l0_prefill_continue",
+      "positions": [
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "P": 5,
+      "T": 6,
+      "layer": 1,
+      "name": "l1_prefill_continue",
+      "positions": [
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "P": 7,
+      "T": 1,
+      "layer": 0,
+      "name": "l0_decode",
+      "positions": [
+        7
+      ]
+    }
+  ],
+  "description": "HF LlamaAttention goldens (M5-T05). Per case (layer, P, T): x [T,E], positions [T] i32, past_k/past_v [Hkv,P,d] (P>0 only), q_rot [T,H,d] (post-RoPE queries), k_all/v_all [Hkv,P+T,d] (accumulated head-major cache), ctx [T,H,d] (attention output pre o_proj), out [T,E] (post o_proj) — all f32. GQA H=4/Hkv=2. Intermediates captured from HF eager attention (fp32); the reference reduces in its own order, so agreement is Class T (tolerances in attention_test.cpp).",
+  "dims": {
+    "head_dim": 16,
+    "hidden_size": 64,
+    "num_heads": 4,
+    "num_kv_heads": 2
+  },
+  "generator_versions": {
+    "safetensors": "0.8.0",
+    "tokenizers": "0.22.2",
+    "torch": "2.13.0",
+    "transformers": "5.14.1"
+  },
+  "regenerate": "tools/.venv/bin/python -m gen_fixtures tiny-llama-attention",
+  "scale": 0.25,
+  "seed": 20260819
+}
