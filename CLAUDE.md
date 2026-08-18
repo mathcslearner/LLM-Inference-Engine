@@ -245,6 +245,15 @@ behind an existing subsystem):
   reference-vs-optimized backend seam, registry/builder, and activation
   hooks; **ADR-002 Amendment 5 (`model → kvcache`)** added,
   cpu-backend.md §2's provisional `cpu → parallel` flag retired
-  (Amendment 4 already allowed it). Docs-only.
+  (Amendment 4 already allowed it). Docs-only. T02 CPU GEMM & `Linear`:
+  `src/cpu/gemm.cpp` (`cpu::gemm`) — reference fp32 GEMM in NT form
+  `C=A·Bᵀ(+bias)`, weight/bias f32/f16/bf16 widened per element via
+  `half.h` (never links `kernels`), cache-blocked + `parallel_for` threaded
+  but single-accumulator ascending-k so bit-identical across threads/tiles;
+  `src/model/modules.{h,cpp}` — abstract `Linear` interface (§4.1) +
+  `ReferenceLinear` (zero-copy checkpoint weight, `y` caller-allocated).
+  New `tiny-llama/expected/ops.safetensors` (`tiny-llama-ops` subcommand,
+  10 GEMM cases incl. real bf16 weights, k==1, skinny/wide, widening);
+  +12 tests (609 green).
 
-Next up: **M5-T02** (CPU GEMM & Linear layer).
+Next up: **M5-T03** (CPU normalization & activation ops).

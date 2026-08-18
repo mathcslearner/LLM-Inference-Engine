@@ -865,8 +865,9 @@ tests/fixtures/
       expected/
         activations.safetensors   # per-layer + end-to-end outputs (M5 consumes)
         meta.json                 # input ids, seed, generator versions
-        # M5 adds op-level goldens alongside activations.safetensors —
-        # ops/rope/attention.safetensors, generate.json — each landing with
+        ops.safetensors           # M5-T02: cpu::gemm goldens (+ ops_meta.json)
+        # M5 adds more op-level goldens alongside activations.safetensors —
+        # rope/attention.safetensors, generate.json — each landing with
         # the ticket that consumes it (model-execution.md §12).
     tiny-qwen2/                   # M5-T10: a tiny Qwen2ForCausalLM mirror
         …                         #   (QKV biases, its config fields); same

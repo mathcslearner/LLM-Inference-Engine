@@ -48,6 +48,21 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::model nlohmann_json::nlohmann_json
   LABELS model)
 
+# cpu reference ops (M5; design: docs/design/model-execution.md §13). Ordinary
+# portable C++ — the suites call cpu:: directly (not kernels::), so no
+# SCALAR_PASS and no per-ISA concern. gemm_test reads the ops.safetensors
+# golden via engine::model's SafetensorsFile; linear_test additionally uses the
+# loader. `cpu` label mirrors `model`/`kernels` for `ctest -L cpu`.
+engine_add_tests(TREE unit SOURCES
+  gemm_test.cpp
+  DEPS engine::cpu engine::model
+  LABELS cpu)
+
+engine_add_tests(TREE unit SOURCES
+  linear_test.cpp
+  DEPS engine::model engine::cpu
+  LABELS model)
+
 # tokenizer_test parses the committed real tokenizer.json fixtures (design
 # §7.1, §8); the `tokenizer` label lets `ctest -L tokenizer` iterate the
 # golden suite alone. Ordinary portable C++ — no SCALAR_PASS.

@@ -30,6 +30,8 @@ fi
 cd "$TOOLS_DIR"
 echo "== tiny-llama =="
 "$PYTHON" -m gen_fixtures tiny-llama --out "$OUT_DIR"
+echo "== tiny-llama-ops =="
+"$PYTHON" -m gen_fixtures tiny-llama-ops --out "$OUT_DIR"
 echo "== qwen2-names =="
 "$PYTHON" -m gen_fixtures qwen2-names --out "$OUT_DIR"
 echo "== tokenizer-vectors =="

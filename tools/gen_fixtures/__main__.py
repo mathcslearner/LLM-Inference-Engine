@@ -2,7 +2,13 @@
 
 import argparse
 
-from . import model_configs, qwen2_names, tiny_llama, tokenizer_vectors
+from . import (
+    model_configs,
+    qwen2_names,
+    tiny_llama,
+    tiny_llama_ops,
+    tokenizer_vectors,
+)
 
 
 def main() -> None:
@@ -13,6 +19,7 @@ def main() -> None:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     tiny_llama.register(subparsers)
+    tiny_llama_ops.register(subparsers)
     qwen2_names.register(subparsers)
     tokenizer_vectors.register(subparsers)
     model_configs.register(subparsers)

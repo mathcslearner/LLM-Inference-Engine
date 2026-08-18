@@ -1,0 +1,95 @@
+{
+  "cases": [
+    {
+      "bias": false,
+      "k": 64,
+      "m": 16,
+      "n": 64,
+      "name": "q_proj_prefill",
+      "weight_dtype": "bfloat16"
+    },
+    {
+      "bias": false,
+      "k": 64,
+      "m": 16,
+      "n": 176,
+      "name": "gate_proj_wide",
+      "weight_dtype": "bfloat16"
+    },
+    {
+      "bias": false,
+      "k": 176,
+      "m": 16,
+      "n": 64,
+      "name": "down_proj",
+      "weight_dtype": "bfloat16"
+    },
+    {
+      "bias": false,
+      "k": 64,
+      "m": 4,
+      "n": 512,
+      "name": "lm_head_wide",
+      "weight_dtype": "bfloat16"
+    },
+    {
+      "bias": false,
+      "k": 64,
+      "m": 1,
+      "n": 64,
+      "name": "decode_gemv",
+      "weight_dtype": "bfloat16"
+    },
+    {
+      "bias": false,
+      "k": 8,
+      "m": 257,
+      "n": 3,
+      "name": "skinny_tall",
+      "weight_dtype": "float32"
+    },
+    {
+      "bias": false,
+      "k": 1,
+      "m": 5,
+      "n": 7,
+      "name": "k_one",
+      "weight_dtype": "float32"
+    },
+    {
+      "bias": true,
+      "bias_dtype": "float32",
+      "k": 129,
+      "m": 65,
+      "n": 33,
+      "name": "odd_tails",
+      "weight_dtype": "float32"
+    },
+    {
+      "bias": false,
+      "k": 64,
+      "m": 8,
+      "n": 32,
+      "name": "fp16_weight",
+      "weight_dtype": "float16"
+    },
+    {
+      "bias": true,
+      "bias_dtype": "bfloat16",
+      "k": 64,
+      "m": 8,
+      "n": 32,
+      "name": "bf16_bias",
+      "weight_dtype": "bfloat16"
+    }
+  ],
+  "description": "cpu::gemm goldens (M5-T02): per case <name>.a [M,K] f32, <name>.b [N,K] weight-dtype, optional <name>.bias [N] bias-dtype, <name>.c [M,N] f32 = a @ b.float().T (+ bias.float()). Ground truth is fp32; the reference converts f16/bf16 weights on the fly.",
+  "generator_versions": {
+    "safetensors": "0.8.0",
+    "tokenizers": "0.22.2",
+    "torch": "2.13.0",
+    "transformers": "5.14.1"
+  },
+  "regenerate": "tools/.venv/bin/python -m gen_fixtures tiny-llama-ops",
+  "seed": 20260817
+}

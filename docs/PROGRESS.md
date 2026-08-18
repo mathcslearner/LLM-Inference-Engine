@@ -561,3 +561,46 @@ allowed it — no amendment needed, M5-T02 links it directly). §15
 placeholder left for M7-T01's sampling section. Docs-only change;
 model-loading.md §7.1 + tests/fixtures/README.md point forward to the M5
 fixture additions.)
+
+M5-T02 done (2026-08-17: CPU GEMM + `Linear`). `src/cpu/gemm.cpp`
+(`cpu::gemm`, replacing the placeholder `cpu.cpp`): the reference fp32
+GEMM in the **NT form** `C[M,N] = A[M,K] · B[N,K]ᵀ (+ bias[N])` — the only
+GEMM shape the reference provides, because every `Linear` is exactly it
+(weight stored `[out,in]`, so the inner K loop is a contiguous dot over
+both operands; attention's matmuls get their own loops in M5-T05). Weight
+**and bias** may be f32/f16/bf16, widened per element through
+`tensor/half.h`'s `operator float()` (`cpu` never links `kernels` —
+model-execution.md §2.1); bias converted once and added after the K sum
+(matches torch addmm rounding). Cache-blocked (kTileM=kTileN=64,
+kTileK=256) and `parallel_for`-threaded over the flattened output-tile
+grid, but each `C[m,n]` sums ascending-k into **one fp32 accumulator**, so
+results are **bit-identical across thread counts and tile sizes** (Class T
+only vs HF, which reduces in its own order). Recoverable `Status` for
+malformed shapes/dtypes/contiguity/K-mismatch/bias-length, each message
+naming the offending input (ADR-003); undefined handles are `CHECK`.
+`src/model/modules.h`+`modules.cpp`: the abstract **`Linear` interface**
+(model-execution.md §4.1 verbatim — special members protected+defaulted so
+concrete impls stay movable for `StatusOr` return without slicing through a
+`Linear&`) + `ReferenceLinear` (`Create` validates the `[out,in]` weight
+and optional `[out]` bias; `forward` is `cpu::gemm` with `y`
+caller-allocated — the M12 allocation-free-decode property — and its own
+x/y-named errors). Non-obvious decisions: NT-only GEMM (no transpose flag,
+YAGNI); bias kept in its storage dtype and widened on the fly rather than
+copied to f32 at construction (preserves strict zero-copy — Qwen2 carries
+bf16 biases); `y` is caller-allocated, InvalidArgument if wrong.
+New fixture `tiny-llama/expected/ops.safetensors` (+`ops_meta.json`) via
+`tools/gen_fixtures/tiny_llama_ops.py` (subcommand `tiny-llama-ops`,
+byte-identical regen verified): 10 GEMM cases — real bf16 q/gate/down/
+lm_head weights on the fixture dims, decode GEMV (M=1), skinny/wide, k==1,
+odd tile-tails with f32 bias, and f16-weight / bf16-bias widening cases;
+ground truth is fp32 `A @ B.float().T (+ bias.float())`. Tests (12): 6
+`CpuGemmTest` — fixture goldens across shapes/dtypes (rtol/atol 1e-4;
+worst observed max-abs-diff 7.6e-6), on-the-fly widening bit-exact vs
+`ops::cast`-then-gemm, tiling/threading bit-exact vs a serial triple loop,
+bias-added-at-end, 8 error paths each asserting code + message, and 512³ <
+1 s (ran ~22 ms) with a serial spot-check; 6 `ReferenceLinearTest` —
+Create accessors + malformed-weight/bias rejection, forward == direct gemm
+through `Linear&`, T==1 GEMV, bad x/y shapes, and a real bf16 `q_proj`
+loaded end-to-end via `load_model` matching the golden. Labels: gemm_test
+`cpu`, linear_test `model`; ordinary portable tests (call `cpu::`
+directly, no SCALAR_PASS). 609 tests green; format + scoped tidy clean.)

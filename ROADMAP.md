@@ -695,7 +695,7 @@ optimized backends share the same interfaces.
 - Doc specifies the exact `Model::forward` contract used by both backends, and the GQA layout conventions (head counts, head_dim, kv repeat).
 - KV-cache interface v0 is specified with an explicit note on what M8 (paged) will change.
 
-### M5-T02 · CPU GEMM & Linear layer
+### M5-T02 · CPU GEMM & Linear layer — ✅ DONE (2026-08-17)
 `src/cpu/`: a correct (`parallel_for`-threaded, cache-blocked but simple) fp32 GEMM;
 weights in fp16/bf16 are converted to fp32 on the fly. `Linear` module (weight,
 optional bias).

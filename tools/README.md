@@ -39,6 +39,8 @@ cd tools
 .venv/bin/python -m gen_fixtures tiny-llama         # tiny random-weight Llama
                                                     #   checkpoint (single-file +
                                                     #   2-shard) + activation goldens
+.venv/bin/python -m gen_fixtures tiny-llama-ops     # op-level goldens for the CPU
+                                                    #   reference (M5): GEMM cases
 .venv/bin/python -m gen_fixtures qwen2-names        # Qwen2 weight-name/shape
                                                     #   inventory (header-only fetch,
                                                     #   no weight download)
