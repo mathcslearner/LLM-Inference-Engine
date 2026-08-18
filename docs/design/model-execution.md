@@ -507,15 +507,25 @@ rollback needs it and v0 can provide it trivially (drop the tail); making
 
 ### 6.2 `SimpleKvCache` (M5-T06)
 
-One contiguous `[num_layers, 2, Hkv, capacity, d]` fp32 tensor (or two
-`[num_layers, Hkv, capacity, d]` tensors for K and V), allocated once at
+Two `[num_layers, Hkv, capacity, d]` fp32 tensors (K and V), allocated once at
 construction from `capacity` (caller-chosen: prompt length + max new tokens for
 the single-request loop). `append(layer, k, v)` copies the `[T, Hkv, d]` block
-into `[·, ·, fill_layer : fill_layer+T, ·]` after transposing to head-major
-`[Hkv, T, d]`; `view(layer)` returns a zero-copy slice `[Hkv, fill_layer, d]`.
-Head-major storage (`[Hkv, len, d]`) is chosen because M6-T05's decode
-attention reads one kv head's full history contiguously; it matches HF's cache
-layout after `transpose(1, 2)`.
+into `[layer, ·, fill_layer : fill_layer+T, ·]` after transposing to head-major
+`[Hkv, T, d]`; `view(layer)` **gathers** the layer's `[Hkv, fill_layer, d]`
+history into a fresh contiguous tensor. Head-major storage (`[Hkv, len, d]`) is
+chosen because M6-T05's decode attention reads one kv head's full history
+contiguously; it matches HF's cache layout after `transpose(1, 2)`.
+
+**Why `view()` gathers rather than slices** (M5-T06, refining an earlier draft
+that said "zero-copy slice"): a `[Hkv, fill, d]` window of the
+`[…, capacity, d]` store is inner-strided whenever `fill < capacity`, and
+`cpu::attention` requires contiguous K/V. Copying keeps the T05 op contract
+untouched, and it is exactly the seam §6.4 describes M8 keeping — v0's `view()`
+*is* the reference's "gather cached K/V for a layer" helper; M8's is a
+block-table gather; the `Attention` code above them is unchanged. The gather is
+O(Hkv·fill·d), strictly cheaper than the attention it feeds. `length()` reports
+the **minimum** per-layer fill (committed = what every layer agrees on),
+well-defined mid-forward and after a failed forward.
 
 **The acceptance invariant** (M5-T06): decoding token-by-token through the
 cache produces logits **equal to a full-prompt recompute** at every step
@@ -523,7 +533,15 @@ cache produces logits **equal to a full-prompt recompute** at every step
 and the test that makes the cache trustworthy for every later milestone.
 Concretely: `forward([t0..tk], positions=[0..k], fresh cache, kAll)` and
 `k+1` successive single-token `forward`s through a growing cache must produce
-the same logits at each position. The same invariant reappears as M8-T07's
+the same logits at each position.
+
+Because `Model::forward` is M5-T07, T06 lands this invariant one level down —
+at the **attention chain** (norms/MLP/residuals don't touch the cache, so the
+chain fully exercises the cache's contribution) — and T07 elevates the same
+check to full-model logits. In the reference it holds **bit-exactly**: each op
+reduces a row in a single ascending fp32 accumulator, and a masked (softmax-0)
+key contributes `0.0 · v == 0.0` exactly, so the full-prefill and
+token-by-token schedules produce identical sums (observed max_abs_diff = 0). The same invariant reappears as M8-T07's
 "identical to pre-paging engine," M9-T09's re-prefill equivalence, and
 M15-T04's rollback-then-re-decode equality — all are this property under a
 different storage backend.

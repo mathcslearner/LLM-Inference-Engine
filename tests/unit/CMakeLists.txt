@@ -92,13 +92,21 @@ engine_add_tests(TREE unit SOURCES
   LABELS cpu)
 
 # attention_test (M5-T05): cpu::attention op goldens/properties + the Attention
-# module over the loaded checkpoint, with a test-local KvCache double (the real
-# SimpleKvCache is M5-T06). Reads attention.safetensors via engine::model's
-# SafetensorsFile and the loader; engine::kvcache supplies the interface.
+# module over the loaded checkpoint, using the real SimpleKvCache (M5-T06) —
+# so the prefill-continuation fixture cases exercise the cache end-to-end — plus
+# the token-by-token KV invariant. Reads attention.safetensors via engine::model's
+# SafetensorsFile and the loader; engine::kvcache supplies the cache.
 engine_add_tests(TREE unit SOURCES
   attention_test.cpp
   DEPS engine::cpu engine::model engine::kvcache
   LABELS cpu)
+
+# simple_cache_test (M5-T06): SimpleKvCache mechanics (append/view transpose,
+# length, truncate, capacity, immutability) — pure cache, no model or kernels
+# dependency, so no SCALAR_PASS.
+engine_add_tests(TREE unit SOURCES
+  simple_cache_test.cpp
+  DEPS engine::kvcache engine::tensor)
 
 # tokenizer_test parses the committed real tokenizer.json fixtures (design
 # §7.1, §8); the `tokenizer` label lets `ctest -L tokenizer` iterate the

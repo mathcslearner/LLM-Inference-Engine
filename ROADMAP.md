@@ -727,13 +727,21 @@ against an existing cache of length P.
 **Acceptance criteria:**
 - Golden tests vs fixture attention-layer outputs (prefill from empty cache, and prefill continuing from a non-empty cache) with GQA (kv_heads < heads) covered.
 
-### M5-T06 · KV cache v0
+### M5-T06 · KV cache v0 — ✅ DONE (2026-08-17)
 `src/kvcache/simple_cache.h`: per-sequence, per-layer contiguous append-only K/V
 storage implementing the interface from M5-T01 (append, view, current length, reset).
 CPU tensors for now; device-agnostic API.
 **Depends on:** M5-T05.
 **Acceptance criteria:**
 - Unit test: decoding token-by-token with the cache produces logits equal to full-prompt recompute at every step (the fundamental KV-cache invariant), within fp32 tolerance.
+
+> **Note (2026-08-17):** `Model::forward` is M5-T07, so the invariant landed at
+> the **attention-chain** level (norms/MLP/residuals don't touch the cache) —
+> full-prefill vs token-by-token, chunked prefill, and truncate-then-redecode,
+> all bit-exact (max_abs_diff = 0). M5-T07 elevates the same check to
+> full-model logits. `view()` gathers a contiguous snapshot rather than
+> returning a zero-copy slice (`cpu::attention` needs contiguous K/V; this is
+> the M8 gather seam) — design §6.2 updated.
 
 ### M5-T07 · Transformer block & full model forward (CPU)
 Assemble `DecoderLayer` (attention + MLP + norms + residuals) and `Model` (embedding →

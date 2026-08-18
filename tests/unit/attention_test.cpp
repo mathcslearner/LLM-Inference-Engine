@@ -2,6 +2,7 @@
 #include "core/status.h"
 #include "cpu/ops.h"
 #include "kvcache/kv_cache.h"
+#include "kvcache/simple_cache.h"
 #include "model/loader.h"
 #include "model/modules.h"
 #include "model/safetensors.h"
@@ -35,8 +36,8 @@ using engine::core::IsResourceExhausted;
 using engine::core::Status;
 using engine::core::StatusOr;
 using engine::kvcache::CacheGeometry;
-using engine::kvcache::KvCache;
 using engine::kvcache::KvView;
+using engine::kvcache::SimpleKvCache;
 using engine::model::Attention;
 using engine::model::Linear;
 using engine::model::load_model;
@@ -98,119 +99,30 @@ template <typename T>
   return {p.data_ptr<std::int32_t>(), static_cast<std::size_t>(p.numel())};
 }
 
-// A minimal test-double KvCache (M5-T06 lands the real SimpleKvCache + the
-// token-by-token KV invariant). Stores each layer's K/V as a contiguous
-// head-major [Hkv, len, d] tensor, rebuilt on append; `Preload` seeds a
-// non-empty cache from a head-major past block (the prefill-continuation
-// cases).
-class FakeKvCache final : public KvCache {
- public:
-  FakeKvCache(CacheGeometry geom, std::int64_t capacity)
-      : geom_(geom),
-        capacity_(capacity),
-        k_(static_cast<std::size_t>(geom.num_layers)),
-        v_(static_cast<std::size_t>(geom.num_layers)),
-        len_(static_cast<std::size_t>(geom.num_layers), 0) {}
-
-  // Test helper: seed `layer` with head-major [Hkv, P, d] past K/V.
-  void Preload(int layer, const Tensor& k_hm, const Tensor& v_hm) {
-    const auto i = static_cast<std::size_t>(layer);
-    k_[i] = CopyOf(k_hm);
-    v_[i] = CopyOf(v_hm);
-    len_[i] = k_hm.shape().dim(1);
-  }
-
-  [[nodiscard]] CacheGeometry geometry() const override { return geom_; }
-  [[nodiscard]] std::int64_t length() const override { return len_[0]; }
-  [[nodiscard]] std::int64_t capacity() const override { return capacity_; }
-  [[nodiscard]] std::int64_t layer_length(int layer) const {
-    return len_[static_cast<std::size_t>(layer)];
-  }
-
-  [[nodiscard]] Status append(int layer, const Tensor& k,
-                              const Tensor& v) override {
-    if (layer < 0 || layer >= geom_.num_layers) {
-      return engine::core::InvalidArgumentError("FakeKvCache: layer {} OOR",
-                                                layer);
-    }
-    const std::int64_t t = k.shape().dim(0);
-    const std::int64_t hkv = k.shape().dim(1);
-    const std::int64_t d = k.shape().dim(2);
-    const auto i = static_cast<std::size_t>(layer);
-    const std::int64_t old = len_[i];
-    const std::int64_t nl = old + t;
-    if (nl > capacity_) {
-      return engine::core::ResourceExhaustedError(
-          "FakeKvCache: append to {} exceeds capacity {}", nl, capacity_);
-    }
-    Tensor nk = Unwrap(ops::zeros(Shape{hkv, nl, d}, DataType::kFloat32));
-    Tensor nv = Unwrap(ops::zeros(Shape{hkv, nl, d}, DataType::kFloat32));
-    AppendInto(nk, k_[i], k, old, hkv, nl, d, t);
-    AppendInto(nv, v_[i], v, old, hkv, nl, d, t);
-    k_[i] = std::move(nk);
-    v_[i] = std::move(nv);
-    len_[i] = nl;
-    return engine::core::OkStatus();
-  }
-
-  [[nodiscard]] StatusOr<KvView> view(int layer) const override {
-    if (layer < 0 || layer >= geom_.num_layers) {
-      return engine::core::InvalidArgumentError("FakeKvCache: layer {} OOR",
-                                                layer);
-    }
-    const auto i = static_cast<std::size_t>(layer);
-    return KvView{.k = k_[i], .v = v_[i]};
-  }
-
-  [[nodiscard]] Status truncate(std::int64_t new_length) override {
-    if (new_length < 0 || new_length > len_[0]) {
-      return engine::core::InvalidArgumentError("FakeKvCache: bad truncate {}",
-                                                new_length);
-    }
-    for (std::size_t i = 0; i < len_.size(); ++i) {
-      if (new_length == 0) {
-        k_[i] = Tensor{};
-        v_[i] = Tensor{};
-      }
-      len_[i] = new_length;
-    }
-    return engine::core::OkStatus();
-  }
-
- private:
-  // dst[Hkv, nl, d] = concat over len-axis of old[Hkv, old, d] (head-major) and
-  // the token-major new block src[T, Hkv, d] transposed to head-major.
-  static void AppendInto(Tensor& dst, const Tensor& old_t, const Tensor& src,
-                         std::int64_t old, std::int64_t hkv, std::int64_t nl,
-                         std::int64_t d, std::int64_t t) {
-    auto* dp = dst.data_ptr<float>();
-    if (old > 0) {
-      const auto* op = old_t.data_ptr<float>();
-      for (std::int64_t h = 0; h < hkv; ++h) {
-        for (std::int64_t s = 0; s < old; ++s) {
-          for (std::int64_t e = 0; e < d; ++e) {
-            dp[(((h * nl) + s) * d) + e] = op[(((h * old) + s) * d) + e];
-          }
-        }
-      }
-    }
-    const auto* sp = src.data_ptr<float>();
-    for (std::int64_t ti = 0; ti < t; ++ti) {
-      for (std::int64_t h = 0; h < hkv; ++h) {
-        for (std::int64_t e = 0; e < d; ++e) {
-          dp[(((h * nl) + (old + ti)) * d) + e] =
-              sp[(((ti * hkv) + h) * d) + e];
-        }
+// Transposes a head-major [Hkv, P, d] past block to token-major [P, Hkv, d] and
+// appends it to `cache` at `layer` — seeds a non-empty cache for the
+// prefill-continuation fixture cases through the real append path.
+void PreloadHeadMajor(SimpleKvCache& cache, int layer, const Tensor& k_hm,
+                      const Tensor& v_hm) {
+  const std::int64_t hkv = k_hm.shape().dim(0);
+  const std::int64_t p = k_hm.shape().dim(1);
+  const std::int64_t d = k_hm.shape().dim(2);
+  const Tensor k_tm = Unwrap(ops::zeros(Shape{p, hkv, d}, DataType::kFloat32));
+  const Tensor v_tm = Unwrap(ops::zeros(Shape{p, hkv, d}, DataType::kFloat32));
+  const float* kp = k_hm.data_ptr<float>();
+  const float* vp = v_hm.data_ptr<float>();
+  auto* kt = k_tm.data_ptr<float>();
+  auto* vt = v_tm.data_ptr<float>();
+  for (std::int64_t h = 0; h < hkv; ++h) {
+    for (std::int64_t s = 0; s < p; ++s) {
+      for (std::int64_t e = 0; e < d; ++e) {
+        kt[(((s * hkv) + h) * d) + e] = kp[(((h * p) + s) * d) + e];
+        vt[(((s * hkv) + h) * d) + e] = vp[(((h * p) + s) * d) + e];
       }
     }
   }
-
-  CacheGeometry geom_;
-  std::int64_t capacity_;
-  std::vector<Tensor> k_;
-  std::vector<Tensor> v_;
-  std::vector<std::int64_t> len_;
-};
+  ASSERT_TRUE(cache.append(layer, k_tm, v_tm).ok());
+}
 
 [[nodiscard]] std::unique_ptr<Linear> MakeLinear(Tensor w) {
   auto rl = ReferenceLinear::Create(std::move(w));
@@ -497,10 +409,10 @@ TEST(AttentionModuleTest, MatchesFixtureGolden) {
     const std::string base(c.name);
     const Attention attn = BuildAttention(*loaded, c.layer);
 
-    FakeKvCache cache(geom, kMaxPos);
+    SimpleKvCache cache = Unwrap(SimpleKvCache::Create(geom, kMaxPos));
     if (c.p > 0) {
-      cache.Preload(c.layer, Unwrap(file.tensor(base + ".past_k")),
-                    Unwrap(file.tensor(base + ".past_v")));
+      PreloadHeadMajor(cache, c.layer, Unwrap(file.tensor(base + ".past_k")),
+                       Unwrap(file.tensor(base + ".past_v")));
     }
 
     const Tensor x = CopyOf(Unwrap(file.tensor(base + ".x")));  // [T, E]
@@ -636,7 +548,7 @@ TEST(AttentionModuleTest, ForwardRejectsMalformedInputs) {
 
   // x wrong hidden dim.
   {
-    FakeKvCache cache(geom, kMaxPos);
+    SimpleKvCache cache = Unwrap(SimpleKvCache::Create(geom, kMaxPos));
     const Tensor x = Unwrap(ops::zeros(Shape{2, e + 1}, DataType::kFloat32));
     Tensor y = Unwrap(ops::zeros(Shape{2, e}, DataType::kFloat32));
     const Status s = attn.forward(x, pos2, 0, cache, y);
@@ -645,7 +557,7 @@ TEST(AttentionModuleTest, ForwardRejectsMalformedInputs) {
   }
   // positions length != T.
   {
-    FakeKvCache cache(geom, kMaxPos);
+    SimpleKvCache cache = Unwrap(SimpleKvCache::Create(geom, kMaxPos));
     const Tensor x = Unwrap(ops::zeros(Shape{2, e}, DataType::kFloat32));
     Tensor y = Unwrap(ops::zeros(Shape{2, e}, DataType::kFloat32));
     const std::vector<std::int32_t> pos1 = {0};
@@ -656,7 +568,7 @@ TEST(AttentionModuleTest, ForwardRejectsMalformedInputs) {
   }
   // y wrong shape.
   {
-    FakeKvCache cache(geom, kMaxPos);
+    SimpleKvCache cache = Unwrap(SimpleKvCache::Create(geom, kMaxPos));
     const Tensor x = Unwrap(ops::zeros(Shape{2, e}, DataType::kFloat32));
     Tensor y = Unwrap(ops::zeros(Shape{2, e + 1}, DataType::kFloat32));
     const Status s = attn.forward(x, pos2, 0, cache, y);
@@ -666,7 +578,7 @@ TEST(AttentionModuleTest, ForwardRejectsMalformedInputs) {
   }
   // Over-capacity append surfaces the cache's ResourceExhausted.
   {
-    FakeKvCache cache(geom, /*capacity=*/1);
+    SimpleKvCache cache = Unwrap(SimpleKvCache::Create(geom, /*capacity=*/1));
     const Tensor x = Unwrap(ops::zeros(Shape{2, e}, DataType::kFloat32));
     Tensor y = Unwrap(ops::zeros(Shape{2, e}, DataType::kFloat32));
     const Status s = attn.forward(x, pos2, 0, cache, y);  // T=2 > cap 1
@@ -675,43 +587,125 @@ TEST(AttentionModuleTest, ForwardRejectsMalformedInputs) {
 }
 
 // ===========================================================================
-// FakeKvCache self-check: the test double round-trips append -> view.
+// The KV-cache invariant (M5-T06 acceptance): token-by-token decode through a
+// growing SimpleKvCache reproduces the full-prompt recompute at every position.
+// Tested here — where the real tiny-llama attention machinery lives — over a
+// two-layer attention chain (layer 1's input is layer 0's output). Norms/MLP/
+// residuals (M5-T07) do not touch the cache, so the chain fully exercises the
+// cache's contribution to the invariant; M5-T07 elevates the same check to
+// full-model logits. Each reference op reduces a row in a single ascending
+// accumulator and masked (zero) probabilities add exactly nothing, so the two
+// schedules agree to within a tight fp32 band.
 // ===========================================================================
 
-TEST(FakeKvCacheTest, AppendThenViewIsHeadMajor) {
-  const CacheGeometry geom{.num_layers = 1,
-                           .num_kv_heads = 2,
-                           .head_dim = 3,
-                           .dtype = DataType::kFloat32};
-  FakeKvCache cache(geom, 8);
-  // Two appends: T=2 then T=1, token-major [T, Hkv, d].
-  const Tensor k1 = Unwrap(ops::zeros(Shape{2, 2, 3}, DataType::kFloat32));
-  ASSERT_TRUE(ops::fill_normal(k1, 0.0, 1.0, 7).ok());
-  const Tensor v1 = CopyOf(k1);
-  ASSERT_TRUE(cache.append(0, k1, v1).ok());
-  const Tensor k2 = Unwrap(ops::zeros(Shape{1, 2, 3}, DataType::kFloat32));
-  ASSERT_TRUE(ops::fill_normal(k2, 0.0, 1.0, 8).ok());
-  const Tensor v2 = CopyOf(k2);
-  ASSERT_TRUE(cache.append(0, k2, v2).ok());
+// Runs both layers for `x` [T, E] at `positions`, appending to `cache`; returns
+// the layer-1 output [T, E]. EXPECT (not ASSERT) so it can return a value.
+Tensor ChainForward(const Attention& a0, const Attention& a1, const Tensor& x,
+                    std::span<const std::int32_t> positions,
+                    SimpleKvCache& cache) {
+  const std::int64_t t = x.shape().dim(0);
+  Tensor h0 = Unwrap(ops::zeros(Shape{t, kHidden}, DataType::kFloat32));
+  EXPECT_TRUE(a0.forward(x, positions, 0, cache, h0).ok());
+  Tensor h1 = Unwrap(ops::zeros(Shape{t, kHidden}, DataType::kFloat32));
+  EXPECT_TRUE(a1.forward(h0, positions, 1, cache, h1).ok());
+  return h1;
+}
 
-  const KvView kv = Unwrap(cache.view(0));
-  ASSERT_EQ(kv.k.shape().dim(0), 2);  // Hkv
-  ASSERT_EQ(kv.k.shape().dim(1), 3);  // len = 2 + 1
-  ASSERT_EQ(kv.k.shape().dim(2), 3);  // d
-  // Head-major: kv.k[h, s, e] == source token-major value.
-  for (std::int64_t h = 0; h < 2; ++h) {
-    for (std::int64_t e = 0; e < 3; ++e) {
-      EXPECT_FLOAT_EQ((kv.k.item<float>({h, 0, e})),
-                      (k1.item<float>({0, h, e})));
-      EXPECT_FLOAT_EQ((kv.k.item<float>({h, 1, e})),
-                      (k1.item<float>({1, h, e})));
-      EXPECT_FLOAT_EQ((kv.k.item<float>({h, 2, e})),
-                      (k2.item<float>({0, h, e})));
-    }
+TEST(AttentionModuleTest, KvCacheInvariantMatchesFullRecompute) {
+  const auto loaded =
+      load_model(engine::testing::FixturesDir() / "models/tiny-llama");
+  ASSERT_TRUE(loaded.ok()) << loaded.status().ToString();
+  const Attention a0 = BuildAttention(*loaded, 0);
+  const Attention a1 = BuildAttention(*loaded, 1);
+  const CacheGeometry geom{.num_layers = 2,
+                           .num_kv_heads = kKvHeads,
+                           .head_dim = kHeadDim,
+                           .dtype = DataType::kFloat32};
+
+  constexpr std::int64_t kT = 12;
+  const Tensor x = Unwrap(ops::zeros(Shape{kT, kHidden}, DataType::kFloat32));
+  ASSERT_TRUE(ops::fill_normal(x, 0.0, 1.0, 4242).ok());
+  std::vector<std::int32_t> pos(static_cast<std::size_t>(kT));
+  for (std::int64_t i = 0; i < kT; ++i) {
+    pos[static_cast<std::size_t>(i)] = static_cast<std::int32_t>(i);
   }
-  EXPECT_EQ(cache.length(), 3);
-  ASSERT_TRUE(cache.truncate(0).ok());
-  EXPECT_EQ(cache.length(), 0);
+  const auto pos_at = [&](std::int64_t i) -> std::span<const std::int32_t> {
+    return {&pos[static_cast<std::size_t>(i)], 1};
+  };
+
+  // Full prefill: all T tokens at once, all positions.
+  SimpleKvCache full_cache = Unwrap(SimpleKvCache::Create(geom, kMaxPos));
+  const Tensor full = ChainForward(a0, a1, x, pos, full_cache);
+  ASSERT_EQ(full_cache.length(), kT);
+
+  constexpr double kTol = 1e-5;
+
+  // (1) Token-by-token decode through a growing cache.
+  {
+    SimpleKvCache step_cache = Unwrap(SimpleKvCache::Create(geom, kMaxPos));
+    const Tensor stepwise =
+        Unwrap(ops::zeros(Shape{kT, kHidden}, DataType::kFloat32));
+    for (std::int64_t t = 0; t < kT; ++t) {
+      const Tensor x_t = Unwrap(x.slice(0, t, t + 1));  // [1, E]
+      const Tensor y_t = ChainForward(a0, a1, x_t, pos_at(t), step_cache);
+      const Tensor dst = Unwrap(stepwise.slice(0, t, t + 1));
+      ASSERT_TRUE(ops::copy(dst, y_t).ok());
+    }
+    const ops::AllCloseResult r =
+        Unwrap(ops::allclose(stepwise, full, kTol, kTol));
+    EXPECT_TRUE(r.allclose) << "token-by-token: " << r.Summary();
+    std::cerr << "[attn] kv-invariant decode max_abs_diff=" << r.max_abs_diff
+              << "\n";
+    EXPECT_EQ(step_cache.length(), kT);
+  }
+
+  // (2) Chunked prefill: [0, 5) then [5, T). Exercises P>0 block prefill.
+  {
+    SimpleKvCache chunk_cache = Unwrap(SimpleKvCache::Create(geom, kMaxPos));
+    const Tensor chunked =
+        Unwrap(ops::zeros(Shape{kT, kHidden}, DataType::kFloat32));
+    constexpr std::int64_t kSplit = 5;
+    const Tensor x_a = Unwrap(x.slice(0, 0, kSplit));
+    const std::span<const std::int32_t> pos_a{pos.data(),
+                                              static_cast<std::size_t>(kSplit)};
+    const Tensor dst_a = Unwrap(chunked.slice(0, 0, kSplit));
+    ASSERT_TRUE(
+        ops::copy(dst_a, ChainForward(a0, a1, x_a, pos_a, chunk_cache)).ok());
+
+    const Tensor x_b = Unwrap(x.slice(0, kSplit, kT));
+    const std::span<const std::int32_t> pos_b{
+        &pos[static_cast<std::size_t>(kSplit)],
+        static_cast<std::size_t>(kT - kSplit)};
+    const Tensor dst_b = Unwrap(chunked.slice(0, kSplit, kT));
+    ASSERT_TRUE(
+        ops::copy(dst_b, ChainForward(a0, a1, x_b, pos_b, chunk_cache)).ok());
+
+    const ops::AllCloseResult r =
+        Unwrap(ops::allclose(chunked, full, kTol, kTol));
+    EXPECT_TRUE(r.allclose) << "chunked: " << r.Summary();
+  }
+
+  // (3) Truncate-then-redecode (M15-T04 rollback preview): decode to T, drop
+  // the last 3, re-decode them — identical outputs to the original recompute.
+  {
+    SimpleKvCache tr_cache = Unwrap(SimpleKvCache::Create(geom, kMaxPos));
+    for (std::int64_t t = 0; t < kT; ++t) {
+      const Tensor x_t = Unwrap(x.slice(0, t, t + 1));
+      ChainForward(a0, a1, x_t, pos_at(t), tr_cache);
+    }
+    constexpr std::int64_t kBack = 3;
+    ASSERT_TRUE(tr_cache.truncate(kT - kBack).ok());
+    ASSERT_EQ(tr_cache.length(), kT - kBack);
+    for (std::int64_t t = kT - kBack; t < kT; ++t) {
+      const Tensor x_t = Unwrap(x.slice(0, t, t + 1));
+      const Tensor y_t = ChainForward(a0, a1, x_t, pos_at(t), tr_cache);
+      const Tensor full_row = Unwrap(full.slice(0, t, t + 1));
+      const ops::AllCloseResult r =
+          Unwrap(ops::allclose(y_t, full_row, kTol, kTol));
+      EXPECT_TRUE(r.allclose) << "redecode row " << t << ": " << r.Summary();
+    }
+    EXPECT_EQ(tr_cache.length(), kT);
+  }
 }
 
 }  // namespace

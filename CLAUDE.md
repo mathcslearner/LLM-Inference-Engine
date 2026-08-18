@@ -303,6 +303,24 @@ behind an existing subsystem):
   `attention.safetensors`: 5 cases (layer,P,T) — prefill-empty, prefill-continue
   P>0, decode T=1 — module I/O + op intermediates captured from HF eager
   attention; existing bytes untouched, `--verify` clean). +9 tests (667 green).
+  T06 KV cache v0: `src/kvcache/simple_cache.{h,cpp}` (`SimpleKvCache` — the v0
+  contiguous impl of the T05 `KvCache` interface; anchor `kvcache.cpp` removed).
+  Two `[num_layers,Hkv,capacity,d]` fp32 stores allocated once at
+  `Create(geom,capacity)`; `append` transposes token-major `[T,Hkv,d]` →
+  head-major at the layer's fill (over-capacity→ResourceExhausted,
+  rank/shape/dtype/contiguity/k-vs-v-T→InvalidArgument, all front-loaded so a
+  rejected append leaves the layer untouched); `view` **gathers** a contiguous
+  `[Hkv,fill,d]` snapshot (not a zero-copy slice — `cpu::attention` needs
+  contiguous K/V, and this is the M8 gather seam; design §6.2 updated);
+  `length()` = min per-layer fill; `truncate(n)` drops+resyncs all layers,
+  `reset()`=`truncate(0)`. The KV invariant lands at attention-chain level
+  (`Model::forward` is T07, which elevates it to logits): full-prefill vs
+  token-by-token, chunked prefill, truncate-then-redecode — all **bit-exact**
+  (max_abs_diff=0, since masked softmax-0 keys add exactly 0.0). `attention_test`
+  swapped from the `FakeKvCache` double to the real `SimpleKvCache`
+  (`PreloadHeadMajor` seeds P>0 through `append`), so the prefill-continuation
+  goldens now cover the cache end-to-end. +13 tests, −1 Fake self-check
+  (679 green).
 
-Next up: **M5-T06** (KV cache v0 — `SimpleKvCache` + the token-by-token KV
-invariant).
+Next up: **M5-T07** (Transformer block & full model forward — `DecoderLayer` +
+`Model`, end-to-end logits vs HF).

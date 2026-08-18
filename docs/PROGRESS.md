@@ -765,3 +765,49 @@ incl. accumulated-cache-view check + length), `Create` shape validation, 4
 `forward` error paths (incl. over-capacity → ResourceExhausted), `FakeKvCache`
 self-check. Label `cpu`; ordinary portable tests. 667 tests green; format +
 scoped tidy clean.
+
+M5-T06 done (2026-08-17: KV cache v0). New `src/kvcache/simple_cache.{h,cpp}`
+(`SimpleKvCache`, the v0 contiguous implementation of the M5-T05 `KvCache`
+interface); the placeholder `kvcache.cpp` anchor TU removed. **Storage:** two
+contiguous fp32 tensors `[num_layers, Hkv, capacity, d]` (K and V), allocated
+once at `Create(geom, capacity)` from a caller-chosen capacity; head-major so
+one kv head's history is contiguous (matches HF's cache after `transpose(1,2)`
+and the layout M6-T05 decode attention reads). **`append(layer, k, v)`** takes
+the token-major `[T,Hkv,d]` block the `Attention` module produces and
+transposes it to `[Hkv,T,d]` at the layer's fill offset; validation
+front-loaded (over-capacity → `ResourceExhausted`, rank/shape/dtype/contiguity
++ a k-vs-v T-agreement check → `InvalidArgument`) so a rejected append leaves
+the layer untouched. **`view(layer)`** gathers the layer's `[Hkv,fill,d]`
+history into a fresh contiguous tensor. **`length()`** = the minimum per-layer
+fill (committed = what every layer agrees on; well-defined mid-forward and
+after a failed forward). **`truncate(n)`** drops every layer's fill to `n`
+(also re-synchronizing layers that disagree); `reset()` is `truncate(0)`.
+**Non-obvious decisions:** (1) `view()` **copies** rather than returning a
+zero-copy slice — a `[Hkv,fill,d]` window of the `[…,capacity,d]` store is
+inner-strided whenever `fill < capacity`, and `cpu::attention` requires
+contiguous K/V; copying keeps the T05 op contract untouched and mirrors the
+seam M8 keeps (v0's `view()` is the reference's "gather cached K/V" helper;
+M8's is a block-table gather; the `Attention` code above them is unchanged).
+model-execution.md §6.2 updated to say gather-copy, not "zero-copy slice".
+(2) the roadmap's acceptance invariant is stated at **logits** level, but
+`Model::forward` is M5-T07 — so T06 lands the invariant at **attention-chain**
+level (norms/MLP/residuals don't touch the cache), and T07 elevates the same
+check to full-model logits. The invariant holds **bit-exactly** here
+(max_abs_diff = 0): each reference op reduces a row in a single ascending fp32
+accumulator, and a masked (softmax-0) key contributes `0.0 * v == 0.0` exactly,
+so full-prefill and token-by-token schedules produce identical sums. Tests
+(13): `simple_cache_test.cpp` (12) — Create validation (geometry/capacity/
+non-f32→Unimplemented), append→view head-major transpose, empty-layer view,
+malformed appends (layer OOR, rank/Hkv/d/dtype/contiguity/T=0/k-v-T-mismatch,
+state-unchanged), view-bad-layer, over-capacity (ResourceExhausted + unchanged
++ exact-fill), length=min-across-layers, truncate (drop-tail/resync/reset,
+range errors), append-only immutability, per-sequence independence; plus
+`attention_test.cpp`'s new `KvCacheInvariantMatchesFullRecompute` — a two-layer
+real-tiny-llama attention chain: full-prefill vs token-by-token, chunked
+prefill `[0,5)+[5,T)`, and truncate-then-redecode (all diff 0, tol 1e-5). The
+T05 `FakeKvCache` double was replaced by the real `SimpleKvCache` throughout
+`attention_test.cpp` (a `PreloadHeadMajor` helper transposes the head-major
+fixture past-blocks through the real `append`), so the prefill-continuation
+goldens now exercise the cache end-to-end; the `FakeKvCache` self-check test
+was dropped (superseded by `simple_cache_test.cpp`). 679 tests green; format +
+scoped tidy clean.
