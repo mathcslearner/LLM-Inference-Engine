@@ -206,6 +206,19 @@ of scheduling; the partitioning rules exist so that `parallel_reduce` — and
 any kernel whose *internal* blocking follows chunk boundaries — is bitwise
 reproducible.
 
+*M6-T01 note (2026-08-18): a worker-index `parallel_for` overload.* The M6
+optimized kernels need per-thread scratch (attention working sets, workspace
+slices — `optimized-cpu-execution.md` §6), so M6-T04 adds a second
+`parallel_for` overload whose body is `void(int worker, int64 begin, int64
+end)` with `worker ∈ [0, num_threads)` (the inline path passes `0`). This is
+**determinism-safe and needs no change to the rules above**: the worker index
+selects *which scratch buffer* a chunk uses, never *which chunk* a worker runs
+— chunk boundaries stay the pure `(n, grain)` function of rule 1, and outputs
+stay disjoint per chunk. It composes with any future scheduling change (§10):
+correctness never depends on which index a chunk runs under. The existing
+`void(begin, end)` overload stays for the majority of kernels (rows, tiles)
+that need no worker id.
+
 ### 3.3 `parallel_reduce`: fixed combine tree
 
 ```cpp
@@ -607,7 +620,13 @@ number is not a test):
   scalar/reference-vs-optimized within a **stated per-test tolerance**
   (absolute + relative, or ULPs), because FMA contraction, blocking, and
   vector horizontal ops legitimately change rounding. Fixture comparisons
-  (HF → `cpu`) are always Class T — HF computes in its own order.
+  (HF → `cpu`) are always Class T — HF computes in its own order. *(M6-T01
+  refines this for the optimized kernels: Class T holds **across ISAs** and
+  **vs the oracle**, but every M6 kernel is additionally **bit-identical across
+  thread counts** — no reduction is split across threads outside
+  `parallel_reduce`'s fixed tree. The full per-kernel bitwise-vs-tolerance
+  matrix, and the vector-`exp` ulp bound the new numerical algorithm owes, live
+  in `docs/design/optimized-cpu-execution.md` §10.)*
 
 **The fixed 16-lane accumulation convention (Class R, fp32 `sum`):** naive
 vectorization breaks cross-ISA bit-identity because lane counts differ (NEON
@@ -679,7 +698,12 @@ authoritative statement):*
   (its ticket + doc update), with one constraint imposed now: the
   checkpoint-order tensor remains the source of truth, and any packed form
   is derived from it — so the `cpu` oracle and the optimized path always
-  read provably identical weights.
+  read provably identical weights. *(Decided 2026-08-18, M6-T01,
+  `docs/design/optimized-cpu-execution.md` §3: K-major panels of `NR = 16`
+  output rows, shape `[ceil(N/NR), K, NR]`, held in the checkpoint dtype and
+  widened in-register — the checkpoint tensor stays the source of truth, the
+  packed form is derived at load. The fixed `NR` across ISAs keeps the
+  forced-scalar pass validating the same packed bytes that ship.)*
 
 ---
 

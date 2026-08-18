@@ -859,7 +859,7 @@ pass comes in M12 behind the same interfaces.
 
 **Architecture documents:** `docs/design/optimized-cpu-execution.md` (M6-T01).
 
-### M6-T01 · Design doc: optimized CPU execution
+### M6-T01 · Design doc: optimized CPU execution — ✅ DONE (2026-08-18)
 Write `docs/design/optimized-cpu-execution.md`: weight layout policy (checkpoint
 tensors repacked at load into cache-blocked tiles; layout documented per kernel),
 dtype policy (weights held fp16/bf16-packed, fp32 accumulation everywhere; where

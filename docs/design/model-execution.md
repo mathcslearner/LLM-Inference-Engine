@@ -333,7 +333,11 @@ The builder (§9) resolves every module's weights from `LoadedModel.weights`
   so lookup and projection can use *different physical layouts* of the same
   logical weight ("share storage across different layouts — resolved in the
   design doc"). So tying is a binding decision the builder makes, never a
-  pointer-equality assumption baked into the model.
+  pointer-equality assumption baked into the model. *(Resolved 2026-08-18,
+  M6-T01, `optimized-cpu-execution.md` §7: the optimized backend keeps **one
+  physical copy — the packed lm_head** — and the embedding lookup gathers logical
+  row `v` out of the packed `[P, K, NR]` layout (panel `v/NR`, lane `v%NR`),
+  avoiding a `[V, E]` duplicate that costs ~272 MB on a tied Qwen2.5-0.5B.)*
 
 Modules borrow weight handles (shared `Tensor`, i.e. shared `Buffer`); the
 mapped checkpoint stays alive as long as any module holds a handle (M4's
@@ -401,10 +405,13 @@ the rest arrive with their milestones.
 Logits are always **fp32**, full vocab, contiguous per position (`[·, V]`
 row-major) — M7-T06 batches sampling as `[num_seqs, V]`, so per-sequence
 contiguity is fixed now. The returned `Tensor` is freshly allocated and owned
-by the caller in M5; the contract states only that it is valid until the caller
-drops it (M6 may return a view into a reused workspace — the doc's lifetime
-promise is deliberately "until you drop the handle or call forward again,"
-whichever the backend needs, and M6-T01 pins which).
+by the caller. *(M6-T01 pins this for both backends: the optimized backend also
+returns a fresh caller-owned logits tensor — **not** a workspace view — so the
+two backends share one lifetime contract; the earlier "may return a view into a
+reused workspace" latitude is retired. The logits allocation is the one per-step
+allocation the optimized decode path keeps; M12-T05 may add an optional
+caller-supplied output buffer to `ForwardRequest` to remove it, additive behind
+an unchanged default. See `optimized-cpu-execution.md` §6.3.)*
 
 ### 5.3 Preconditions & error posture
 
@@ -693,7 +700,14 @@ enum class Backend : std::uint8_t { kReference, kOptimized };  // M5: kReference
   `Model`. **This doc commits only to the `Model`-level and `Linear`-level
   contracts** being the seam — it does not force M6 to reuse the reference's
   layer classes, because forcing structural reuse could compromise the
-  reference's job as a clarity-first oracle. M6-T01 owns that call.
+  reference's job as a clarity-first oracle. M6-T01 owns that call. *(Decided
+  2026-08-18, M6-T01: **parallel implementations.** The optimized backend is a
+  new `OptimizedModel` graph reusing only the `Linear` interface (`PackedLinear`
+  slots into the existing `unique_ptr<Linear>` handles) and `Rope::Create`'s
+  table construction (config interpretation, not compute); the residual-stream
+  orchestration, attention, and MLP are new so they can run out of a
+  preallocated `Workspace` and stay fusion-ready (M12-T04) without optimizing the
+  oracle. `optimized-cpu-execution.md` §2.2.)*
 - **Selection is test-friendly:** `BuildModel` (§9) takes the `Backend`, so a
   single test can build both and assert equality (M6-T07's acceptance). A
   future third backend (Metal/MLX, roadmap "Future directions") enters the same
@@ -954,7 +968,9 @@ message names the offending input (the actionability criterion, tested).
 ## 14. Deferred (known, intentionally not designed here)
 
 - **Optimized kernels, weight repacking, workspaces, allocation-free decode** —
-  M6/M12, behind the `Model`/`Linear` contracts above.
+  M6/M12, behind the `Model`/`Linear` contracts above. *(M6-T01 landed the design:
+  `docs/design/optimized-cpu-execution.md` — packed tile layout, workspace sizing,
+  backend selection, kernel-validation tolerance table.)*
 - **Sampling** (temperature, top-k/p, penalties, logprobs, seeded RNG) — M7;
   M7-T01 appends §15 here.
 - **Batching / ragged forward / cu_seqlens** — M9; `ForwardRequest` grows the

@@ -1021,3 +1021,72 @@ binding the root to a local. `registry_test.cpp`'s synthetic
 kept as the isolated routing check, its stale "M5-T10 swaps in the real Qwen
 fixture" comment pointed at the new suite. Format + scoped tidy clean
 (`qwen2_family_test.cpp`, `registry_test.cpp`).
+
+## Milestone 6 — Optimized CPU Execution Engine
+
+M6-T01 done (2026-08-18: `docs/design/optimized-cpu-execution.md` — the working
+contract M6-T02…T08 optimized kernels/backend build on, plus the layout/policy
+seam M8/M9/M12/M13 inherit). **Docs-only.** The doc fixes six decisions the M5
+docs deliberately deferred here:
+
+1. **Packed weight tile (§3).** Checkpoint `W[N=out, K=in]` stays the source of
+   truth (cpu-backend §7 constraint); the packed form is derived at load into
+   **K-major panels of `NR = 16` output rows**, shape `[ceil(N/NR), K, NR]`, held
+   in the checkpoint dtype (bf16/f16/f32, widened in-register in the
+   micro-kernel). `NR` is **fixed across ISAs** (4×`float32x4`/2×`__m256`/scalar
+   16-array — same rationale as cpu-backend §6.3's 16-lane Class-R convention) so
+   the forced-scalar pass validates the *same packed bytes* that ship. Worked
+   example (N=5,K=3,NR=4 illustrative + tiny-llama/qwen2/1B real shapes),
+   micro-kernel (`MR×NR` fp32 register accumulators, `MR` per-ISA, one packed
+   layout serves GEMM/skinny/GEMV), cache blocking that changes traversal order
+   only (bit-identical). Acceptance bullet met.
+2. **Workspace strategy (§6).** `OptimizedModel` owns one `Workspace` (model-level
+   residual-stream + projection + MLP buffers, reused across layers; per-worker
+   attention scratch). A stated **sizing formula** in bytes as a function of
+   (T,E,H,Hkv,d,I,nthr), instantiated for tiny-llama (~26 KB) and Llama-3.2-1B
+   (~61 MB prefill / ~120 KB decode). Acceptance bullet met. Policy:
+   **grow-on-demand with a high-water mark, never shrink** → steady-state decode
+   allocation-free (M12-T05's target, reached now without a config knob; the
+   `max_forward_tokens` bound deferred to M9 when the scheduler supplies it).
+3. **Logits lifetime pinned:** freshly-allocated **caller-owned** for *both*
+   backends (retiring model-execution §5.2's "may return a workspace view"
+   latitude) — one lifetime contract; the one per-step alloc M12-T05 may later
+   remove via an optional `ForwardRequest` output buffer.
+4. **Parallel implementations, not reuse of the M5 layer classes** (§2.2,
+   resolving model-execution §8's open call): the optimized graph reuses only the
+   `Linear` interface (`PackedLinear` slots into the existing
+   `unique_ptr<Linear>`) and `Rope::Create`'s tables (config interpretation, not
+   compute); everything else is new so it runs out of the `Workspace` and stays
+   fusion-ready (M12-T04) without optimizing the oracle.
+5. **Tied embeddings → one physical copy** (§7, resolving model-execution §4.3's
+   "resolved in the design doc"): the packed lm_head is authoritative and the
+   lookup gathers logical row `v` from panel `v/NR`, lane `v%NR` — no `[V,E]`
+   duplicate (which would cost ~272 MB on a tied Qwen2.5-0.5B). One embedding
+   kernel, two source layouts (packed-strided tied / contiguous untied).
+6. **Kernel-validation tolerance table (§10, the acceptance-critical
+   "bitwise-vs-tolerance and why"):** every M6 kernel **bit-identical across
+   thread counts** (no reduction split across threads outside `parallel_reduce`);
+   **bit-identical across ISAs only** for the two pure-map ops (residual add
+   Class E; embedding gather-and-widen); **Class T (stated tolerance) across ISAs
+   and vs the oracle** for everything with a multiply-accumulate (GEMM, norms,
+   softmax, RoPE, attention) — FMA contraction, horizontal-reduction order, and
+   vector transcendentals are the three rounding sources. Stated tolerance
+   recipes (GEMM atol scaled by √K; RMSNorm forbids raw `rsqrte`; the vector
+   `expf` polynomial — the one new numerical algorithm — gets its own ≤2-ulp
+   sweep vs `std::expf`). Recorded+rejected alternative: cross-ISA bit-identity
+   via FMA-everywhere (slow libm fallback on non-FMA x86; revisit as an M12
+   tightening with numbers).
+
+Supporting decisions in the doc: `model → kernels` is a layer-2→layer-1 **downward
+edge, already allowed — no ADR amendment** (only intra-layer edges need one, like
+Amendment 5's `model → kvcache`), CMake link PRIVATE; a determinism-safe
+**worker-index `parallel_for` overload** (`void(int worker, begin, end)`) as the
+per-thread-scratch mechanism (lands with M6-T04; the index selects scratch, never
+chunk assignment); optimized-kernel test suites register with `SCALAR_PASS`
+(first milestone where it covers a full model forward); the `cache.view` gather
+cost quantified (~12% of decode memory traffic on 1B@4k) and marked as exactly
+what M8-T05 removes. Cross-doc edits landed in the same change:
+model-execution.md §4.3/§5.2/§8/§14 and cpu-backend.md §3.2/§6.3/§7 all point
+here with dated notes (never a silent divergence). ROADMAP M6-T01 ticked; CLAUDE.md
+status + "Next up: M6-T02" refreshed. No `src/` change, no test-count change
+(729 green); no build/tidy impact (docs-only).

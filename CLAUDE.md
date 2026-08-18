@@ -390,6 +390,33 @@ behind an existing subsystem):
   logits ~0.98), greedy match/determinism/KV-invariant. `--verify` byte-clean;
   format + scoped tidy clean. +8 tests (729 green).
 
-Next up: **M6-T01** (design doc `docs/design/optimized-cpu-execution.md`: packed
-tile layout, dtype/threading/workspace policy, backend selection, kernel-validation
-methodology — the contract M6-T02+ optimized kernels build on).
+- **M6 (optimized CPU execution engine) — in progress** (2026-08-18): T01
+  `docs/design/optimized-cpu-execution.md` — the contract M6-T02…T08 build on.
+  **Docs-only.** Fixes: the **packed weight tile** (checkpoint `[N=out,K=in]`
+  stays source of truth, derived at load into K-major panels of `NR=16` output
+  rows `[ceil(N/NR),K,NR]`, checkpoint dtype widened in-register; `NR` fixed
+  across ISAs so the forced-scalar pass validates the shipped bytes; worked
+  example + `MR×NR` micro-kernel serving GEMM/skinny/GEMV from one layout);
+  **dtype policy** (fp32 accumulation/activations everywhere, weights kept in
+  checkpoint dtype, fp32 checkpoints not narrowed, norm/bias converted once at
+  load); **workspace** (`OptimizedModel` owns one reused-across-layers
+  `Workspace`, stated byte sizing formula, **grow-on-demand** → allocation-free
+  decode; logits stay caller-owned for both backends); **parallel
+  implementations** (not reuse of the M5 layer classes — reuse only the `Linear`
+  interface via `PackedLinear` + `Rope` tables, so the oracle stays untouched and
+  the graph is fusion-ready); **tied embeddings → one physical copy** (packed
+  lm_head authoritative, lookup gathers row `v` from panel `v/NR` — no ~272 MB
+  `[V,E]` duplicate on tied Qwen2.5-0.5B); **kernel-validation tolerance table**
+  (bit-identical across thread counts always; bit-identical across ISAs only for
+  the two pure-map ops; Class T across ISAs + vs oracle for everything with a
+  multiply-accumulate — with stated tolerance recipes and a ≤2-ulp vector-`expf`
+  sweep). `model → kernels` is a downward edge (no ADR amendment, PRIVATE link);
+  a determinism-safe worker-index `parallel_for` overload lands with M6-T04;
+  optimized suites register `SCALAR_PASS`. Cross-doc notes added to
+  model-execution.md (§4.3/§5.2/§8/§14) and cpu-backend.md (§3.2/§6.3/§7). No
+  `src/` change (729 green unchanged).
+
+Next up: **M6-T02** (packed-weight GEMM & GEMV: cache-blocked, register-tiled,
+`parallel_for`-threaded GEMM + decode GEMV over the `optimized-cpu-execution.md`
+§3 packed tile; load-time repacking; tests vs the M5 reference across shapes on
+all ISAs + forced-scalar; ≥5× the naive GEMM at 4096³ recorded in BASELINES.md).
