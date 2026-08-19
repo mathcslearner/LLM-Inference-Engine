@@ -8,13 +8,15 @@
 #include <cstdint>
 #include <limits>
 
-// NEON prefill-attention variant (arm64 builds only). The four Ops primitives
-// vectorize over `d` (the dot's contraction, the V axpy, the row scale) and
-// over the key row (the block exp), with scalar tails; the online-softmax
-// control flow is the shared internal::PrefillUnitsImpl. Class T vs the scalar
-// variant and the oracle (FMA contraction + horizontal reductions + the vector
-// exp differ in rounding); bit-identical across thread counts (each query's
-// recurrence wholly in one call). exp uses the shared polynomial (neon::Exp).
+// NEON prefill (M6-T04) + decode (M6-T05) attention variants (arm64 builds
+// only). The four Ops primitives vectorize over `d` (the dot's contraction, the
+// V axpy, the row scale) and over the key row (the block exp), with scalar
+// tails; the online-softmax control flow is the shared
+// internal::PrefillUnitsImpl / DecodeUnitsImpl (both drive the same Ops). Class
+// T vs the scalar variant and the oracle (FMA contraction + horizontal
+// reductions + the vector exp differ in rounding); bit-identical across thread
+// counts (each unit's recurrence wholly in one call). exp uses the shared
+// polynomial (neon::Exp).
 
 namespace engine::kernels::neon {
 
@@ -88,6 +90,11 @@ struct NeonOps {
 void PrefillUnits(const internal::PrefillArgs& a, std::int64_t unit_begin,
                   std::int64_t unit_end) {
   internal::PrefillUnitsImpl<NeonOps>(a, unit_begin, unit_end);
+}
+
+void DecodeUnits(const internal::DecodeArgs& a, std::int64_t unit_begin,
+                 std::int64_t unit_end) {
+  internal::DecodeUnitsImpl<NeonOps>(a, unit_begin, unit_end);
 }
 
 }  // namespace engine::kernels::neon

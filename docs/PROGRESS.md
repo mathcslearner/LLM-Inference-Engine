@@ -1298,3 +1298,76 @@ warnings-as-errors build + all suites are its proof — the accepted arm64-CI ga
 +14 test registrations (7 new cases × SCALAR_PASS; 1 forced-scalar slot-guard
 `GTEST_SKIP`) → **837 green**. Format clean; scoped tidy clean on the
 new/edited TUs.
+
+M6-T05 done (2026-08-18: optimized decode attention). The single-token
+specialization of the M6-T04 prefill kernel: one query per head attends the
+whole cache, threaded across kv heads with the `g = H/Hkv` query heads of a
+group processed together so that kv head's K/V stream from memory once. Honors
+the exact `cpu::attention` op contract at `T = 1` (q/out `[H, d]` = the T=1 slice
+of `[T, H, d]`; k/v `[Hkv, L, d]` head-major; scale on the completed dot; GQA by
+`h/g` KV-head indexing). `src/kernels/attention.{h,cpp}` — public
+`DecodeAttentionF32(q,k,v,out, H,Hkv,d,L, scale)`, `KernelTable` dispatch
+(scalar/neon/avx2), `parallel_for` over `Hkv` kv-head units at
+`kAttnHeadGrain = 1`, `detail::DecodeAttentionVariant` test seam.
+`internal/attention_common.h` — `DecodeUnitsImpl<Ops>` (a second control-flow
+template alongside `PrefillUnitsImpl`, driving the **same four Ops primitives** —
+zero new ISA arithmetic) + `DecodeGroupSlice<Ops>` (the per-slice body, split out
+to stay under the tidy cognitive-complexity threshold — the gemm.cpp
+`ComputePanel` idiom), `DecodeArgs`, the `kAttnDecodeGroupChunk = 8` constant.
+`internal/attention_impl.h` — per-ISA `DecodeUnits` decls + the variant seam.
+`scalar/neon/avx2/attention.cpp` — one `DecodeUnits` wrapper each (a one-line
+`DecodeUnitsImpl<…Ops>` instantiation; the AVX2 one written blind).
+
+Non-obvious decisions: (1) **Bit-identity with `PrefillAttentionF32(T=1)` by
+construction, asserted bitwise** (not tolerance): the recurrence is
+key-block-outer / query-inner, but for each *fixed* query head the block
+sequence, the per-block `n_valid`, the first-block `alpha = exp(−inf) = 0`, and
+the four Ops calls are the identical arithmetic in the identical order —
+interleaving the blocks across the group's other query heads never touches this
+head's accumulator (fp32 ops on disjoint `out` rows). This is stronger than the
+ROADMAP's "matches the prefill path's result" (which only asked for tolerance)
+and is exactly the oracle M8-T05's paged decode kernel ("matches the M6-T05
+contiguous decode kernel results exactly") will be validated against. (2)
+**Key-block-outer / query-inner** is what makes "stream K/V once per kv head"
+real: each `kAttnKb` block is loaded once and reused across all `g` query heads
+while cache-resident (vs prefill(T=1) re-reading K/V per query head). (3)
+**No per-worker scratch, no allocation** (§6.1 carried over): `out` is the
+accumulator; the only working memory is a `kAttnKb` stack score row + fixed
+`kAttnDecodeGroupChunk` per-query `run_max`/`run_den` arrays. A group larger than
+the chunk (no real model — g ≤ 7 for Llama-3.2-1B / Qwen2.5) is sliced,
+re-streaming K/V once per slice; the `g = 12 > chunk` test exercises the slicing.
+(4) **Parallel width is `Hkv`** (decode threads over kv heads only, design §8) —
+a model with `Hkv < cores` (Qwen2.5-0.5B Hkv=2) leaves cores idle on decode, the
+concrete M12-T03 flash-decoding motivator; recorded, not hidden.
+
+Numerics (design §10): fp32 throughout; **bit-identical across thread counts**
+(each kv head's whole recurrence within one variant call — asserted vs a single
+serial call + arbitrary manual chunking, `EXPECT_EQ` bitwise); **bit-identical to
+prefill(T=1)** (max-abs-diff 0); Class T across ISAs and vs the oracle. Observed
+max vs `cpu::attention` (NEON): **8.6e-6** across cache lengths
+{1, 63, 64, 65, 127, 128, 129, 2048}, GQA {(4,4),(4,2),(8,1)} + the `g=12` slice
+case, d∈{18,24,64,128}, and the large-logit stress (q/k std 2, logit std ≈4) —
+well inside `rtol 1e-4, atol 1e-5`. The five `attention.safetensors` HF goldens
+are replayed through the decode kernel: `l0_decode` directly, and the **last ctx
+row of each prefill golden** (causality makes that row the decode of that final
+token) — tying the decode path to the HF chain, not just the reference
+(max-abs-diff ≤1.2e-7).
+
+Bench (`attention_bench decode`, BASELINES.md M6-T05): 2k-context decode step
+(L=2048, H=32, Hkv=8, d=64, Llama-3.2-1B-shaped) on the M2 — **5.25×** the M5
+reference at 8-thread NEON (1407 → 268 µs/call), 7.15× single-thread NEON, 3.72×
+single-thread scalar. Decode is marginally faster than prefill(T=1) (268 vs
+275 µs at 8-thread) — both hold one score row at T=1, so the only edge is decode
+streaming K/V once per kv head vs prefill(T=1)'s `g×` re-reads; at 2k context
+both are bandwidth-bound on the shared K/V, so the reuse win is ~2% and grows
+with `g`. The decode kernel's value is the allocation-free single-token path
+M6-T07 calls per generated token, not this margin. No perf *target* for T05
+("time vs the reference"); the delta is recorded per CLAUDE.md.
+
+AVX2 TU written blind (a one-line `DecodeUnitsImpl<Avx2Ops>` instantiation — no
+new intrinsics, since the four Ops primitives are shared with prefill), proven by
+CI's x86-64 warnings-as-errors build + all suites (the accepted arm64-CI gap).
+`regen_fixtures.sh` not run (no fixture change). `src/parallel/` untouched.
++12 test registrations (6 new cases × SCALAR_PASS; 1 forced-scalar slot-guard
+`GTEST_SKIP`) → **849 green**. Format clean; scoped tidy clean on the new/edited
+TUs (the `model → kernels`/attention includers set).

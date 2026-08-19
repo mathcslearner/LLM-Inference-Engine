@@ -19,8 +19,17 @@ namespace {
 // already a substantial body.
 constexpr std::int64_t kAttnQGrain = 1;
 
+// One kv head is one unit of decode parallel work (design §5, §8): units write
+// the disjoint output rows of their group's query heads, and each kv head's
+// online-softmax recurrence runs wholly within one variant call, so the result
+// is bit-identical across thread counts. Grain 1 — a unit streams the whole
+// cache for g query heads.
+constexpr std::int64_t kAttnHeadGrain = 1;
+
 using PrefillUnitsFn = void (*)(const internal::PrefillArgs&, std::int64_t,
                                 std::int64_t);
+using DecodeUnitsFn = void (*)(const internal::DecodeArgs&, std::int64_t,
+                               std::int64_t);
 
 constexpr KernelTable<PrefillUnitsFn> kPrefillTable = {
     .scalar = &scalar::PrefillUnits,
@@ -32,12 +41,26 @@ constexpr KernelTable<PrefillUnitsFn> kPrefillTable = {
 #endif
 };
 
+constexpr KernelTable<DecodeUnitsFn> kDecodeTable = {
+    .scalar = &scalar::DecodeUnits,
+#if defined(ENGINE_ARCH_ARM64)
+    .neon = &neon::DecodeUnits,
+#endif
+#if defined(ENGINE_ARCH_X86_64)
+    .avx2 = &avx2::DecodeUnits,
+#endif
+};
+
 }  // namespace
 
 namespace detail {
 
 PrefillUnitsFn PrefillAttentionVariant(Isa isa) {
   return Select(kPrefillTable, isa);
+}
+
+DecodeUnitsFn DecodeAttentionVariant(Isa isa) {
+  return Select(kDecodeTable, isa);
 }
 
 }  // namespace detail
@@ -63,6 +86,23 @@ void PrefillAttentionF32(const float* q, const float* k, const float* v,
                                    .scale = scale};
   parallel::parallel_for(
       parallel::DefaultPool(), heads * num_qblocks, kAttnQGrain,
+      [&](std::int64_t begin, std::int64_t end) { fn(args, begin, end); });
+}
+
+void DecodeAttentionF32(const float* q, const float* k, const float* v,
+                        float* out, std::int64_t heads, std::int64_t kv_heads,
+                        std::int64_t d, std::int64_t l_dim, float scale) {
+  static const DecodeUnitsFn fn = Select(kDecodeTable);
+  const internal::DecodeArgs args{.q = q,
+                                  .k = k,
+                                  .v = v,
+                                  .out = out,
+                                  .d = d,
+                                  .l_dim = l_dim,
+                                  .group = heads / kv_heads,
+                                  .scale = scale};
+  parallel::parallel_for(
+      parallel::DefaultPool(), kv_heads, kAttnHeadGrain,
       [&](std::int64_t begin, std::int64_t end) { fn(args, begin, end); });
 }
 

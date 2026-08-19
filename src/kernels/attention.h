@@ -42,4 +42,34 @@ void PrefillAttentionF32(const float* q, const float* k, const float* v,
                          std::int64_t kv_heads, std::int64_t d,
                          std::int64_t l_dim, float scale);
 
+// Optimized decode attention (M6-T05; design: optimized-cpu-execution.md §8,
+// §10). The single-token specialization of `PrefillAttentionF32`: one query per
+// head attends the whole cache. It is exactly `PrefillAttentionF32` with T = 1
+// (a `q`/`out` shaped `[1, H, d]` is `[H, d]`), reorganized to stream each kv
+// head's K/V from memory once for all g = H / Hkv query heads of the group.
+//
+// Contract (the T = 1 case of the prefill contract, so tests are 1:1):
+//   q    : [H, d]     contiguous fp32 (query head h at q + h·d).
+//   k, v : [Hkv, L, d] contiguous fp32, head-major (L cached+new keys;
+//          kv head hk at k + hk·L·d, key s at +s·d).
+//   out  : [H, d]     contiguous fp32, caller-allocated, fully overwritten.
+//   scale: multiplies the completed q·k dot (HF order: matmul then scale).
+//
+// The single query sits at absolute position L − 1 and attends key positions
+// [0, L − 1] inclusive (every key — no causal masking within the cache).
+// GQA by KV-head indexing with **no materialized repeat**: query head h reads
+// kv head h / g. Threaded across kv heads (design §5): each kv head's whole
+// recurrence runs within one thread, so the result is **bit-identical across
+// thread counts**, and — by construction — **bit-identical to
+// `PrefillAttentionF32` called with T = 1** on the same q/k/v (M6-T05
+// acceptance; the arithmetic order per output head is unchanged). Class T vs
+// the oracle and across ISAs (online rescale + vector `exp`, §10).
+//
+// Raw-pointer entry: all preconditions are the CALLER's (non-null contiguous
+// fp32 operands; H, Hkv, d, L ≥ 1; H a multiple of Hkv). `out` must not alias
+// q/k/v.
+void DecodeAttentionF32(const float* q, const float* k, const float* v,
+                        float* out, std::int64_t heads, std::int64_t kv_heads,
+                        std::int64_t d, std::int64_t l_dim, float scale);
+
 }  // namespace engine::kernels

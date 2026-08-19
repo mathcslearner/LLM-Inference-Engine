@@ -227,18 +227,22 @@ engine_add_tests(TREE unit SOURCES
   LABELS kernels
   SCALAR_PASS)
 
-# The M6-T03 norm/activation/softmax/RoPE kernels vs the M5 cpu:: oracle across
-# hidden sizes {odd, 1024, 4096}, large-magnitude softmax, RoPE positions
-# {0, 1, large} + GQA head counts, with the HF goldens replayed through each
-# kernel. Each calls engine::cpu (the oracle) and engine::model (goldens);
-# SCALAR_PASS runs them under forced-scalar too (design §9). activation_kernel
-# also carries the residual-add (kernels::AddF32) acceptance. `kernels` label.
+# The M6-T03 norm/activation/softmax/RoPE kernels, the M6-T04 prefill and
+# M6-T05 decode attention kernels, all vs the M5 cpu:: oracle across hidden
+# sizes {odd, 1024, 4096}, large-magnitude softmax, RoPE positions {0, 1, large}
+# + GQA head counts, attention cache lengths + GQA configs, with the HF goldens
+# replayed through each kernel. Each calls engine::cpu (the oracle) and
+# engine::model (goldens); SCALAR_PASS runs them under forced-scalar too (design
+# §9). activation_kernel also carries the residual-add (kernels::AddF32)
+# acceptance; decode_attention_kernel asserts bit-identity with the prefill
+# path. `kernels` label.
 engine_add_tests(TREE unit SOURCES
   norm_kernel_test.cpp
   activation_kernel_test.cpp
   softmax_kernel_test.cpp
   rope_kernel_test.cpp
   attention_kernel_test.cpp
+  decode_attention_kernel_test.cpp
   DEPS engine::kernels engine::cpu engine::model
   LABELS kernels
   SCALAR_PASS)

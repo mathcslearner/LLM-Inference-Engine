@@ -901,7 +901,7 @@ Supports prefill continuing from a non-empty cache.
 - Tests vs the M5 reference attention: prefill from empty and non-empty cache, GQA configs, sequence lengths {1, 17, 512, 2048}, tolerance documented.
 - Bench: time vs the reference attention at 2k context recorded in BASELINES.md.
 
-### M6-T05 · Optimized decode attention
+### M6-T05 · Optimized decode attention — ✅ DONE (2026-08-18)
 Single-token decode path: one query attending over the cached K/V per sequence,
 vectorized dot-products and weighted sums, threaded across heads (and across
 sequences when batched later).

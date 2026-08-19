@@ -478,11 +478,34 @@ behind an existing subsystem):
   `rtol 1e-4, atol 1e-5`); bit-identical across thread counts. AVX2 TU written
   blind, hand-reviewed, proven by CI. Bench (BASELINES.md M6-T04): **9.72×** the
   reference at 8-thread NEON on a 2k-context prefill (2.121 → 0.218 s), 12.89×
-  single-thread. +14 test registrations → **837 green**.
+  single-thread. +14 test registrations → **837 green**. T05 optimized decode
+  attention: the single-token specialization — one query per head attends the
+  whole cache, threaded over `Hkv` kv heads (`kAttnHeadGrain=1`) with the
+  `g=H/Hkv` query heads of a group processed **key-block-outer/query-inner** so
+  each kv head's K/V streams from DRAM once. `src/kernels/attention.{h,cpp}` —
+  `DecodeAttentionF32(q,k,v,out, H,Hkv,d,L, scale)`, `KernelTable` dispatch,
+  `detail::DecodeAttentionVariant` seam; `internal/attention_common.h` —
+  `DecodeUnitsImpl<Ops>` + `DecodeGroupSlice<Ops>` (per-slice body split out
+  under the tidy cognitive-complexity threshold, gemm.cpp `ComputePanel` idiom),
+  `DecodeArgs`, `kAttnDecodeGroupChunk=8`; scalar/neon/avx2 TUs each a one-line
+  `DecodeUnitsImpl<…Ops>` instantiation reusing the **same four Ops primitives**
+  as prefill (zero new intrinsics; AVX2 blind). **Bit-identical to
+  `PrefillAttentionF32(T=1)` by construction, asserted bitwise** (the M8-T05
+  paged-decode oracle) — per fixed query head the arithmetic order is identical;
+  bit-identical across thread counts; Class T vs the oracle (observed 8.6e-6
+  across cache lengths {1,63,64,65,127,128,129,2048}, GQA + a `g=12>chunk` slice
+  case, d∈{18,24,64,128}, large-logit stress; `rtol 1e-4, atol 1e-5`). No
+  per-worker scratch, allocation-free, `src/parallel/` untouched. Parallel width
+  = `Hkv` only (decode leaves cores idle when `Hkv<cores` — the M12-T03
+  flash-decoding motivator, recorded). Bench (BASELINES.md M6-T05): **5.25×** the
+  reference at 8-thread NEON on a 2k-context decode step (1407 → 268 µs/call),
+  7.15× single-thread NEON; decode ≈ prefill(T=1) (both hold one score row at
+  T=1). +12 test registrations → **849 green**.
 
-Next up: **M6-T05** (optimized decode attention: the single-token decode path —
-one query per sequence attending the full cached K/V, vectorized dot-products
-and weighted V sums, threaded across kv heads with the `g = H/Hkv` query heads of
-a group sharing that head's streamed K/V; tested vs the M5 reference across cache
-lengths {1, 63, 64, 65, 2048} and GQA configs, and asserted to match the M6-T04
-prefill path's result for the same single token).
+Next up: **M6-T06** (embedding & logits path: embedding-lookup mapping ids →
+packed rows through the repacked panel layout, and the lm_head GEMM/GEMV
+producing fp32 logits; tied embeddings honored so lookup and projection share
+one physical packed copy — the packed lm_head authoritative, lookup gathering
+row `v` from panel `v/kNr` per the design doc's tied-embedding resolution; tests:
+lookup matches the reference for random/repeated id sets, logits match the
+reference within tolerance on the fixture model).

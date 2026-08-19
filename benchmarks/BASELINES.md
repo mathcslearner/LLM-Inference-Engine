@@ -161,3 +161,54 @@ Correctness is unaffected (Class T within the §10 tolerance rtol 1e-4 atol 1e-5
 bit-identical across thread counts). AVX2 body mirrors the NEON structure and is
 proven correct + warnings-clean by CI; not measured here (no x86-64 dev
 machine).
+
+## M6-T05 — optimized decode attention (2026-08-18)
+
+**Host:** Apple M2 (8 physical cores), macOS, dev machine.
+**Toolchain:** Homebrew clang 20, `-O3` Release.
+**Command:** `build/benchmarks/attention_bench decode` (defaults `L=2048, H=32,
+Hkv=8, d=64`, T=1 — a Llama-3.2-1B-shaped 2k-context decode step; best per-call
+of 200 samples × 100-call batches, since a single decode call is µs-scale).
+Three paths on the same single-token query: the M5 reference `cpu::attention`
+with T=1, the M6-T04 `PrefillAttentionF32` with T=1, and the M6-T05
+`DecodeAttentionF32`. Both optimized paths are numerically identical to the
+reference within §10 tolerance; decode is **bit-identical to prefill(T=1)** (a
+tested invariant, not just a benchmark note). The M6-T05 obligation is "time vs
+the reference" — no perf target.
+
+| Config | reference | Prefill(T=1) | Decode | decode vs ref |
+|---|---:|---:|---:|---:|
+| NEON, 8 threads (default) | 1407.1 µs | 275.5 µs | 268.3 µs | **5.25×** |
+| NEON, 1 thread | 6273.7 µs | 898.1 µs | 878.0 µs | 7.15× |
+| scalar, 1 thread | 6271.9 µs | 1702.5 µs | 1687.2 µs | 3.72× |
+
+Reading them:
+
+- **5.25× at the default 8-thread NEON** is the headline: the reference
+  materializes and softmaxes an `[H·1, L]` score buffer per call; the decode
+  kernel holds only a `kAttnKb` score row per query head and streams K/V once
+  per kv head. The reference's scalar and NEON single-thread times are ~equal
+  (6273.7 vs 6271.9 µs) — it is dominated by the score-buffer traffic +
+  `cpu::softmax` pass, so the vector reference gains almost nothing, exactly as
+  in the M6-T04 prefill picture.
+- **Decode ≈ prefill(T=1), decode marginally faster** (268 vs 275 µs at
+  8-thread; 878 vs 898 µs single-thread). Both hold one score row at T=1; the
+  only algorithmic difference is that decode streams each kv head's K/V once for
+  all `g = 4` query heads of the group, whereas prefill(T=1) re-reads K/V per
+  query head (`g×` more). At the 2k context that is a ~2% edge — the decode step
+  at these sizes is bandwidth-bound on the shared K/V regardless, so the reuse
+  win is small but real, and it grows with `g`. The value of the decode kernel
+  is not this margin but the **allocation-free, cache-friendly single-token
+  path** that M6-T07 calls once per generated token.
+- **Thread scaling** (NEON, decode): 878.0 → 268.3 µs over 8 cores (3.27×). The
+  decode kernel parallelizes over the `Hkv = 8` kv heads only (design §8, no
+  flash-decoding split until M12-T03), so its parallel width equals Hkv — here
+  it happens to match the 8 cores; a model with `Hkv < cores` (e.g.
+  Qwen2.5-0.5B, Hkv=2) would leave cores idle on decode, the concrete M12-T03
+  motivator. The sub-linear 3.27× is the shared-K/V memory bandwidth.
+
+Correctness unaffected (Class T within §10 rtol 1e-4 atol 1e-5, observed
+max-abs-diff ≤ 8.6e-6 across the acceptance sweep; bit-identical across thread
+counts; bit-identical to prefill(T=1)). AVX2 body mirrors the NEON structure and
+is proven correct + warnings-clean by CI; not measured here (no x86-64 dev
+machine).

@@ -5,13 +5,13 @@
 #include <cstdint>
 #include <limits>
 
-// Scalar prefill-attention variant (compiled on every platform — the fallback
-// and forced-scalar target). It embeds the shared exp polynomial
-// (ExpF32Scalar), not std::expf, so the forced-scalar pass exercises the same
-// numeric code the vector paths run (design §10). Class T vs the oracle (the
-// online-softmax rescale + the polynomial exp), bit-identical across thread
-// counts. All four primitives are plain ascending loops — the correctness
-// reference the NEON/AVX2 Ops mirror.
+// Scalar prefill (M6-T04) + decode (M6-T05) attention variants (compiled on
+// every platform — the fallback and forced-scalar target). They embed the
+// shared exp polynomial (ExpF32Scalar), not std::expf, so the forced-scalar
+// pass exercises the same numeric code the vector paths run (design §10). Class
+// T vs the oracle (the online-softmax rescale + the polynomial exp),
+// bit-identical across thread counts. All four primitives are plain ascending
+// loops — the correctness reference the NEON/AVX2 Ops mirror.
 
 namespace engine::kernels::scalar {
 
@@ -62,6 +62,11 @@ struct ScalarOps {
 void PrefillUnits(const internal::PrefillArgs& a, std::int64_t unit_begin,
                   std::int64_t unit_end) {
   internal::PrefillUnitsImpl<ScalarOps>(a, unit_begin, unit_end);
+}
+
+void DecodeUnits(const internal::DecodeArgs& a, std::int64_t unit_begin,
+                 std::int64_t unit_end) {
+  internal::DecodeUnitsImpl<ScalarOps>(a, unit_begin, unit_end);
 }
 
 }  // namespace engine::kernels::scalar

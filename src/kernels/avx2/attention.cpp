@@ -8,13 +8,14 @@
 #include <cstdint>
 #include <limits>
 
-// AVX2 prefill-attention variant (x86-64 builds only; compiled -mavx2 -mfma).
-// The 8-lane mirror of the NEON variant: same four Ops primitives over `d` and
-// the key row, same shared online-softmax control flow
-// (internal::PrefillUnitsImpl), the shared exp polynomial (avx2::Exp). Class T
-// vs the scalar variant and the oracle; bit-identical across thread counts.
-// Written blind on the arm64 dev machine and proven by CI's x86-64 build
-// (design §9, CLAUDE.md tidy note); reviewed by hand against .clang-tidy.
+// AVX2 prefill (M6-T04) + decode (M6-T05) attention variants (x86-64 builds
+// only; compiled -mavx2 -mfma). The 8-lane mirror of the NEON variant: same
+// four Ops primitives over `d` and the key row, shared with both online-softmax
+// control flows (internal::PrefillUnitsImpl / DecodeUnitsImpl), the shared exp
+// polynomial (avx2::Exp). Class T vs the scalar variant and the oracle;
+// bit-identical across thread counts. Written blind on the arm64 dev machine
+// and proven by CI's x86-64 build (design §9, CLAUDE.md tidy note); reviewed by
+// hand against .clang-tidy.
 
 namespace engine::kernels::avx2 {
 
@@ -102,6 +103,11 @@ struct Avx2Ops {
 void PrefillUnits(const internal::PrefillArgs& a, std::int64_t unit_begin,
                   std::int64_t unit_end) {
   internal::PrefillUnitsImpl<Avx2Ops>(a, unit_begin, unit_end);
+}
+
+void DecodeUnits(const internal::DecodeArgs& a, std::int64_t unit_begin,
+                 std::int64_t unit_end) {
+  internal::DecodeUnitsImpl<Avx2Ops>(a, unit_begin, unit_end);
 }
 
 }  // namespace engine::kernels::avx2

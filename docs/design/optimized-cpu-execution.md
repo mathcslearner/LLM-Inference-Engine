@@ -613,14 +613,39 @@ model-execution.md §4.2; only the attention *math* is replaced.
   ~1.3e-6 at realistic magnitude across T∈{1,17,512,2048}, P∈{0,5}, GQA
   {(4,4),(4,2),(8,1)}, d∈{18,24,64,128}, and the block-boundary sweep; ~1.4e-5
   under a large-logit stress (std≈4) — all inside the §10 tolerance.
-- **Decode (M6-T05): one query per sequence over the full cache.** `q [H, d]` (a
-  `T == 1` slice) attends the cached `k`/`v [Hkv, L, d]`; threaded across kv
-  heads, the `g = H/Hkv` query heads of each group processed together so that kv
-  head's K/V stream from memory once. Vectorized dot-products (`q·k` over `d`) and
-  the weighted V sum, one-pass online softmax over `L` (or a two-pass max-then-sum
-  — either is fp32 single-accumulator per output). Must produce **the same result
-  as the prefill path for the same single token** (an acceptance cross-check,
-  M6-T05).
+- **Decode (M6-T05): one query per sequence over the full cache. *Landed
+  2026-08-18.*** `q [H, d]` (a `T == 1` slice) attends the cached `k`/`v [Hkv, L,
+  d]`; threaded across kv heads (`kAttnHeadGrain = 1`), the `g = H/Hkv` query
+  heads of each group processed together so that kv head's K/V stream from memory
+  once. **Implementation shape:** the decode recurrence is written once as
+  `internal::DecodeUnitsImpl<Ops>` (a second control-flow template alongside
+  `PrefillUnitsImpl`) driving the **same four `Ops` primitives** as prefill —
+  zero new ISA arithmetic, so the blind AVX2 TU is a one-line
+  `DecodeUnitsImpl<Avx2Ops>` instantiation. The recurrence is **key-block-outer,
+  query-inner** (`internal::DecodeGroupSlice`, split out to stay under the tidy
+  cognitive-complexity threshold, the gemm.cpp idiom): for each `kAttnKb` key
+  block, every query head of the group runs its dot/exp/rescale/axpy against that
+  block while it is cache-resident, so K/V go through DRAM once per kv head
+  regardless of `g`. Per-query online-softmax state (`run_max`/`run_den`) lives in
+  fixed `kAttnDecodeGroupChunk = 8` stack arrays; a group larger than the chunk
+  (no real model — g ≤ 7 for Llama-3.2-1B / Qwen2.5) is sliced, re-streaming K/V
+  once per slice. No per-worker scratch (the accumulator is `out` itself, §6.1)
+  and no allocation. **Bit-identical to `PrefillAttentionF32` called with
+  `T = 1`** on the same q/k/v (the M6-T05 acceptance cross-check, asserted
+  *bitwise* not by tolerance): for each fixed query head the block sequence, the
+  per-block `n_valid`, the first-block `alpha = exp(−inf) = 0`, and the four Ops
+  calls are the identical arithmetic in the identical order — interleaving the
+  blocks across the group's other query heads never touches this head's
+  accumulator. This bitwise equivalence is what M8-T05's paged decode kernel
+  ("matches the M6-T05 contiguous decode kernel results exactly") will be
+  validated against. **Parallel width is `Hkv`** (not `H·qblocks` as in prefill):
+  decode threads over kv heads only, so a model with `Hkv < cores` leaves cores
+  idle on the decode step — the concrete motivator for M12-T03's flash-decoding
+  cache split (§11, §12). Observed vs `cpu::attention` (NEON): max **8.6e-6**
+  across cache lengths {1, 63, 64, 65, 127, 128, 129, 2048}, GQA
+  {(4,4),(4,2),(8,1)} + a `g = 12 > chunk` case, d∈{18,24,64,128}, and the
+  large-logit stress (std 2) — inside the §10 tolerance; decode-vs-prefill is 0
+  (bitwise).
 
 The online-softmax rescaling changes the *arithmetic order* vs the reference's
 materialize-then-`cpu::softmax`, so attention is **Class T** vs the oracle (a
@@ -769,7 +794,13 @@ why:**
   out-of-range large-logit stress (q/k std 2 ⇒ logit std ≈4). The stated
   threshold holds; a logit std in the tens (no trained model's regime) is where
   the online rescale's incremental rounding exceeds it — recorded, not
-  papered over.*
+  papered over.* **Decode (M6-T05, NEON): observed max 8.6e-6** across cache
+  lengths {1, 63, 64, 65, 127, 128, 129, 2048}, GQA {(4,4),(4,2),(8,1)} + a
+  `g = 12` (> `kAttnDecodeGroupChunk`) slicing case, d∈{18,24,64,128}, and the
+  large-logit stress (std 2, observed 8.6e-6 at L=2048) — all inside the stated
+  threshold. The decode kernel is additionally asserted **bit-identical to
+  `PrefillAttentionF32(T=1)`** (max-abs-diff 0), the M6-T05 acceptance
+  cross-check and the M8-T05 paged-decode oracle.
 - **End-to-end:** `OptimizedModel` logits vs `ReferenceModel` logits within a
   stated tolerance (observed recorded); greedy generation **token-for-token
   identical** on the tiny fixtures. The M5-T09/T10 prompt selection (min top-2
