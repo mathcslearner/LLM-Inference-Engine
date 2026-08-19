@@ -424,21 +424,81 @@ TEST(GeneratorTest, OutOfRangePromptIdPropagatesFromForward) {
   EXPECT_NE(got.status().message().find("512"), std::string::npos);
 }
 
-TEST(GeneratorTest, NotYetImplementedSamplingIsRejectedBeforeGenerating) {
+// M7-T05: greedy generation with logprobs returns one StepLogprobs per token,
+// index-aligned with `tokens`, without changing the tokens (the greedy golden
+// still holds). The chosen token is the top-1 logprob (greedy == argmax), and
+// each step's probability mass sums to 1 over the full vocabulary.
+TEST(GeneratorTest, GreedyLogprobsAreAlignedAndTokensUnchanged) {
   const std::unique_ptr<Model> model = BuildTiny();
-  SimpleKvCache cache = FreshCache();
-  const std::vector<std::int32_t> prompt = {1, 5, 9};
-  // A still-unimplemented knob (logprobs land in M7-T05): the sampler's Create
-  // rejects it with Unimplemented, front-loaded so nothing is generated and the
-  // cache is untouched.
+  const std::int64_t max_new = GoldenMaxNewTokens();
+
+  for (const GenerateCase& c : LoadGoldenCases()) {
+    SimpleKvCache plain_cache = FreshCache();
+    const std::vector<std::int32_t> plain =
+        Unwrap(Generate(*model, plain_cache, c.prompt_ids,
+                        {.sampling = SamplingParams::Greedy(max_new),
+                         .eos_ids = {}}))
+            .tokens;
+
+    SamplingParams sampling = SamplingParams::Greedy(max_new);
+    sampling.logprobs = 5;
+    SimpleKvCache cache = FreshCache();
+    const engine::engine::GenerateResult r = Unwrap(Generate(
+        *model, cache, c.prompt_ids, {.sampling = sampling, .eos_ids = {}}));
+    EXPECT_EQ(r.tokens, plain) << "case " << c.name;  // golden unchanged
+    ASSERT_EQ(r.logprobs.size(), r.tokens.size()) << "case " << c.name;
+    for (std::size_t i = 0; i < r.tokens.size(); ++i) {
+      const engine::sampling::StepLogprobs& lp = r.logprobs[i];
+      ASSERT_FALSE(lp.top.empty());
+      EXPECT_EQ(lp.top.front().id, r.tokens[i]) << "step " << i;  // top-1
+      EXPECT_FLOAT_EQ(lp.chosen_logprob, lp.top.front().logprob)
+          << "step " << i;
+      EXPECT_LE(lp.top.size(), 5U);
+      // Descending order.
+      for (std::size_t k = 1; k < lp.top.size(); ++k) {
+        EXPECT_GE(lp.top[k - 1].logprob, lp.top[k].logprob);
+      }
+      EXPECT_LE(lp.chosen_logprob, 0.0F);  // a log-probability
+    }
+  }
+}
+
+// The per-token callback carries the same StepLogprobs the result stores.
+TEST(GeneratorTest, OnTokenEventCarriesLogprobs) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  const GenerateCase c = LoadGoldenCases().front();
   SamplingParams sampling = SamplingParams::Greedy(8);
-  sampling.logprobs = 1;
-  const GenerateOptions options{.sampling = sampling, .eos_ids = {}};
-  const auto got = Generate(*model, cache, prompt, options);
-  ASSERT_FALSE(got.ok());
-  EXPECT_TRUE(engine::core::IsUnimplemented(got.status()))
-      << got.status().ToString();
-  EXPECT_EQ(cache.length(), 0);
+  sampling.logprobs = 3;
+  SimpleKvCache cache = FreshCache();
+
+  std::vector<float> event_chosen;
+  const engine::engine::GenerateResult r = Unwrap(Generate(
+      *model, cache, c.prompt_ids, {.sampling = sampling, .eos_ids = {}},
+      [&](const engine::engine::TokenEvent& ev) {
+        ASSERT_NE(ev.logprobs, nullptr);
+        event_chosen.push_back(ev.logprobs->chosen_logprob);
+      }));
+  ASSERT_EQ(event_chosen.size(), r.logprobs.size());
+  for (std::size_t i = 0; i < event_chosen.size(); ++i) {
+    EXPECT_FLOAT_EQ(event_chosen[i], r.logprobs[i].chosen_logprob);
+  }
+}
+
+// Logprobs off (the default): no per-step logprobs are stored, and the callback
+// sees a null pointer.
+TEST(GeneratorTest, LogprobsDisabledLeavesResultEmpty) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  const GenerateCase c = LoadGoldenCases().front();
+  SimpleKvCache cache = FreshCache();
+  bool saw_null = true;
+  const engine::engine::GenerateResult r =
+      Unwrap(Generate(*model, cache, c.prompt_ids,
+                      {.sampling = SamplingParams::Greedy(8), .eos_ids = {}},
+                      [&](const engine::engine::TokenEvent& ev) {
+                        saw_null = saw_null && (ev.logprobs == nullptr);
+                      }));
+  EXPECT_TRUE(r.logprobs.empty());
+  EXPECT_TRUE(saw_null);
 }
 
 // End-to-end: a repetition penalty is threaded through the generation loop's
@@ -537,6 +597,32 @@ TEST(GeneratorTest, StochasticGenerationWithNulloptSeedRuns) {
                       {.sampling = sampling, .eos_ids = {}}))
           .tokens;
   EXPECT_EQ(got.size(), 8U);
+}
+
+// Stochastic generation with logprobs (T05) picks the same tokens as without
+// (the draw is unperturbed) and fills logprobs at every step.
+TEST(GeneratorTest, StochasticLogprobsDoNotChangeTokens) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  const GenerateCase c = LoadGoldenCases().front();
+
+  SimpleKvCache plain_cache = FreshCache();
+  const std::vector<std::int32_t> plain =
+      Unwrap(Generate(*model, plain_cache, c.prompt_ids,
+                      {.sampling = StochasticParams(24, /*seed=*/2024),
+                       .eos_ids = {}}))
+          .tokens;
+
+  SamplingParams sampling = StochasticParams(24, /*seed=*/2024);
+  sampling.logprobs = 4;
+  SimpleKvCache cache = FreshCache();
+  const engine::engine::GenerateResult r = Unwrap(Generate(
+      *model, cache, c.prompt_ids, {.sampling = sampling, .eos_ids = {}}));
+  EXPECT_EQ(r.tokens, plain);
+  ASSERT_EQ(r.logprobs.size(), r.tokens.size());
+  for (const engine::sampling::StepLogprobs& lp : r.logprobs) {
+    EXPECT_LE(lp.chosen_logprob, 0.0F);
+    EXPECT_FALSE(lp.top.empty());
+  }
 }
 
 // ------------------------------------------------------ backend helpers --

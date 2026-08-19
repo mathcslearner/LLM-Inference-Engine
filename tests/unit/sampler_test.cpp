@@ -16,19 +16,20 @@
 // M7-T01 (design: docs/design/model-execution.md §15): the Sampler skeleton and
 // its greedy selection branch. Portable C++ — no ISA concern, no SCALAR_PASS.
 // Covers: greedy argmax over a logits row (with lowest-index tie-break),
-// NaN/empty-row error posture, and the Create-time Unimplemented guards for
-// every not-yet-landed stage (stop conditions, logprobs). Penalties (T03) are
-// implemented, so this suite also covers their effect on greedy selection.
+// NaN/empty-row error posture, penalties (T03) affecting greedy selection, the
+// stochastic branch (T02), and logprobs (T05) via `SampleWithLogprobs`. As of
+// T05 `Create` no longer rejects any knob with Unimplemented.
 
 namespace {
 
 using engine::core::IsInternal;
 using engine::core::IsInvalidArgument;
-using engine::core::IsUnimplemented;
 using engine::core::StatusOr;
 using engine::sampling::SampleContext;
 using engine::sampling::Sampler;
+using engine::sampling::SampleResult;
 using engine::sampling::SamplingParams;
+using engine::sampling::StepLogprobs;
 
 [[nodiscard]] Sampler GreedySampler() {
   StatusOr<Sampler> sampler = Sampler::Create(SamplingParams::Greedy(8));
@@ -201,10 +202,12 @@ TEST(SamplerTest, AcceptsStopStrings) {
   EXPECT_TRUE(Sampler::Create(p).ok());
 }
 
-TEST(SamplerTest, RejectsLogprobs) {
+// Logprobs land in T05: Create now accepts the knob (the last Unimplemented
+// guard is gone — every field is implemented).
+TEST(SamplerTest, AcceptsLogprobs) {
   SamplingParams p = SamplingParams::Greedy(8);
   p.logprobs = 5;
-  EXPECT_TRUE(IsUnimplemented(Sampler::Create(p).status()));
+  EXPECT_TRUE(Sampler::Create(p).ok());
 }
 
 // Invalid params surface as InvalidArgument (from ValidateSamplingParams),
@@ -423,6 +426,144 @@ TEST(SamplerTest, StochasticNeverSamplesMaskedNegInfToken) {
   const std::vector<int> hist =
       DrawHistogram(sampler, logits, static_cast<int>(logits.size()), 2000);
   EXPECT_EQ(hist[1], 0);  // the -inf token is never drawn
+}
+
+// ---------------------------------------------------------------- logprobs --
+
+// Full-vocab natural-log softmax reference (fp64) at a given temperature.
+[[nodiscard]] std::vector<double> LogSoftmaxRef(std::span<const float> logits,
+                                                float temperature) {
+  double max_l = -std::numeric_limits<double>::infinity();
+  for (const float x : logits) {
+    max_l = std::max(max_l, static_cast<double>(x) / temperature);
+  }
+  double sum = 0.0;
+  for (const float x : logits) {
+    sum += std::exp((static_cast<double>(x) / temperature) - max_l);
+  }
+  const double log_z = std::log(sum);
+  std::vector<double> lp(logits.size());
+  for (std::size_t i = 0; i < logits.size(); ++i) {
+    lp[i] = ((static_cast<double>(logits[i]) / temperature) - max_l) - log_z;
+  }
+  return lp;
+}
+
+// Unwrap the StepLogprobs a SampleWithLogprobs result must carry, asserting it
+// is present. `value_or` (not `value`) keeps clang-tidy's optional-access check
+// happy while EXPECT_TRUE flags a genuinely absent value.
+[[nodiscard]] StepLogprobs TakeLogprobs(const SampleResult& result) {
+  EXPECT_TRUE(result.logprobs.has_value());
+  return result.logprobs.value_or(StepLogprobs{});
+}
+
+// With logprobs disabled (the default), SampleWithLogprobs returns the token
+// only — no StepLogprobs — and the token equals what Sample returns.
+TEST(SamplerTest, LogprobsDisabledYieldsNoStepLogprobs) {
+  const Sampler sampler = GreedySampler();  // logprobs == 0
+  const std::vector<float> logits = {0.1F, 3.5F, -2.0F, 3.4F};
+  StatusOr<SampleResult> r = sampler.SampleWithLogprobs(logits, kNoContext);
+  ASSERT_TRUE(r.ok()) << r.status().ToString();
+  EXPECT_EQ(r->token, 1);
+  EXPECT_FALSE(r->logprobs.has_value());
+  EXPECT_EQ(r->token, *sampler.Sample(logits, kNoContext));
+}
+
+// Acceptance criterion: the greedy chosen-token logprob equals the max logprob
+// (== top[0]), and top[0] is the argmax token.
+TEST(SamplerTest, GreedyChosenLogprobEqualsMax) {
+  SamplingParams p = SamplingParams::Greedy(8);
+  p.logprobs = 4;
+  const Sampler sampler = MakeSampler(std::move(p));
+  const std::vector<float> logits = {0.1F, 3.5F, -2.0F, 3.4F, 1.0F};
+  StatusOr<SampleResult> r = sampler.SampleWithLogprobs(logits, kNoContext);
+  ASSERT_TRUE(r.ok()) << r.status().ToString();
+  const StepLogprobs lp = TakeLogprobs(*r);
+  ASSERT_FALSE(lp.top.empty());
+  EXPECT_EQ(lp.top.front().id, r->token);
+  EXPECT_FLOAT_EQ(lp.chosen_logprob, lp.top.front().logprob);
+  // The chosen logprob matches the full-vocab log-softmax at the argmax.
+  const std::vector<double> ref = LogSoftmaxRef(logits, /*temperature=*/1.0F);
+  EXPECT_NEAR(lp.chosen_logprob,
+              static_cast<float>(ref[static_cast<std::size_t>(r->token)]),
+              1e-5F);
+}
+
+// Greedy logprobs are computed from the penalized row, so a penalty that moves
+// the argmax also moves which logprob is reported as chosen.
+TEST(SamplerTest, GreedyLogprobsUsePenalizedRow) {
+  SamplingParams p = SamplingParams::Greedy(8);
+  p.repetition_penalty = 2.0F;
+  p.logprobs = 2;
+  const Sampler sampler = MakeSampler(std::move(p));
+  const std::vector<float> logits = {3.0F, 4.0F};
+  const std::vector<std::int32_t> generated = {1};
+  const SampleContext ctx{.prompt_ids = {}, .generated_ids = generated};
+  StatusOr<SampleResult> r = sampler.SampleWithLogprobs(logits, ctx);
+  ASSERT_TRUE(r.ok()) << r.status().ToString();
+  EXPECT_EQ(r->token, 0);  // penalty demotes token 1 below token 0
+  const StepLogprobs lp = TakeLogprobs(*r);
+  // Reference over the penalized logits {3.0, 4.0/2 = 2.0}.
+  const std::vector<float> penalized = {3.0F, 2.0F};
+  const std::vector<double> ref = LogSoftmaxRef(penalized, 1.0F);
+  EXPECT_NEAR(lp.chosen_logprob, static_cast<float>(ref[0]), 1e-5F);
+  ASSERT_FALSE(lp.top.empty());
+  EXPECT_EQ(lp.top.front().id, 0);
+}
+
+// Computing logprobs must not perturb the stochastic draw: the token stream is
+// identical to the token-only path at every step.
+TEST(SamplerTest, StochasticLogprobsDoNotChangeToken) {
+  SamplingParams p;
+  p.max_tokens = 1 << 20;
+  p.temperature = 0.8F;
+  p.top_k = 3;
+  p.seed = 555;
+  p.logprobs = 5;
+  const Sampler sampler = MakeSampler(std::move(p));
+  const std::vector<float> logits = {1.0F, 2.0F, 0.5F, -0.5F, 1.5F, 0.0F};
+  for (int step = 0; step < 50; ++step) {
+    const std::vector<std::int32_t> gen(static_cast<std::size_t>(step), 0);
+    const SampleContext ctx{.prompt_ids = {}, .generated_ids = gen};
+    const std::int32_t token_only = *sampler.Sample(logits, ctx);
+    StatusOr<SampleResult> r = sampler.SampleWithLogprobs(logits, ctx);
+    ASSERT_TRUE(r.ok()) << r.status().ToString();
+    EXPECT_EQ(r->token, token_only) << "step " << step;
+    const StepLogprobs lp = TakeLogprobs(*r);
+    EXPECT_TRUE(std::isfinite(lp.chosen_logprob));
+  }
+}
+
+// Even with top-k active, the reported logprobs are the full-vocabulary
+// (temperature-scaled) distribution — taken before the top-k mask — so a
+// token's logprob matches the untruncated log-softmax and the set covers the
+// whole vocab.
+TEST(SamplerTest, StochasticLogprobsAreFullVocabPreTruncation) {
+  SamplingParams p;
+  p.max_tokens = 1 << 20;
+  p.temperature = 1.0F;
+  p.top_k = 2;  // draws restricted, but logprobs describe all tokens
+  p.seed = 321;
+  p.logprobs = 6;  // >= vocab, so top lists every token
+  const Sampler sampler = MakeSampler(std::move(p));
+  const std::vector<float> logits = {5.0F, 4.0F, 3.0F, 2.0F, 1.0F, 0.0F};
+  const SampleContext ctx = kNoContext;
+  StatusOr<SampleResult> r = sampler.SampleWithLogprobs(logits, ctx);
+  ASSERT_TRUE(r.ok()) << r.status().ToString();
+  const StepLogprobs lp = TakeLogprobs(*r);
+  // All six tokens are listed (none masked to -inf pre-truncation), summing to
+  // 1 in prob space.
+  EXPECT_EQ(lp.top.size(), logits.size());
+  double mass = 0.0;
+  for (const auto& t : lp.top) {
+    mass += std::exp(static_cast<double>(t.logprob));
+  }
+  EXPECT_NEAR(mass, 1.0, 1e-5);
+  // The chosen token's logprob matches the untruncated log-softmax.
+  const std::vector<double> ref = LogSoftmaxRef(logits, 1.0F);
+  EXPECT_NEAR(lp.chosen_logprob,
+              static_cast<float>(ref[static_cast<std::size_t>(r->token)]),
+              1e-5F);
 }
 
 }  // namespace

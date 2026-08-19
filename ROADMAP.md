@@ -982,7 +982,7 @@ span token boundaries), max_tokens; produce `finish_reason` (stop/length).
 **Acceptance criteria:**
 - Unit tests: stop string split across two tokens is caught and trailing text is trimmed; max_tokens exact; finish_reason correct in each case.
 
-### M7-T05 · Logprobs
+### M7-T05 · Logprobs — ✅ DONE (2026-08-19)
 Return chosen-token logprob and top-N logprobs per step (computed from the same
 logits the sampler saw, post-penalties or raw — documented, matching OpenAI
 semantics).

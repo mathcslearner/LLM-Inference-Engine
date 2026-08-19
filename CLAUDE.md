@@ -667,9 +667,30 @@ behind an existing subsystem):
   updated. +25 gtest cases (new `stop_test` 21; `generator_test` +4 e2e
   finish-reason; `sampler_test` 2 reject→accept) → 992 green (1022 ctest),
   deterministic; greedy `generate.json` goldens unchanged. format + scoped tidy
-  clean.
+  clean. T05 logprobs (2026-08-19): the final sampling stage — new
+  `src/sampling/logprobs.h` (`TokenLogprob`/`StepLogprobs`), `detail::LogSoftmax`
+  + `detail::ExtractLogprobs` (stage 6, stages.{h,cpp}), and a new
+  `Sampler::SampleWithLogprobs` returning `SampleResult{token,
+  optional<StepLogprobs>}` — the token-only `Sample` retained, both sharing one
+  private impl. **Documented "which logits" choice** (§15.2 stage 6): natural-log
+  softmax of the post-penalty/post-temperature logits *before* top-k/top-p
+  masking, so logprobs describe the full vocabulary and sum to 1 (greedy uses the
+  post-penalty row, no scaling) — OpenAI's convention, not the renormalized
+  nucleus. The RNG draw is untouched, so `SampleWithLogprobs` picks the same
+  token as `Sample`; greedy chosen logprob == max == top[0] (an acceptance
+  criterion). **`Create` drops the last `Unimplemented` guard** (the whole
+  `CheckImplementedSubset` gone) — every `SamplingParams` field is now
+  implemented. `GenerateResult` gains a `logprobs` vector (index-aligned with
+  `tokens`, empty unless requested); `TokenEvent` gains a `const StepLogprobs*`
+  (the M10 SSE seam); the loop calls `SampleWithLogprobs`. CLI `engine generate
+  --logprobs N`. design §10/§15.1/§15.2/§15.3/§15.5 updated. +~35 gtest (new
+  `sampling_logprobs_test` 14; `sampler_test` +7 incl.
+  `RejectsLogprobs`→`AcceptsLogprobs`; `generator_test` +4/−1 e2e) → 1042 ctest
+  green; greedy `generate.json` goldens on both backends unchanged; format +
+  scoped tidy clean.
 
-Next up: **M7-T05** (logprobs: return the chosen-token logprob and top-N
-logprobs per step, computed from the same post-processing logits the sampler saw
-— documented OpenAI semantics; drops the last `Unimplemented` guard, `logprobs`,
-in `CheckImplementedSubset`).
+Next up: **M7-T06** (batched sampling optimization: vectorized softmax/filtering
+reusing M3/M6 kernels, partial-sort top-k, `parallel_for` across sequences,
+per-request params + Philox states; the single-sequence `Sampler` here is the
+reference the batched path must match token-for-token given identical RNG
+counters).

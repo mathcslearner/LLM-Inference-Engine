@@ -1,6 +1,7 @@
 #include "sampling/sampler.h"
 
 #include "core/status.h"
+#include "sampling/logprobs.h"
 #include "sampling/params.h"
 #include "sampling/philox.h"
 #include "sampling/stages.h"
@@ -9,39 +10,31 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <random>
 #include <span>
 #include <utility>
 #include <vector>
 
-// M7-T03: the sampler with penalties wired into both selection branches. The
-// history-based penalties (repetition/frequency/presence) are stage 1, applied
-// to the raw logits *before* temperature (design §15.2) — and ahead of the
-// greedy argmax too, so a penalty can move the chosen token. `temperature == 0`
-// is greedy argmax (over the penalized logits); `temperature > 0` runs the full
-// stochastic pipeline (penalties -> temperature -> top-k -> top-p -> Philox
-// categorical draw). Stop conditions (T04) are the generation loop's, not the
-// sampler's, so `Create` accepts `stop_token_ids`/`stop_strings` and ignores
-// them; only the logprobs (T05) stage is still guarded off so a requested knob
-// is never silently dropped.
+// M7-T05: the sampler with logprobs (stage 6) wired into both selection
+// branches behind `SampleWithLogprobs`. `Sample` is the token-only path; both
+// share one implementation (`SampleWithLogprobsImpl`). The history-based
+// penalties (repetition/frequency/presence) are stage 1, applied to the raw
+// logits *before* temperature (design §15.2) — and ahead of the greedy argmax
+// too, so
+// a penalty can move the chosen token. `temperature == 0` is greedy argmax
+// (over the penalized logits); `temperature > 0` runs the full stochastic
+// pipeline (penalties -> temperature -> top-k -> top-p -> Philox categorical
+// draw). Logprobs, when requested, are the natural-log softmax of the
+// post-penalty/ post-temperature logits taken *before* top-k/top-p masking, so
+// they describe the full-vocabulary distribution (§15.2 stage 6). Stop
+// conditions (T04) are the generation loop's, not the sampler's, so `Create`
+// accepts `stop_token_ids`/`stop_strings` and ignores them. As of T05 every
+// field is implemented — `Create` no longer rejects any knob with
+// `Unimplemented`.
 
 namespace engine::sampling {
 namespace {
-
-// True when `params` stays within the stages implemented through M7-T04: any
-// temperature, top-k, top-p and the three penalties (all handled by `Sample`).
-// The stop conditions (`stop_token_ids`/`stop_strings`, M7-T04) are the
-// generation loop's `StopChecker`, not the sampler's — the sampler ignores
-// them here — so only logprobs (T05) remains guarded. `ValidateSamplingParams`
-// has already run, so the values are in range here.
-[[nodiscard]] core::Status CheckImplementedSubset(
-    const SamplingParams& params) {
-  if (params.logprobs != 0) {
-    return core::UnimplementedError(
-        "logprobs are not implemented until M7-T05; got {}", params.logprobs);
-  }
-  return core::OkStatus();
-}
 
 // Resolve the RNG seed: honour an explicit request seed, else draw a
 // nondeterministic one. `random_device` is mixed with a steady-clock tick so
@@ -90,12 +83,67 @@ namespace {
   return static_cast<std::int32_t>(best);
 }
 
+// The greedy branch: penalties (stage 1) then argmax. `want_logprobs` adds the
+// log-softmax of the (penalized) row. The no-penalty/no-logprobs case keeps the
+// allocation-free, bitwise-unchanged pre-T03 argmax path.
+[[nodiscard]] core::StatusOr<SampleResult> SampleGreedy(
+    std::span<const float> logits, const SampleContext& context,
+    const SamplingParams& params, bool want_logprobs) {
+  const bool penalties = PenaltiesActive(params);
+  if (!penalties && !want_logprobs) {
+    core::StatusOr<std::int32_t> token = ArgmaxRow(logits);
+    if (!token.ok()) {
+      return token.status();
+    }
+    return SampleResult{.token = *token, .logprobs = std::nullopt};
+  }
+  if (logits.empty()) {
+    return core::InvalidArgumentError("logits row must be non-empty");
+  }
+  // A penalized row needs its own buffer; otherwise argmax/log-softmax read the
+  // caller's logits directly.
+  std::vector<float> scratch;
+  std::span<const float> row = logits;
+  if (penalties) {
+    scratch.assign(logits.begin(), logits.end());
+    if (core::Status status = detail::ApplyPenalties(
+            scratch, context.prompt_ids, context.generated_ids,
+            params.repetition_penalty, params.presence_penalty,
+            params.frequency_penalty);
+        !status.ok()) {
+      return status;
+    }
+    row = scratch;
+  }
+  core::StatusOr<std::int32_t> token = ArgmaxRow(row);
+  if (!token.ok()) {
+    return token.status();
+  }
+  SampleResult result{.token = *token, .logprobs = std::nullopt};
+  if (want_logprobs) {
+    // Reject a non-finite row (NaN/+inf) before the log-sum-exp — the greedy
+    // fast path only guards NaN-as-max; logprobs demand a well-formed softmax.
+    if (core::Status status = detail::CheckFinite(row); !status.ok()) {
+      return status;
+    }
+    std::vector<double> lp;
+    detail::LogSoftmax(row, lp);
+    result.logprobs = detail::ExtractLogprobs(lp, *token, params.logprobs);
+  }
+  return result;
+}
+
 // The stochastic branch: penalties -> temperature -> top-k -> top-p -> Philox
 // draw. `step` is the decode step index (the RNG counter), `seed` the resolved
-// request seed; `context` carries the token history the penalties read.
-[[nodiscard]] core::StatusOr<std::int32_t> SampleStochastic(
+// request seed; `context` carries the token history the penalties read. When
+// `want_logprobs`, the log-softmax is captured over the post-penalty/
+// post-temperature logits *before* top-k masks them, so it covers the whole
+// vocabulary; the RNG draw is unaffected, so the chosen token matches the
+// token-only path.
+[[nodiscard]] core::StatusOr<SampleResult> SampleStochastic(
     std::span<const float> logits, const SampleContext& context,
-    const SamplingParams& params, std::uint64_t seed, std::uint64_t step) {
+    const SamplingParams& params, std::uint64_t seed, std::uint64_t step,
+    bool want_logprobs) {
   if (logits.empty()) {
     return core::InvalidArgumentError("logits row must be non-empty");
   }
@@ -114,12 +162,21 @@ namespace {
     return status;
   }
   detail::ApplyTemperature(work, params.temperature);
+  std::vector<double> lp;
+  if (want_logprobs) {
+    detail::LogSoftmax(work, lp);  // before top-k masking — full-vocab logprobs
+  }
   detail::ApplyTopK(work, params.top_k);
   std::vector<double> probs;
   detail::Softmax(work, probs);
   detail::ApplyTopP(probs, params.top_p);
   const double u = PhiloxUniformDouble(seed, step, /*draw=*/0U);
-  return detail::SelectByCdf(probs, u);
+  const std::int32_t token = detail::SelectByCdf(probs, u);
+  SampleResult result{.token = token, .logprobs = std::nullopt};
+  if (want_logprobs) {
+    result.logprobs = detail::ExtractLogprobs(lp, token, params.logprobs);
+  }
+  return result;
 }
 
 }  // namespace
@@ -128,39 +185,37 @@ core::StatusOr<Sampler> Sampler::Create(SamplingParams params) {
   if (core::Status status = ValidateSamplingParams(params); !status.ok()) {
     return status;
   }
-  if (core::Status status = CheckImplementedSubset(params); !status.ok()) {
-    return status;
-  }
   const std::uint64_t seed = ResolveSeed(params);
   return Sampler(std::move(params), seed);
 }
 
 core::StatusOr<std::int32_t> Sampler::Sample(
     std::span<const float> logits, const SampleContext& context) const {
+  core::StatusOr<SampleResult> result =
+      SampleWithLogprobsImpl(logits, context, /*want_logprobs=*/false);
+  if (!result.ok()) {
+    return result.status();
+  }
+  return result->token;
+}
+
+core::StatusOr<SampleResult> Sampler::SampleWithLogprobs(
+    std::span<const float> logits, const SampleContext& context) const {
+  return SampleWithLogprobsImpl(logits, context,
+                                /*want_logprobs=*/params_.logprobs > 0);
+}
+
+core::StatusOr<SampleResult> Sampler::SampleWithLogprobsImpl(
+    std::span<const float> logits, const SampleContext& context,
+    bool want_logprobs) const {
   if (params_.temperature == 0.0F) {
-    // Greedy: penalties (stage 1) can still move the argmax. When no penalty is
-    // active this stays the allocation-free, bitwise-unchanged pre-T03 path.
-    if (!PenaltiesActive(params_)) {
-      return ArgmaxRow(logits);
-    }
-    if (logits.empty()) {
-      return core::InvalidArgumentError("logits row must be non-empty");
-    }
-    std::vector<float> scratch(logits.begin(), logits.end());
-    if (core::Status status = detail::ApplyPenalties(
-            scratch, context.prompt_ids, context.generated_ids,
-            params_.repetition_penalty, params_.presence_penalty,
-            params_.frequency_penalty);
-        !status.ok()) {
-      return status;
-    }
-    return ArgmaxRow(scratch);
+    return SampleGreedy(logits, context, params_, want_logprobs);
   }
   // The step index the RNG keys on: the number of tokens produced so far this
   // request (0 for the first sampled token). Independent of batch composition,
   // so the draw is reproducible across runs and batch layouts.
   const auto step = static_cast<std::uint64_t>(context.generated_ids.size());
-  return SampleStochastic(logits, context, params_, seed_, step);
+  return SampleStochastic(logits, context, params_, seed_, step, want_logprobs);
 }
 
 }  // namespace engine::sampling

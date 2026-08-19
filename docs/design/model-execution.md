@@ -798,7 +798,8 @@ struct GenerateOptions {
 // One produced token and the text that became safe to emit with it. `text` is
 // "" without a tokenizer, or while bytes are held for an incomplete UTF-8
 // sequence / pending stop-string prefix; concatenated deltas == result.text.
-struct TokenEvent { std::int32_t id; std::string_view text; };
+struct TokenEvent { std::int32_t id; std::string_view text;
+                    const sampling::StepLogprobs* logprobs; };  // null unless logprobs>0 (T05)
 using TokenCallback = std::function<void(const TokenEvent&)>;  // streaming seam (M10)
 
 struct GenerateResult {
@@ -807,6 +808,7 @@ struct GenerateResult {
   StopTrigger stop_trigger = StopTrigger::kNone;   // which condition fired
   std::string matched_stop;                        // kStopString only
   std::string text;                                // detok text, trimmed before a stop string
+  std::vector<sampling::StepLogprobs> logprobs;    // per token, aligned with `tokens`; empty unless logprobs>0 (T05)
 };
 
 // Sampled continuation of `prompt_ids`. Returns the generated ids + finish info.
@@ -1078,6 +1080,13 @@ mistaken for complete): `n` (multiple completions), `min_p`, `ignore_eos`,
 `logit_bias`. Adding them is a field plus a validation clause — no interface
 break.
 
+**M10 mapping note (logprobs).** OpenAI's chat API splits this into a boolean
+`logprobs` and an integer `top_logprobs` (0–20). The M10 request mapper folds
+both onto this single `int32 logprobs`: `logprobs=false` → `0`;
+`logprobs=true, top_logprobs=N` → `max(N, 1)` (so the chosen-token logprob is
+always available). `StepLogprobs::chosen_logprob` feeds the `logprobs.content[]`
+entry; `StepLogprobs::top` feeds `top_logprobs[]`.
+
 ### 15.2 Stage order
 
 The sampler runs these stages over a single position's `[V]` fp32 logits row
@@ -1127,8 +1136,31 @@ matches vLLM / OpenAI so results are comparable:
    are factored into `src/sampling/stages.{h,cpp}` (`engine::sampling::detail`)
    for exact-mask unit testing and as the token-for-token reference the T06
    batched sampler must match given the same RNG draw.
-6. **Logprobs** (T05) — the chosen-token logprob and top-N logprobs, computed
-   from the same post-processing logits the sampler saw (documented choice).
+6. **Logprobs** (T05 — **done** 2026-08-19) — the chosen-token logprob and
+   top-N `(id, logprob)` pairs, returned by `Sampler::SampleWithLogprobs`.
+   **Which logits (the documented choice):** the natural-log softmax of the
+   post-**penalty** (stage 1), post-**temperature** (stage 2) logits, taken
+   **before** the top-k/top-p truncation filters (stages 3–4). Greedy
+   (`temperature == 0`) uses the post-penalty logits with no scaling. So the
+   reported distribution always covers the *whole vocabulary* and its
+   probabilities sum to 1 (the acceptance criterion), matching OpenAI's "the
+   logprobs describe the model's belief, the filters describe the draw"
+   convention — *not* the renormalized truncated nucleus (vLLM's
+   `processed_logprobs`), which would trivialize "sum ≈ 1 over full vocab" and
+   leave the top-N unfillable when `top_k < N`. A consequence to keep in mind:
+   with top-k/top-p active a reported token's logprob can be non-zero even
+   though the filter would never let it be sampled. Implemented as
+   `detail::LogSoftmax` (log-sum-exp in `double`, ascending order, `-inf` logit
+   → `-inf` log-prob) + `detail::ExtractLogprobs` (`partial_sort` of the
+   `min(N, #finite)` largest, descending logprob with ascending-id tie-break;
+   `-inf` entries excluded from `top`). Computing logprobs never perturbs
+   selection — the RNG draw is identical — so `Sample` and `SampleWithLogprobs`
+   pick the same token. `chosen_logprob` is always finite (selection never
+   returns a masked token). Values are `double`-computed, narrowed to `float`;
+   like the draw, they are same-machine reproducible only (`std::exp` ulps,
+   M17-T04). The per-step `StepLogprobs` (in `sampling/logprobs.h`) is carried
+   on `GenerateResult::logprobs` (index-aligned with `tokens`) and on the
+   streaming `TokenEvent::logprobs`.
 
 **Stop conditions** (T04 — **done** 2026-08-19) live in the generation loop, not
 the sampler: `src/engine/stop.{h,cpp}` (`engine → tokenizer`, the ADR-002 diagram
@@ -1170,32 +1202,46 @@ struct SampleContext {                         // per-call token history
                                                // its size is the step index
 };
 
+struct SampleResult {                          // token + optional logprobs (T05)
+  std::int32_t token;
+  std::optional<StepLogprobs> logprobs;        // nullopt when params.logprobs==0
+};
+
 class Sampler {
  public:
   static core::StatusOr<Sampler> Create(SamplingParams params);
   core::StatusOr<std::int32_t> Sample(std::span<const float> logits,
                                       const SampleContext& context) const;
+  core::StatusOr<SampleResult> SampleWithLogprobs(  // T05
+      std::span<const float> logits, const SampleContext& context) const;
   const SamplingParams& params() const;
   std::uint64_t seed() const;                  // resolved seed (T02)
 };
 ```
 
-- **`Create`** validates (`ValidateSamplingParams`) and then rejects any
-  parameter outside the *implemented* subset with **`Unimplemented`** naming the
-  field — the same "not silently ignored" posture as `Backend::kOptimized`
-  before M6. As of T04 the implemented subset is temperature / top-k / top-p /
-  penalties; **stop conditions are the loop's `StopChecker`, not the sampler's,
-  so `Create` accepts and ignores `stop_token_ids`/`stop_strings`**; only the
-  logprobs (T05) guard remains. Each later ticket removes its guard as it lands
-  the stage. When `params.seed` is `nullopt`,
-  `Create` draws a nondeterministic seed once and exposes it via `seed()` (so the
-  M10 API layer can echo the seed actually used).
+- **`Create`** validates (`ValidateSamplingParams`). Through T04 it also rejected
+  any parameter outside the *implemented* subset with **`Unimplemented`** naming
+  the field (the "not silently ignored" posture of `Backend::kOptimized` before
+  M6). **As of T05 every field is implemented, so that guard is gone** —
+  `Create` validates and returns. (Stop conditions were always the loop's
+  `StopChecker`, not the sampler's, so `Create` accepts and ignores
+  `stop_token_ids`/`stop_strings`.) When `params.seed` is `nullopt`, `Create`
+  draws a nondeterministic seed once and exposes it via `seed()` (so the M10 API
+  layer can echo the seed actually used).
 - **`Sample`** dispatches on the selection mode. `temperature == 0` → argmax with
   a strict `>` scan (lowest vocab index wins ties → deterministic; a NaN maximum
   → `Internal`; an empty row → `InvalidArgument`), the greedy logic moved verbatim
   from the M5-T09 loop's `ArgmaxLastRow`. `temperature > 0` → the stochastic
   pipeline (§15.2 stages 2–5): finiteness check, temperature, top-k, softmax,
   top-p, then a Philox inverse-CDF draw keyed on `(seed, generated_ids.size())`.
+  This is the token-only path — logprobs are never computed.
+- **`SampleWithLogprobs`** (T05) is the same selection through a shared core,
+  additionally returning the per-step logprobs (§15.2 stage 6) when
+  `params.logprobs > 0` (else `SampleResult::logprobs` is `nullopt`). The chosen
+  token is identical to `Sample`'s — the logprob computation is a side output
+  that does not touch the RNG draw. The engine loop uses this entry; the
+  token-only `Sample` is retained for the many call sites (and the T06 batched
+  reference) that need only the id.
 - **`const` / no mutable RNG state**: the Philox counter is *derived* from the
   step index, so the draw is a pure function of `(seed, step)` and `Sample` needs
   no advancing stream member. This is exactly what makes a draw reproducible per
@@ -1235,7 +1281,13 @@ regression the M5/M6 `generate.json` goldens (both backends) assert unchanged.
   generation loop; `Generate` returns `GenerateResult` (finish reason + text),
   the callback takes a `TokenEvent`; the sampler's two stop guards dropped. See
   §15.2 stop paragraph and §10.
-- **T05** logprobs from the sampler's post-processing logits.
+- **T05** logprobs — **done** 2026-08-19: `sampling/logprobs.h`
+  (`TokenLogprob`/`StepLogprobs`), `detail::LogSoftmax`/`ExtractLogprobs`
+  (stage 6), and `Sampler::SampleWithLogprobs`; the loop stores
+  `GenerateResult::logprobs` and carries `TokenEvent::logprobs`. Full-vocab
+  natural-log softmax of the post-penalty/post-temperature logits before top-k/
+  top-p (§15.2 stage 6). The last `Unimplemented` guard is removed — every
+  `SamplingParams` field is implemented.
 - **T06** batched sampler (vectorized softmax/filter reusing M3/M6 kernels,
   partial-sort top-k, `parallel_for` across sequences, per-request Philox) —
   **must pick identical tokens to this reference sampler given identical RNG

@@ -4,6 +4,7 @@
 #include "engine/stop.h"
 #include "kvcache/kv_cache.h"
 #include "model/model.h"
+#include "sampling/logprobs.h"
 #include "sampling/params.h"
 #include "tokenizer/tokenizer.h"
 
@@ -63,6 +64,11 @@ struct GenerateOptions {
 struct TokenEvent {
   std::int32_t id;
   std::string_view text;
+  // The per-step logprobs for this token when `sampling.logprobs > 0`, else
+  // null (the M10 SSE per-chunk `logprobs` seam). Points into the
+  // `GenerateResult::logprobs` entry for this token; valid for the duration of
+  // the callback.
+  const sampling::StepLogprobs* logprobs = nullptr;
 };
 
 // Invoked with each produced token as it is produced, in order — exactly once
@@ -86,6 +92,9 @@ struct GenerateResult {
   // The detokenized generated text, trimmed before a stop-string match. Empty
   // when no tokenizer was supplied.
   std::string text;
+  // Per-step logprobs, index-aligned with `tokens`, when `sampling.logprobs >
+  // 0`; empty otherwise. `logprobs[i]` describes `tokens[i]` (§15.2 stage 6).
+  std::vector<sampling::StepLogprobs> logprobs;
 };
 
 // Sampled continuation of `prompt_ids`, appending this run's K/V into `cache`

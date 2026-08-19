@@ -1921,3 +1921,78 @@ front-loaded `InvalidArgument`); `sampler_test` (2 reject→accept:
 `AcceptsStopTokenIds`/`AcceptsStopStrings`). The greedy `generate.json` goldens
 across `generator_test`/`qwen2_family_test`/`optimized_model_test` pass unchanged
 (the regression guarantee). Full ctest green; format + scoped tidy clean.
+
+### M7-T05 — Logprobs (2026-08-19)
+
+Added the last sampling stage: per-step logprobs, the OpenAI-style chosen-token
+logprob and top-N `(id, logprob)` alternatives, returned by a new
+`Sampler::SampleWithLogprobs` and carried on `GenerateResult`/`TokenEvent`. This
+drops the final `Unimplemented` guard — every `SamplingParams` field is now
+implemented.
+
+**Documented "which logits" choice (design §15.2 stage 6):** logprobs are the
+natural-log softmax of the logits the sampler saw *after* penalties (stage 1)
+and temperature (stage 2) but *before* the top-k/top-p truncation filters — the
+model's full-vocabulary (temperature-scaled) belief, not the renormalized
+truncated nucleus. So the reported distribution always covers the whole vocab
+and sums to 1 in prob space (the acceptance criterion); greedy
+(`temperature == 0`) uses the post-penalty logits with no scaling. Consequence:
+with top-k/top-p active a reported token's logprob can be non-zero even though
+the filter would never let it be sampled — matching OpenAI's "logprobs describe
+the model, the filters describe the draw" convention, and vLLM's `raw`-style
+(not `processed`) logprobs.
+
+- **`src/sampling/logprobs.h`** — new, header-only. `TokenLogprob{id, logprob}`
+  and `StepLogprobs{chosen_logprob, top}`. `top` is descending logprob, ascending-id
+  tie-break, holding `min(params.logprobs, #finite)` entries (`-inf`-logit tokens
+  excluded); `chosen_logprob` is always finite.
+- **`src/sampling/stages.{h,cpp}`** — stage 6. `LogSoftmax` (log-sum-exp in
+  `double`, ascending index order, `-inf` logit → `-inf` log-prob, `sum exp == 1`).
+  `ExtractLogprobs(lp, chosen, top_n)` (`std::partial_sort` of the `min(top_n,
+  #finite)` largest — `top_n ≤ kMaxLogprobs`; excludes masked entries).
+- **`src/sampling/sampler.{h,cpp}`** — new `SampleResult{token,
+  optional<StepLogprobs>}` and `SampleWithLogprobs`; `Sample` retained as the
+  token-only path (used by the many call sites and the T06 batched reference),
+  both routed through one private `SampleWithLogprobsImpl(…, want_logprobs)`.
+  Greedy captures the log-softmax over the (penalized) row after argmax; the
+  stochastic branch captures it over the post-penalty/post-temperature `work`
+  buffer *before* `ApplyTopK` masks it. The RNG draw is untouched, so
+  `SampleWithLogprobs` picks the same token as `Sample` (tested). **`Create` no
+  longer calls `CheckImplementedSubset`** — the guard is gone. The default
+  (`logprobs == 0`) greedy no-penalty path stays the allocation-free
+  bitwise-unchanged `ArgmaxRow`.
+- **`src/engine/generator.{h,cpp}`** — `GenerateResult` gains
+  `std::vector<sampling::StepLogprobs> logprobs` (index-aligned with `tokens`,
+  empty unless requested); `TokenEvent` gains
+  `const sampling::StepLogprobs* logprobs` (the M10 SSE per-chunk seam; null
+  unless requested). The loop calls `SampleWithLogprobs`, stores the entry, and
+  points the event at it. Reserves the logprobs vector only when requested.
+- **`src/main.cpp`** — `engine generate --logprobs N` prints, per step, the
+  chosen token's logprob and the top-N alternatives (single-id decode for
+  readability, best-effort).
+
+Non-obvious decisions: (1) **Two public entry points**, not a changed `Sample`
+return type — keeps the ~22 `Sample` call sites (and the doc's `Sample`
+signature) intact while giving logprobs a clean home; both share one impl. (2)
+**Full-vocab pre-truncation logprobs** — the alternative (renormalized nucleus)
+trivializes "sum ≈ 1 over full vocab" and can't fill top-N when `top_k < N`. (3)
+**Greedy chosen logprob == max** falls out for free: greedy token == argmax, so
+`chosen_logprob == top[0].logprob == max(log-softmax)` — the third acceptance
+criterion. (4) `sampling` still can't link the kernels exp polynomial (ADR-002),
+so logprobs (like the draw) are same-machine reproducible only until M17-T04.
+
+Tests (+~35 cases): new **`sampling_logprobs_test`** (14) — `LogSoftmax` exact
+(uniform row, double reference, known ln-ratio probabilities, large-offset
+stability, `-inf` handling, `sum exp == 1` over a 512-vocab row) and
+`ExtractLogprobs` (chosen entry, top-N vs a full-sort reference for N∈{1,5,20},
+ascending-id tie-break, masked-token exclusion, vocab clamp, N=0). **`sampler_test`**
+(+~7) — `AcceptsLogprobs` (was `RejectsLogprobs`); logprobs-off → `nullopt`;
+greedy chosen == max; greedy logprobs use the penalized row; stochastic tokens
+unchanged vs the token-only path; stochastic full-vocab pre-truncation logprobs
+sum to 1. **`generator_test`** (+4, −1) — dropped
+`NotYetImplementedSamplingIsRejectedBeforeGenerating` (no unimplemented knob
+remains); added greedy e2e (logprobs aligned with tokens, top-1 == chosen,
+golden tokens unchanged), `TokenEvent.logprobs` matches the stored entry,
+logprobs-off leaves the result empty and the event pointer null, stochastic
+tokens unchanged with logprobs on. 1042 ctest green; greedy `generate.json`
+goldens on both backends unchanged; format + scoped tidy clean.

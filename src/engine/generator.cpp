@@ -78,24 +78,36 @@ core::StatusOr<GenerateResult> Generate(
         cache.capacity(), prompt_len, max_tokens, start, peak);
   }
 
+  const bool want_logprobs = sampler->params().logprobs > 0;
+
   GenerateResult result;
   result.tokens.reserve(static_cast<std::size_t>(max_tokens));
+  if (want_logprobs) {
+    result.logprobs.reserve(static_cast<std::size_t>(max_tokens));
+  }
 
   // Sample the next token from `logits`, append it to the result, run the stop
   // checker, fold in any end-of-stream residue, fire the callback, and report
   // whether generation should stop. Shared by prefill and each decode step.
   bool finished = false;
   const auto consume = [&](std::span<const float> logits) -> core::Status {
-    auto next = sampler->Sample(
+    auto next = sampler->SampleWithLogprobs(
         logits, sampling::SampleContext{.prompt_ids = prompt_ids,
                                         .generated_ids = result.tokens});
     if (!next.ok()) {
       return next.status();
     }
-    result.tokens.push_back(*next);
+    result.tokens.push_back(next->token);
+    // Logprobs (when requested) are index-aligned with `tokens`. Capture a
+    // pointer to the stored entry for the callback (valid for this iteration).
+    const sampling::StepLogprobs* logprobs = nullptr;
+    if (next->logprobs.has_value()) {
+      result.logprobs.push_back(std::move(*next->logprobs));
+      logprobs = &result.logprobs.back();
+    }
 
     auto step = checker->Observe(
-        *next, static_cast<std::int64_t>(result.tokens.size()));
+        next->token, static_cast<std::int64_t>(result.tokens.size()));
     if (!step.ok()) {
       return step.status();
     }
@@ -109,7 +121,8 @@ core::StatusOr<GenerateResult> Generate(
     }
     result.text += delta;
     if (on_token) {
-      on_token(TokenEvent{.id = *next, .text = delta});
+      on_token(
+          TokenEvent{.id = next->token, .text = delta, .logprobs = logprobs});
     }
     return core::OkStatus();
   };

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/status.h"
+#include "sampling/logprobs.h"
 
 #include <cstdint>
 #include <span>
@@ -17,8 +18,11 @@
 //   CheckFinite -> ApplyPenalties -> ApplyTemperature -> ApplyTopK -> Softmax
 //   -> ApplyTopP -> SelectByCdf
 //
-// (logprobs are stage 6, added in T05.) `ApplyPenalties` (stage 1, T03) runs
-// ahead of the greedy branch too, so a penalty can change the argmax.
+// Stage 6 (logprobs, T05) is `LogSoftmax` + `ExtractLogprobs`, run over the
+// post-penalty/post-temperature logits *before* `ApplyTopK` masks them (§15.2:
+// logprobs describe the full-vocabulary distribution, not the truncated
+// nucleus). `ApplyPenalties` (stage 1, T03) runs ahead of the greedy branch
+// too, so a penalty can change the argmax.
 //
 // Numeric contract (documented so the T06 optimized path can match token-for-
 // token given the same RNG draw): softmax is max-subtracted with the
@@ -94,5 +98,27 @@ void ApplyTopP(std::vector<double>& probs, float top_p);
 // of the mass). Precondition: `probs` has at least one positive entry.
 [[nodiscard]] std::int32_t SelectByCdf(const std::vector<double>& probs,
                                        double u);
+
+// Stage 6a (T05): natural-log softmax of `logits` into `lp` (resized to match):
+// `lp[v] = (logits[v] - max) - log(Σ_u exp(logits[u] - max))`, the log-sum-exp
+// accumulated in `double` in ascending index order. A `-inf` logit maps to
+// exactly `-inf` (log-prob 0); `max` is finite by precondition (`CheckFinite`),
+// so `exp(logits[v] - max)` is well defined. Fed the same post-penalty/
+// post-temperature logits the draw uses, but taken before top-k/top-p masking
+// so the reported distribution covers the whole vocabulary and `Σ_v exp(lp[v])`
+// is `1` (the acceptance criterion). `std::exp`/`std::log` are used directly —
+// `sampling` cannot link the kernels exp polynomial (ADR-002).
+void LogSoftmax(std::span<const float> logits, std::vector<double>& lp);
+
+// Stage 6b (T05): assemble a `StepLogprobs` from precomputed log-probs `lp`
+// (from `LogSoftmax`), the chosen token id, and the requested count `top_n`.
+// `chosen_logprob = lp[chosen]`; `top` holds the `min(top_n, #finite)` largest
+// log-probs ordered by descending value with ascending-id tie-break (a partial
+// sort — `top_n <= kMaxLogprobs`). `-inf` (masked) entries are excluded from
+// `top`. Precondition: `chosen` is in range and finite (selection guarantees
+// it), `top_n >= 0`.
+[[nodiscard]] StepLogprobs ExtractLogprobs(const std::vector<double>& lp,
+                                           std::int32_t chosen,
+                                           std::int32_t top_n);
 
 }  // namespace engine::sampling::detail

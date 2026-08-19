@@ -140,8 +140,9 @@ engine_add_tests(TREE unit SOURCES
 
 # sampling (M7; design: docs/design/model-execution.md §15). SamplingParams
 # validation, the header-only Philox RNG and stochastic-sampling stages (T02),
-# and the single-sequence reference Sampler (greedy in T01, temperature/top-k/
-# top-p in T02, penalties in T03). Ordinary portable C++ — depends only on engine::sampling
+# the penalties (T03), the logprobs stages (T05), and the single-sequence
+# reference Sampler (greedy in T01, temperature/top-k/top-p in T02, penalties in
+# T03, logprobs in T05). Ordinary portable C++ — depends only on engine::sampling
 # (→ engine::core), no ISA concern, no SCALAR_PASS. `ctest -L sampling` selects
 # the suite alone.
 engine_add_tests(TREE unit SOURCES
@@ -149,6 +150,7 @@ engine_add_tests(TREE unit SOURCES
   philox_test.cpp
   sampling_stages_test.cpp
   sampling_penalties_test.cpp
+  sampling_logprobs_test.cpp
   sampler_test.cpp
   DEPS engine::sampling
   LABELS sampling)

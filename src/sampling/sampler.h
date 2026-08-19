@@ -1,9 +1,11 @@
 #pragma once
 
 #include "core/status.h"
+#include "sampling/logprobs.h"
 #include "sampling/params.h"
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <utility>
 
@@ -15,17 +17,26 @@
 // sampler (T06) must match it token-for-token given identical RNG counters.
 //
 // M7-T02 added the stochastic branch (temperature scaling, top-k/top-p
-// filtering, a counter-based Philox draw keyed on `(seed, step)`); M7-T03 adds
+// filtering, a counter-based Philox draw keyed on `(seed, step)`); M7-T03 added
 // stage 1, the history-based repetition/frequency/presence penalties, applied
-// before temperature and ahead of the greedy argmax alike. Stop conditions
-// (`stop_token_ids`/`stop_strings`, M7-T04) are the generation loop's
-// `StopChecker`, not the sampler's — `Create` accepts and ignores them. Any
-// parameter whose stage is still not implemented (logprobs, M7-T05) is rejected
-// up front by `Sampler::Create` with `Unimplemented`, so no requested knob is
-// ever silently ignored — each later ticket removes its guard as it lands the
-// stage.
+// before temperature and ahead of the greedy argmax alike; M7-T05 adds stage 6,
+// logprobs (`SampleWithLogprobs`). Stop conditions (`stop_token_ids`/
+// `stop_strings`, M7-T04) are the generation loop's `StopChecker`, not the
+// sampler's — `Create` accepts and ignores them. As of T05 every
+// `SamplingParams` field is implemented, so `Create` no longer rejects any
+// knob with `Unimplemented`: it validates and returns.
 
 namespace engine::sampling {
+
+// The result of a sampling step: the chosen token id, plus (when the request
+// asked for logprobs) the per-step logprob information. `logprobs` is
+// `std::nullopt` when `params.logprobs == 0` — the token-only path pays nothing
+// for the feature. `Sample` returns just the id; `SampleWithLogprobs` returns
+// this struct.
+struct SampleResult {
+  std::int32_t token = 0;
+  std::optional<StepLogprobs> logprobs;
+};
 
 // Per-call context for `Sample`: the request's token history, which the
 // penalty stage (T03) reads and whose length is the step index the seeded RNG
@@ -49,11 +60,9 @@ struct SampleContext {
 class Sampler {
  public:
   // Build a sampler from `params`. Returns `InvalidArgument` if the params fail
-  // `ValidateSamplingParams`, or `Unimplemented` (naming the field) for a
-  // parameter whose stage is not yet implemented (logprobs, M7-T05).
-  // On success the returned sampler's `Sample` is guaranteed to be within the
-  // implemented subset. When `params.seed` is `nullopt` a nondeterministic seed
-  // is drawn once here and exposed via `seed()`.
+  // `ValidateSamplingParams`. As of M7-T05 every field is implemented, so
+  // `Create` no longer returns `Unimplemented`. When `params.seed` is `nullopt`
+  // a nondeterministic seed is drawn once here and exposed via `seed()`.
   [[nodiscard]] static core::StatusOr<Sampler> Create(SamplingParams params);
 
   // Select the next token id from one position's `[V]` fp32 logits row.
@@ -65,8 +74,20 @@ class Sampler {
   // index (`context.generated_ids.size()`). Non-finite logits (a `NaN`/`+inf`,
   // i.e. an upstream numerics bug) surface as `Internal` rather than a bogus
   // token; an empty `logits` row is `InvalidArgument`. `const`: the draw
-  // carries no mutable state.
+  // carries no mutable state. This is the token-only path — logprobs are never
+  // computed regardless of `params().logprobs`; use `SampleWithLogprobs` for
+  // those.
   [[nodiscard]] core::StatusOr<std::int32_t> Sample(
+      std::span<const float> logits, const SampleContext& context) const;
+
+  // Like `Sample`, but the returned `SampleResult` also carries the per-step
+  // logprobs when `params().logprobs > 0` (else `SampleResult::logprobs` is
+  // `std::nullopt`). The chosen token is identical to what `Sample` returns for
+  // the same `(logits, context)` — computing logprobs never perturbs selection
+  // (the RNG draw is unchanged). Logprobs are the natural-log softmax of the
+  // post-penalty/post-temperature logits, taken before top-k/top-p masking
+  // (§15.2 stage 6, docs on `StepLogprobs`). Same error posture as `Sample`.
+  [[nodiscard]] core::StatusOr<SampleResult> SampleWithLogprobs(
       std::span<const float> logits, const SampleContext& context) const;
 
   // The params this sampler was built from (the engine reads `max_tokens`,
@@ -81,6 +102,13 @@ class Sampler {
  private:
   Sampler(SamplingParams params, std::uint64_t seed)
       : params_(std::move(params)), seed_(seed) {}
+
+  // The shared core behind `Sample` (`want_logprobs == false`) and
+  // `SampleWithLogprobs` (`want_logprobs == params().logprobs > 0`): dispatch
+  // on the selection mode and, when asked, attach the per-step logprobs.
+  [[nodiscard]] core::StatusOr<SampleResult> SampleWithLogprobsImpl(
+      std::span<const float> logits, const SampleContext& context,
+      bool want_logprobs) const;
 
   SamplingParams params_;
   std::uint64_t seed_;

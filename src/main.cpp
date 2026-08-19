@@ -6,6 +6,7 @@
 #include "model/loader.h"
 #include "model/model.h"
 #include "model/registry.h"
+#include "sampling/logprobs.h"
 #include "sampling/params.h"
 #include "tensor/dtype.h"
 #include "tokenizer/tokenizer.h"
@@ -64,6 +65,7 @@ struct Args {
   std::optional<std::uint64_t> seed;
   std::vector<std::string> stop_strings;
   std::vector<std::int32_t> stop_token_ids;
+  std::int32_t logprobs = 0;
 };
 
 [[nodiscard]] Status ParseArgs(std::span<const std::string> argv, Args& out) {
@@ -130,6 +132,10 @@ struct Args {
       std::string n;
       RETURN_IF_ERROR(next(n));
       out.stop_token_ids.push_back(static_cast<std::int32_t>(std::stol(n)));
+    } else if (a == "--logprobs") {
+      std::string n;
+      RETURN_IF_ERROR(next(n));
+      out.logprobs = static_cast<std::int32_t>(std::stol(n));
     } else {
       return engine::core::InvalidArgumentError("unknown flag '{}'", a);
     }
@@ -175,6 +181,7 @@ struct Args {
   sampling.seed = args.seed;
   sampling.stop_strings = args.stop_strings;
   sampling.stop_token_ids = args.stop_token_ids;
+  sampling.logprobs = args.logprobs;
   const GenerateOptions options{.sampling = sampling,
                                 .eos_ids = model->config().eos_token_ids,
                                 .tokenizer = &tokenizer,
@@ -233,6 +240,27 @@ struct Args {
     fmt::print("decode:  {:.1f} ms ({:.1f} tok/s)\n", decode_ms,
                decode_steps / (decode_ms / 1000.0));
   }
+
+  // Per-step logprobs (M7-T05), when requested: the chosen token's logprob and
+  // the top-N alternatives, decoded for readability (single-id decode is
+  // best-effort — a byte-level BPE fragment may render as U+FFFD).
+  if (args.logprobs > 0 && !result.logprobs.empty()) {
+    const auto render = [&](std::int32_t id) -> std::string {
+      auto text = tokenizer.decode(std::span<const std::int32_t>(&id, 1),
+                                   /*skip_special_tokens=*/false);
+      return text.ok() ? *text : std::string{};
+    };
+    fmt::print("----\nlogprobs (top {}):\n", args.logprobs);
+    for (std::size_t i = 0; i < result.logprobs.size(); ++i) {
+      const engine::sampling::StepLogprobs& lp = result.logprobs[i];
+      fmt::print("  [{}] id={} {:.4f} '{}'\n", i, generated[i],
+                 lp.chosen_logprob, render(generated[i]));
+      for (const engine::sampling::TokenLogprob& t : lp.top) {
+        fmt::print("        id={:<6} {:.4f} '{}'\n", t.id, t.logprob,
+                   render(t.id));
+      }
+    }
+  }
   return engine::core::OkStatus();
 }
 
@@ -255,7 +283,7 @@ int main(int argc, char** argv) {
                  "[--cache-capacity N] [--no-bos] [--temperature T] "
                  "[--top-k K] [--top-p P] [--repetition-penalty R] "
                  "[--presence-penalty P] [--frequency-penalty F] [--seed S] "
-                 "[--stop STR]... [--stop-token-id N]...\n");
+                 "[--stop STR]... [--stop-token-id N]... [--logprobs N]\n");
       return 2;
     }
     const Status status = RunGenerate(args);

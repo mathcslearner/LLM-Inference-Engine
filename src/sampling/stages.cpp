@@ -1,6 +1,7 @@
 #include "sampling/stages.h"
 
 #include "core/status.h"
+#include "sampling/logprobs.h"
 
 #include <algorithm>
 #include <cmath>
@@ -201,6 +202,70 @@ std::int32_t SelectByCdf(const std::vector<double>& probs, double u) {
   }
   // `u` rounded to the very top of the mass; fall back to the last kept token.
   return last_positive;
+}
+
+void LogSoftmax(std::span<const float> logits, std::vector<double>& lp) {
+  lp.assign(logits.size(), -std::numeric_limits<double>::infinity());
+  float max_logit = -std::numeric_limits<float>::infinity();
+  for (const float x : logits) {
+    max_logit = std::max(max_logit, x);
+  }
+  // `max_logit` is finite (precondition), so `x - max_logit` is `-inf` only for
+  // masked (`-inf`) logits, and `exp(-inf) == 0` exactly — the log-sum-exp is
+  // taken over the finite tokens.
+  double sum = 0.0;
+  for (const float x : logits) {
+    sum += std::exp(static_cast<double>(x) - static_cast<double>(max_logit));
+  }
+  const double log_z = std::log(sum);
+  for (std::size_t v = 0; v < logits.size(); ++v) {
+    // A `-inf` logit stays `-inf` (its shifted value is `-inf`); every finite
+    // logit gets `(x - max) - log_z`.
+    if (std::isfinite(logits[v])) {
+      lp[v] =
+          (static_cast<double>(logits[v]) - static_cast<double>(max_logit)) -
+          log_z;
+    }
+  }
+}
+
+StepLogprobs ExtractLogprobs(const std::vector<double>& lp, std::int32_t chosen,
+                             std::int32_t top_n) {
+  StepLogprobs out;
+  out.chosen_logprob = static_cast<float>(lp[static_cast<std::size_t>(chosen)]);
+
+  const auto want = static_cast<std::size_t>(std::max(top_n, 0));
+  const std::size_t n = std::min(want, lp.size());
+  if (n == 0) {
+    return out;
+  }
+  // Partial-sort the `n` largest log-probs (descending, ascending-id tie-break)
+  // without a full sort of the vocabulary. `-inf` entries sort last, so the
+  // prefix is filled with finite tokens first.
+  std::vector<std::int32_t> order(lp.size());
+  std::iota(order.begin(), order.end(), 0);
+  const auto by_logprob = [&lp](std::int32_t a, std::int32_t b) {
+    const double la = lp[static_cast<std::size_t>(a)];
+    const double lb = lp[static_cast<std::size_t>(b)];
+    if (la != lb) {
+      return la > lb;
+    }
+    return a < b;
+  };
+  std::partial_sort(order.begin(),
+                    order.begin() + static_cast<std::ptrdiff_t>(n), order.end(),
+                    by_logprob);
+  out.top.reserve(n);
+  for (std::size_t rank = 0; rank < n; ++rank) {
+    const std::int32_t id = order[rank];
+    const double value = lp[static_cast<std::size_t>(id)];
+    if (!std::isfinite(value)) {
+      break;  // remaining entries are masked (`-inf`); exclude them
+    }
+    out.top.push_back(
+        TokenLogprob{.id = id, .logprob = static_cast<float>(value)});
+  }
+  return out;
 }
 
 }  // namespace engine::sampling::detail
