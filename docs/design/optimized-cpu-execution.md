@@ -482,6 +482,16 @@ alternative — pre-sizing from a `BuildOptions::max_forward_tokens` bound — i
 real config input; M6 has no scheduler to supply it, so grow-on-demand is both
 simpler and sufficient.
 
+**Discharged (M9-T05):** the M9 batch assembler (`engine/batch.{h,cpp}`,
+scheduler-runtime.md §8.2) reuses this exact grow-on-demand-with-high-water
+discipline for its staging buffers (the flattened `token_ids`/`positions`/
+`cu_seqlens`, the per-sequence `caches`/`sample_rows`, and the `[B, max_blocks]`
+block-table tensor) — the staging *is* sized by the batch-token budget, so the
+deferred "pre-size from `--max-num-batched-tokens`" note is realized as a
+monotone high-water mark rather than an up-front `BuildOptions` bound. A
+`BatchAssembler::staging_bytes()` accessor is the allocation-free-after-warm-up
+test hook, mirroring `Workspace::bytes()`.
+
 **Logits are freshly allocated and caller-owned**, identical to the reference
 (model-execution.md §5.2 deliberately left the optimized path's logits lifetime
 to M6-T01). `forward` returns a fresh `[1, V]` (kLast) / `[T, V]` (kAll) tensor

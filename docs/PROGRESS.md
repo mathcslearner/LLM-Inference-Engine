@@ -2981,3 +2981,78 @@ CMake: `engine_scheduler` gains `scheduler.cpp` and links `engine::core` (CHECK)
 `SchedulerOutput` in `ScheduleStep`). No new ADR edge (`runtime → scheduler` is
 on the diagram). design scheduler-runtime.md §6.6 "as built" added. Format +
 scoped tidy clean.
+
+### M9-T05 — Batch assembly (2026-08-19)
+
+**What landed.** `src/engine/batch.{h,cpp}` — `BatchAssembler` + `BatchInputs`
+(`engine::engine`), the component that flattens the per-step scheduled work into
+the staged inputs a batched forward (M9-T06/T07) will consume: concatenated
+`token_ids`, per-token absolute `positions`, the `[B+1]` `cu_seqlens` prefix
+sums, the per-sequence `caches`, the per-request `sample_rows`
+(`sampling::BatchRow`), and — for a decode step — the `[B, max_blocks]` int32
+block-table tensor and `[B]` `seq_lens`. Assembled in one pass into staging that
+grows to a high-water mark, so a steady-state step allocates nothing. Also the
+additive `ForwardRequest` fields (design §8.1) with both backends guarded.
+
+**Non-obvious decisions.**
+- **Input is a plain `BatchSeqInput` descriptor, not `SchedulerOutput` +
+  `Sequence`.** ADR-002 keeps `engine` free of `runtime`/`scheduler` types (the
+  scheduler is a `core`-only leaf; `Sequence` lives *above* `engine`). So the
+  runtime fills a `BatchSeqInput{token_ids, cache, sampler, context}` per
+  scheduled sequence and the assembler stays in `engine` beside `Generate` — the
+  design's §8.2 shorthand `AssembleBatch(SchedulerOutput, sequences)` realized as
+  this descriptor-struct input. No new ADR edge; `engine`'s `tensor` link moved
+  PRIVATE→PUBLIC and `engine::memory` was added (both already-below-it layer-1
+  modules) because `batch.h` names `tensor::Tensor`/`memory::Allocator` in its
+  public surface.
+- **Two entry points** (`AssemblePrefill`/`AssembleDecode`), mirroring the §7
+  two-passes decision. A shared private `Flatten` fills the common fields;
+  decode adds `seq_lens` + `block_table`. **Positions are `cache->length() + t`
+  uniformly** (a fresh prefill cache ⇒ `[0, T)`; a decode cache of length `L` ⇒
+  `L`), so the runtime never supplies a start position and prefill/decode share
+  one rule.
+- **No batch-level slot mapping** (the roadmap's "slot mappings" line): design
+  §8.3 keeps K/V append per sequence through `PagedKvCache::append`, which owns
+  its own slot computation and the exhaustion seam — a batch-wide mapping would
+  entangle that boundary and gain nothing. Recorded as an as-built note.
+- **`block_table` via the abstract `paged_view(0)`** (all layers share one
+  table): row `b` = its block ids `−1`-padded to `max_blocks = max_b
+  num_blocks_b`; the `[B, max_blocks]` tensor is a zero-copy `slice`→`reshape`
+  view over a persistent 1-D int32 storage grown on demand. A non-paged cache
+  (`SimpleKvCache`) propagates `paged_view`'s `Unimplemented` (the batched
+  runtime uses paged caches).
+- **Allocation-free after warm-up:** the staging vectors keep capacity across
+  steps and the block-table storage only grows; `staging_bytes()` is the
+  stability metric (mirrors `BatchedSampler::scratch_bytes()`/`Workspace::bytes()`
+  — and discharges optimized-cpu-execution.md §6.3's deferred "pre-size staging
+  from `--max-num-batched-tokens`" note: the staging *is* sized by the batch
+  budget, as a high-water mark rather than an up-front bound).
+- **Additive `ForwardRequest` fields landed here** (§8.1): `cu_seqlens` +
+  `caches`, empty ⇒ the single-sequence path. Given `-Wmissing-designated-field-
+  initializers` (from `-Wextra`, warnings-as-errors), the two new members carry
+  `{}` default initializers so existing single-sequence designated-init call
+  sites (~24, untouched) stay warning-clean; clang-tidy reads that `{}` as
+  redundant on a span, so an in-header `NOLINT(readability-redundant-member-init)`
+  resolves the two-tool conflict (documented, like the dispatch.cpp asm NOLINT).
+  Both backends (`ReferenceModel`/`OptimizedModel`) reject a non-empty batch with
+  `Unimplemented` until M9-T06/T07 — never silently ignored.
+  `BatchInputs::MakeForwardRequest` builds the batched request over the staging.
+
+**Tests.** `batch_test.cpp` (13, `engine` label, no `SCALAR_PASS` — pure
+orchestration over real caches): two prefills of lengths 3/5 (every element of
+token_ids/positions/cu_seqlens/caches/sample_rows `EXPECT_EQ`, no block table);
+resume-style prefill (positions still from 0); three decodes of lengths 5/17/24
+over a primed pool → hand-verified block table `{0,-1,-1 / 1,2,3 / 4,5,6}`,
+seq_lens `{5,17,24}`, positions `{5,17,24}`; a single exact-block-multiple decode
+(no padding); prefill-then-decode reuse (full overwrite, no stale tail); the
+empty pass; validation (null cache/sampler, empty tokens, multi-token decode,
+`Unimplemented` from a `SimpleKvCache`'s `paged_view`); `MakeForwardRequest`
+field wiring; and allocation-free staging after warm-up (a `CountingAllocator` +
+`staging_bytes()` stable over 50 steps). `model_test.cpp`/`optimized_model_test.cpp`
+(+1/+1×SCALAR_PASS): `ForwardRejectsBatchedRequest` — a non-empty
+`cu_seqlens`/`caches` → `Unimplemented`, cache untouched. 1279 → **1295 green**.
+
+CMake: `engine_engine` gains `batch.cpp`; `engine::tensor` PRIVATE→PUBLIC and
+`engine::memory` added (no ADR amendment). design scheduler-runtime.md §8.2 "as
+built" + optimized-cpu-execution.md §6.3 discharge note added. Format + scoped
+tidy clean (model.h header edit → full includer set swept).

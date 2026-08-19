@@ -40,6 +40,7 @@ namespace {
 namespace ops = engine::tensor::ops;
 using engine::core::IsInvalidArgument;
 using engine::core::IsResourceExhausted;
+using engine::core::IsUnimplemented;
 using engine::core::StatusOr;
 using engine::kvcache::BlockPool;
 using engine::kvcache::CacheGeometry;
@@ -763,6 +764,35 @@ TEST(ReferenceModelTest, ForwardRejectsMalformedInputs) {
         model->forward({.token_ids = ids, .positions = pos, .cache = &cache})
             .status()));
   }
+}
+
+// The ragged/batched forward (cu_seqlens + per-sequence caches) is rejected
+// with Unimplemented until M9-T06/T07 — never silently ignored (M9-T05;
+// scheduler-runtime.md §8.1).
+TEST(ReferenceModelTest, ForwardRejectsBatchedRequest) {
+  const std::unique_ptr<ReferenceModel> model = BuildTiny();
+  const std::vector<std::int32_t> ids = PromptIds();
+  const std::vector<std::int32_t> pos =
+      Iota(static_cast<std::int64_t>(ids.size()));
+  const std::vector<std::int32_t> cu = {0,
+                                        static_cast<std::int32_t>(ids.size())};
+
+  SimpleKvCache cache = Unwrap(SimpleKvCache::Create(ModelGeometry(), kMaxPos));
+  // Non-empty cu_seqlens → Unimplemented.
+  EXPECT_TRUE(IsUnimplemented(model
+                                  ->forward({.token_ids = ids,
+                                             .positions = pos,
+                                             .cache = &cache,
+                                             .cu_seqlens = cu})
+                                  .status()));
+  // Non-empty caches → Unimplemented.
+  std::vector<engine::kvcache::KvCache*> caches = {&cache};
+  EXPECT_TRUE(IsUnimplemented(model
+                                  ->forward({.token_ids = ids,
+                                             .positions = pos,
+                                             .cache = &cache,
+                                             .caches = caches})
+                                  .status()));
 }
 
 TEST(ReferenceModelTest, ForwardRejectsOverCapacityCacheUnchanged) {

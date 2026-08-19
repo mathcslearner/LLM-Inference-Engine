@@ -295,6 +295,21 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::scheduler engine::kvcache engine::tensor
   LABELS scheduler)
 
+# batch_test (M9-T05): the batch assembler (engine/batch.{h,cpp}) — hand-verified
+# assembled metadata (token_ids/positions/cu_seqlens/caches/sample_rows) for
+# prefill and decode, the [B, max_blocks] −1-padded block-table tensor and
+# seq_lens over real PagedKvCaches, the empty pass, front-loaded validation
+# (null cache/sampler, empty tokens, multi-token decode, Unimplemented from a
+# SimpleKvCache's paged_view), the additive ForwardRequest wiring, and
+# allocation-free staging after warm-up (a counting allocator + staging_bytes).
+# Pure orchestration over real caches — no kernel/forward, so no SCALAR_PASS.
+# `engine` label.
+engine_add_tests(TREE unit SOURCES
+  batch_test.cpp
+  DEPS engine::engine engine::kvcache engine::sampling engine::model
+       engine::memory engine::tensor
+  LABELS engine)
+
 # qwen2_family_test (M5-T10): the Qwen-family reference path on the shared M5
 # modules — the tiny-qwen2 fixture (q/k/v biases, head_dim decoupled from
 # hidden/heads, tied embeddings) validated against its HF golden: config/loader

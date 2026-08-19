@@ -52,6 +52,7 @@ namespace {
 namespace ops = engine::tensor::ops;
 using engine::core::IsInvalidArgument;
 using engine::core::IsResourceExhausted;
+using engine::core::IsUnimplemented;
 using engine::core::StatusOr;
 using engine::engine::Generate;
 using engine::engine::GenerateOptions;
@@ -844,6 +845,31 @@ TEST(OptimizedModelTest, ForwardRejectsMalformedInputs) {
     EXPECT_TRUE(IsInvalidArgument(opt->forward(req).status()));
   }
   // The cache was never touched by any of the rejected calls.
+  EXPECT_EQ(cache.length(), 0);
+}
+
+// The ragged/batched forward (cu_seqlens + per-sequence caches) is rejected
+// with Unimplemented until M9-T06/T07, matching ReferenceModel (M9-T05;
+// scheduler-runtime.md §8.1).
+TEST(OptimizedModelTest, ForwardRejectsBatchedRequest) {
+  std::unique_ptr<Model> opt = Optimized(kLlama);
+  const std::vector<std::int32_t> ids = PromptIds(kLlama);
+  const std::vector<std::int32_t> pos =
+      Iota(static_cast<std::int64_t>(ids.size()));
+  SimpleKvCache cache = FreshCache(*opt);
+  const std::vector<std::int32_t> cu = {0,
+                                        static_cast<std::int32_t>(ids.size())};
+  EXPECT_TRUE(IsUnimplemented(opt->forward({.token_ids = ids,
+                                            .positions = pos,
+                                            .cache = &cache,
+                                            .cu_seqlens = cu})
+                                  .status()));
+  std::vector<KvCache*> caches = {&cache};
+  EXPECT_TRUE(IsUnimplemented(opt->forward({.token_ids = ids,
+                                            .positions = pos,
+                                            .cache = &cache,
+                                            .caches = caches})
+                                  .status()));
   EXPECT_EQ(cache.length(), 0);
 }
 

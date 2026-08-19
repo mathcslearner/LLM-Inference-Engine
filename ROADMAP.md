@@ -1130,7 +1130,7 @@ dependencies — deterministic and unit-testable.
 **Acceptance criteria:**
 - Table-driven unit tests: admission blocked when blocks insufficient, token budget respected across mixed prefill sizes, decode starvation impossible (decodes always scheduled first), preemption chooses the documented victim (latest-arrived).
 
-### M9-T05 · Batch assembly
+### M9-T05 · Batch assembly — ✅ DONE (2026-08-19)
 `src/engine/batch.h`: build the flattened batch inputs for a `SchedulerOutput` —
 concatenated token ids, positions, sequence start offsets (cu_seqlens), slot mappings,
 block-table tensor, per-request sampling metadata — assembled in one pass into

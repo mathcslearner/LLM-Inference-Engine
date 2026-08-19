@@ -827,6 +827,41 @@ Assembled fields, hand-verifiable (M9-T05 acceptance — exact tensor contents f
   `b`'s `BlockTable::blocks()` padded with `−1` to `max_blocks = max_b
   ⌈len_b/bs⌉` — the shape paged-kv-cache.md §9.4 reserved.
 
+**As built (M9-T05):** `src/engine/batch.{h,cpp}` — `BatchAssembler` +
+`BatchInputs` (`engine::engine`). Realized choices, matching the acceptance
+tests:
+
+- **Input is a `BatchSeqInput` descriptor, not `SchedulerOutput` + `Sequence`.**
+  ADR-002 keeps `engine` free of `runtime`/`scheduler` types (the scheduler is a
+  `core`-only leaf; `Sequence` lives *above* `engine`). So the runtime fills a
+  plain `BatchSeqInput{token_ids, cache, sampler, context}` per scheduled
+  sequence — the §8.2 shorthand `AssembleBatch(SchedulerOutput, sequences)` is
+  this descriptor input. No new ADR edge; `engine`'s `tensor` link moved
+  PRIVATE→PUBLIC and `memory` was added (both already-below-it layer-1 modules)
+  for `batch.h`'s public surface.
+- **Two entry points** — `AssemblePrefill` / `AssembleDecode` — mirroring the §7
+  two passes. A shared `Flatten` fills the common
+  `token_ids`/`positions`/`cu_seqlens`/`caches`/`sample_rows`; decode adds
+  `seq_lens` + `block_table`. **Positions are `cache->length() + t`** uniformly
+  (a fresh prefill cache ⇒ `[0, T)`; a decode cache of length `L` ⇒ `L`), so the
+  runtime never passes a start position.
+- **No slot-mapping field.** §8.3 keeps K/V append per sequence through
+  `PagedKvCache::append` (which computes its own slots and owns the exhaustion
+  seam), so the batch carries no batch-level slot mapping — the roadmap's "slot
+  mappings" line is subsumed by per-sequence append, recorded here.
+- **`block_table` via the abstract `paged_view(0)`** (all layers share one
+  table): row `b` = its block ids `−1`-padded to `max_blocks`; a non-paged cache
+  (`SimpleKvCache`) propagates `paged_view`'s `Unimplemented` (the batched
+  runtime uses paged caches). **Allocation-free after warm-up:** the staging
+  vectors keep capacity across steps and the block-table tensor storage grows to
+  a high-water mark (`staging_bytes()` is the stability metric); the `[B,
+  max_blocks]` tensor is a zero-copy `slice`→`reshape` view over that storage.
+- **Additive `ForwardRequest` fields landed with T05** (§8.1): `cu_seqlens` +
+  `caches` (empty ⇒ the single-sequence path). Both backends
+  (`ReferenceModel`/`OptimizedModel`) reject a non-empty batch with
+  `Unimplemented` until M9-T06/T07 — never silently ignored.
+  `BatchInputs::MakeForwardRequest` builds the batched request over the staging.
+
 ### 8.3 K/V append stays per sequence
 
 **Decision: even in a batched forward, each sequence's K/V is appended through its

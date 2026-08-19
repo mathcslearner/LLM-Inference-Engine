@@ -65,15 +65,38 @@ class ActivationHook {
 };
 
 // One sequence's forward-pass inputs (§5.1). A struct, not loose parameters,
-// because M9-T05 grows it into the batch-assembly bundle (cu_seqlens, slot
-// mappings, block-table tensor, per-request sampling metadata) — those become
-// new fields, not a new signature. v0 uses the fields below.
+// because M9-T05 grows it into the batch-assembly bundle (cu_seqlens,
+// per-sequence caches, per-request sampling metadata) — those are added as new
+// fields, not a new signature. The single-sequence path is the `B == 1` special
+// case: `cu_seqlens`/`caches` empty ⇒ the existing scalar flow over `cache`
+// (scheduler-runtime.md §8.1).
 struct ForwardRequest {
-  std::span<const std::int32_t> token_ids;  // [T], each in [0, V)
-  std::span<const std::int32_t> positions;  // [T], absolute positions; size==T
-  kvcache::KvCache* cache = nullptr;  // non-null; length P on entry, P+T on ret
+  // [Σ T_b], flattened batch-major. For B==1 this is the sequence's tokens.
+  std::span<const std::int32_t> token_ids;  // each in [0, V)
+  // [Σ T_b], per-token absolute positions; size == token_ids.size().
+  std::span<const std::int32_t> positions;
+  kvcache::KvCache* cache = nullptr;  // B==1 path: non-null, length P → P+T
   LogitsMode logits_mode = LogitsMode::kLast;
   ActivationHook* hook = nullptr;  // nullptr = no capture, zero cost
+
+  // --- M9 batch additions (empty ⇒ the single-sequence path above) ---------
+  // [B+1] prefix sums of the per-sequence token counts T_b: sequence b owns the
+  // flattened range [cu_seqlens[b], cu_seqlens[b+1]) of token_ids/positions.
+  // Prefill sequences have T_b = prompt_len_b; decode sequences have T_b = 1.
+  // The `{}` default (empty) keeps existing single-sequence designated
+  // initializers warning-clean (they omit these trailing fields under
+  // -Wmissing-designated-field-initializers). It reads as redundant to
+  // clang-tidy (a span default-constructs empty) — a two-tool conflict the
+  // compiler warning wins, so the tidy check is suppressed here.
+  std::span<const std::int32_t>
+      cu_seqlens{};  // NOLINT(readability-redundant-member-init)
+  // [B] one KV cache per sequence (each its own PagedKvCache over the shared
+  // pool). K/V for sequence b is appended to caches[b] (§8.3). When non-empty,
+  // `cache` is ignored and the forward runs the ragged batch. The batched
+  // forward lands in M9-T06/T07; until then both backends reject a non-empty
+  // batch with `Unimplemented` (never silently ignore it). `{}` as above.
+  std::span<kvcache::KvCache* const>
+      caches{};  // NOLINT(readability-redundant-member-init)
 };
 
 // The executable model: embedding → N decoder layers → final norm → lm_head

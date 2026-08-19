@@ -181,6 +181,15 @@ core::StatusOr<std::unique_ptr<ReferenceModel>> ReferenceModel::Create(
 
 core::StatusOr<tensor::Tensor> ReferenceModel::forward(
     const ForwardRequest& request) {
+  // The ragged/batched forward (cu_seqlens + per-sequence caches) lands in
+  // M9-T06/T07; until then a non-empty batch is rejected rather than silently
+  // ignored (scheduler-runtime.md §8.1). The single-sequence path below is the
+  // B==1 special case (both spans empty).
+  if (!request.cu_seqlens.empty() || !request.caches.empty()) {
+    return core::UnimplementedError(
+        "ReferenceModel::forward: batched (cu_seqlens/caches) forward is not "
+        "implemented until M9-T06/T07");
+  }
   // Front-load every input check (§5.3) so a failure never touches the cache:
   // the per-layer append inside attention only runs once all of these pass.
   const auto t_dim = static_cast<std::int64_t>(request.token_ids.size());

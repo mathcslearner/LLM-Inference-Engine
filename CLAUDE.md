@@ -1078,17 +1078,52 @@ behind an existing subsystem):
   (`PreemptionResumesWithIdenticalOutput`: 2-block pool forces a real preemption,
   the resumed request's output == a standalone `Generate`, `used == 0` at end) →
   **1279 green**. design scheduler-runtime.md §6.6 "as built"; format + scoped
-  tidy clean.
+  tidy clean. T05 batch assembly (2026-08-19): `src/engine/batch.{h,cpp}` —
+  `BatchAssembler` + `BatchInputs` (`engine::engine`) flatten the per-step
+  scheduled work into staged inputs a batched forward (M9-T06/T07) consumes:
+  concatenated `token_ids`, per-token absolute `positions`, `[B+1]` `cu_seqlens`
+  prefix sums, per-sequence `caches`, per-request `sample_rows`
+  (`sampling::BatchRow`), and — decode only — the `[B, max_blocks]` int32
+  block-table tensor + `[B]` `seq_lens`. **Input is a plain `BatchSeqInput`
+  descriptor, not `SchedulerOutput` + `Sequence`** — ADR-002 keeps `engine` free
+  of `runtime`/`scheduler` types (scheduler is a `core`-only leaf; `Sequence`
+  lives above `engine`), so the runtime fills `{token_ids, cache, sampler,
+  context}` per scheduled seq and the assembler sits in `engine` beside
+  `Generate` (the §8.2 `AssembleBatch(SchedulerOutput, sequences)` shorthand
+  realized as this descriptor input). **Two entry points**
+  (`AssemblePrefill`/`AssembleDecode`, the §7 two passes); a shared `Flatten`
+  fills the common fields, decode adds seq_lens + block_table. **Positions are
+  `cache->length() + t` uniformly** (fresh prefill ⇒ `[0,T)`; decode length `L` ⇒
+  `L`). **No batch-level slot mapping** (§8.3 keeps K/V append per sequence
+  through `PagedKvCache::append`, which owns its slots + exhaustion seam).
+  **`block_table` via the abstract `paged_view(0)`** — row `b` = its block ids
+  `−1`-padded to `max_blocks`, the tensor a zero-copy `slice`→`reshape` view over
+  a 1-D int32 storage grown to a high-water mark; a `SimpleKvCache` propagates
+  `paged_view`'s `Unimplemented`. **Allocation-free after warm-up**
+  (`staging_bytes()` the stability metric; discharges optimized-cpu-execution.md
+  §6.3's deferred "pre-size staging from `--max-num-batched-tokens`"). **Additive
+  `ForwardRequest` fields landed here** (§8.1): `cu_seqlens` + `caches`, empty ⇒
+  single-sequence path; the two new span members carry `{}` defaults so the ~24
+  existing single-sequence designated-init sites stay
+  `-Wmissing-designated-field-initializers`-clean (untouched), with an in-header
+  `NOLINT(readability-redundant-member-init)` resolving the span-`{}` tidy
+  conflict; both backends reject a non-empty batch with `Unimplemented` until
+  M9-T06/T07 (`BatchInputs::MakeForwardRequest` builds the batched request).
+  CMake: `engine_engine` gains `batch.cpp`, `engine::tensor` PRIVATE→PUBLIC +
+  `engine::memory` added (no ADR amendment). +16 tests (`batch_test` 13 `engine`;
+  reference/optimized `ForwardRejectsBatchedRequest`, opt ×SCALAR_PASS) → **1295
+  green**. design scheduler-runtime.md §8.2 + optimized-cpu-execution.md §6.3 "as
+  built"/discharge; format + scoped tidy clean (model.h header edit → full
+  includer set swept).
 
-Next up: **M9-T05** (batch assembly) — write `src/engine/batch.h`: flatten a
-`SchedulerOutput` into staged batch inputs — concatenated token ids, positions,
-sequence start offsets (`cu_seqlens`), slot mappings, block-table tensor,
-per-request sampling metadata — assembled in one pass into preallocated staging
-buffers (no per-step allocation after warm-up). An `engine`-module type
-(`engine::engine::BatchInputs`/`AssembleBatch`), beside `Generate`, over the
-existing `model`/`kvcache`/`sampling` edges — no new ADR edge. Conform to
-`docs/design/scheduler-runtime.md` §8.1/§8.2. Acceptance (§13 M9-T05):
-hand-verified assembled metadata for {2 prefills of different lengths}, {3
-decodes}, {mixed} — `token_ids`/`positions`/`cu_seqlens`/`block_table` exact on
-every element (`EXPECT_EQ`); no per-step allocation after warm-up (staging
-high-water stable). Per ROADMAP M9-T05.
+Next up: **M9-T06** (varlen batched prefill attention) — add
+`PrefillAttentionVarlenF32` to `src/kernels/attention.{h,cpp}` (+ per-ISA TUs):
+extend prefill attention to ragged batches using `cu_seqlens`, looping the
+**unchanged** per-sequence `PrefillAttentionF32` recurrence over each sequence's
+`[Hkv, L_b, d]` slab (roadmap "shared kernels loop over sequences; still
+naive-but-correct"), threaded over (sequence, query-block, head). No new ADR
+edge (additive kernel entry over the existing `kvcache → kernels`/`model →
+kernels` edges). Conform to `docs/design/scheduler-runtime.md` §8.4. Acceptance
+(§13 M9-T06): a batch of {3 sequences, lengths 5/64/129} produces per-sequence
+outputs **bit-identical** to three standalone `PrefillAttentionF32` runs;
+thread-count invariance; `SCALAR_PASS`. Per ROADMAP M9-T06.
