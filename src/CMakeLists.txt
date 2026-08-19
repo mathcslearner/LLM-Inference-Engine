@@ -19,7 +19,11 @@ add_subdirectory(runtime)
 add_subdirectory(server)
 add_subdirectory(metrics)
 
-# Placeholder entry point; replaced by the real server binary in M9.
+# Entry point: `engine` prints the version; `engine generate` loads a model and
+# greedily generates text — the M6-T07 real-model driver (design:
+# optimized-cpu-execution.md §10). M9 replaces this with the real server binary
+# + config system; the driver sits above every module (server layer), so it may
+# link model/tokenizer/kvcache/engine directly.
 add_executable(engine_main main.cpp)
 # Emitted into <build>/bin: the default (<build>/src/) would collide with the
 # <build>/src/engine/ directory that the engine module's subdirectory creates.
@@ -30,4 +34,5 @@ target_compile_definitions(engine_main PRIVATE ENGINE_VERSION="${PROJECT_VERSION
 # fmt comes transitively from engine::core, whose public interface exposes it
 # (logging.h formats at the call site); linking it again here makes the macOS
 # linker warn about duplicate archives.
-target_link_libraries(engine_main PRIVATE engine_warnings engine::core)
+target_link_libraries(engine_main PRIVATE engine_warnings engine::core
+  engine::model engine::tokenizer engine::kvcache engine::engine)

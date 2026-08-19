@@ -1436,3 +1436,132 @@ path (`PackedLinear` GEMM + last-row GEMV) vs `ReferenceLinear` (`rtol/atol
 
 Format clean; scoped tidy clean on the four new TUs (no existing header edited).
 No fixture change (existing goldens sufficed). `src/parallel/` untouched.
+
+### M6-T07 — optimized model forward & generation (2026-08-18)
+
+**Ticket.** Wire the M6 kernels into the M5 `Model` interface as the
+`kOptimized` backend: weight repacking at load (progress-logged), workspace
+allocation, full prefill + decode forward, the M5 greedy loop reused verbatim.
+Acceptance: tiny-fixture greedy generation token-for-token identical to the
+reference backend + logits within tolerance; a real ~1B model loads and
+generates coherent text on the dev machine.
+
+**Workspace (`src/model/workspace.{h,cpp}`).** The reused-across-layers scratch
+the optimized forward runs out of (design §6): ten model-level fp32 slots — the
+four `c_stream` E-width buffers `x`/`h`/`tmp`/`r` (residual stream / norm output
+/ projection output / post-attention residual), the projections
+`q [T,H·d]`/`k`/`v [T,Hkv·d]`/`ctx [T,H·d]`, and the MLP `gate`/`up [T,I]` —
+each a separate contiguous tensor exposed as a `[T,width]` prefix view.
+`EnsureCapacity(T)` is monotone grow-on-demand with a high-water mark: it
+allocates all ten (uninitialized `Tensor::empty` — every slot is written before
+read) into locals and commits only when all succeed, so a mid-way OOM leaves the
+prior buffers intact and surfaces `ResourceExhausted`/OOM **before any kernel
+runs or the cache is touched** (front-loaded, ADR-003). Steady-state decode is
+therefore allocation-free once the first `T=1` call has sized it. `bytes()`
+computes the §6.2 formula (`4·[4·T·E + T·(H+2·Hkv)·d + T·H·d + 2·T·I]`) and is
+asserted against the instantiated tiny-llama figure (25.6 KB at T=8) and its
+monotone growth. `W_worker = 0` as designed (the attention accumulator is `out`,
+§6.1). Per-slot tensors chosen over one arena + offsets — same guarantees,
+simpler.
+
+**OptimizedModel (`src/model/optimized_model.{h,cpp}`).** A second `Model`
+behind the same interface as `ReferenceModel`, a **parallel-implementation
+graph** (design §2.2 — not the reference `DecoderLayer` classes, so the oracle
+stays untouched and the graph is fusion-ready). `Create` binds every module from
+`LoadedModel.weights` by canonical name, identically to `ReferenceModel::Create`
+but building optimized modules: a `PackedLinear` per projection (q/k/v/o,
+gate/up/down, lm_head — repacked into the §3 K-major panels at construction,
+bias→fp32 once, checkpoint handle dropped), norm scales converted to fp32 once at
+build (§4 — the kernel takes a `const float*`, unlike the reference which widens
+per call), and **one shared `Rope`** for the whole model (a deliberate divergence
+from the reference's per-layer copies: the cos/sin tables are position-only, so
+one suffices — on Qwen2.5-0.5B the per-layer tables would be ~200 MB duplicated).
+Tied embeddings (§7) build the lm_head `PackedLinear` first, then
+`OptimizedEmbedding::FromPackedLinear` shares its packed storage (one physical
+copy, no `[V,E]` duplicate) before the linear is moved behind a
+`unique_ptr<Linear>`; untied uses the model's own `[V,E]` table via `FromTable`.
+Per-layer projection-shape validation is front-loaded (E not assumed `H·d`, so
+Qwen's decoupled `head_dim` is honored), and repacking logs `packed layer i/N`.
+
+`forward` copies `ReferenceModel::forward`'s validation block verbatim (same
+order, same messages with the `OptimizedModel::` prefix — so the error-path tests
+match 1:1), then `Workspace::EnsureCapacity(T)`, then embedding → N layers →
+final norm → lm_head, all out of the workspace. Each layer (`ForwardLayer`) is
+the pre-norm arrangement expressed with dispatched kernels:
+`RmsNormF32`→packed q/k/v→`RopeApplyF32` (reading the shared table's `cos()`/
+`sin()` directly, not via the reference's `Rope::apply`/`cpu::rope_apply`)→
+`cache.append`→`cache.view`→`DecodeAttentionF32` (T==1) or `PrefillAttentionF32`
+→packed o_proj→`AddF32` residual→`RmsNormF32`→packed gate/up→`SiluMulF32` (in
+place)→packed down→`AddF32` back into the residual stream. The aliasing-friendly
+kernels (RmsNorm/SiluMul/Add all permit `y` to alias an input) let the ten slots
+be reused tightly. Logits are freshly allocated caller-owned (§6.3): `kLast`
+projects only the last row (GEMV), `kAll` all rows (GEMM). The per-layer hook
+emits the same `embeddings`/`layers.{i}`/`final_norm`/`logits` events as the
+reference.
+
+**Backend wiring (`src/model/registry.{cpp,h}`).** `BuildReferenceFamily` renamed
+`BuildFamily`, dispatching on `options.backend` (`kOptimized` →
+`OptimizedModel::Create`, else `ReferenceModel::Create`); the M5 `Unimplemented`
+guard is gone. `registry.h` docs updated; the stale `registry_test`
+"kOptimized is Unimplemented" case became "builds through the registry".
+
+**Driver (`src/main.cpp`).** The placeholder `main` grew an `engine generate`
+subcommand — the §10 real-model acceptance harness (M9 replaces it with the
+server binary): `--model DIR --prompt STR [--backend reference|optimized]
+[--max-new-tokens N] [--cache-capacity N] [--no-bos]`, loading through the
+registry, tokenizing with `Tokenizer::from_file`, running `Generate` with a
+`DetokenizerStream` streaming callback, and printing load/prefill/decode timing.
+Links model/tokenizer/kvcache/engine (it sits at the server layer, above every
+module).
+
+**Validation.** `optimized_model_test` (+15 gtest cases, `model` label,
+**SCALAR_PASS** — the first full-model forward under the forced-scalar pass; ×2
+ctest entries → **905 ctest** total, was 875; **877 gtest**, was 862) builds
+*both* backends on the same fixture (loading once per backend, since `BuildModel`
+consumes the `LoadedModel`) on tiny-llama (untied, no bias) and tiny-qwen2 (tied
++ q/k/v biases, decoupled `head_dim`): registry build, tied/untied storage
+sharing, missing-weight report, logits vs the reference (kLast/kAll), logits vs
+the HF `activations.safetensors` golden, `kLast` == `kAll` last row, per-layer
+hook parity, greedy token-for-token vs the reference *and* the `generate.json`
+golden, determinism, the KV invariant (full vs token-by-token, chunked),
+workspace reuse, and every front-loaded error path (malformed inputs,
+over-capacity → cache unchanged). Plus `WorkspaceTest` for the sizing formula and
+monotone growth.
+
+Observed (NEON dev machine; band `rtol 2e-4, atol 2e-4`): optimized vs the
+reference **2.4e-7** (kAll) / **1.8e-7** (kLast) on both fixtures; optimized vs
+the HF golden **3.7e-6** (llama) / **3.9e-6** (qwen) — indistinguishable from the
+reference's own HF agreement (3.7e-6 / 3.9e-6), so the optimized path is as
+accurate against HF as the oracle. The **KV invariant is bit-exact**
+(max-abs-diff 0), matching the reference — GEMV≡GEMM-row (T02) and
+decode≡prefill(T=1) (T05) are bitwise, and each row's online-softmax recurrence
+is T-independent within one thread. Full ctest green (host ISA + forced scalar);
+format + scoped tidy clean (the new TUs + `registry.cpp`/`main.cpp` +
+`registry_test.cpp`); `src/parallel/` untouched.
+
+**Real ~1B model (acceptance b).** Qwen2-0.5B-Instruct (bf16, 24 layers,
+`Qwen2ForCausalLM`, tied embeddings + q/k/v biases, `V=151936`, `E=896`,
+`H=14`, `Hkv=2`, `d=64`, `I=4864`) downloaded to `~/models/` and driven with
+`engine generate` on the M2 dev machine. It loads (~0.4–1.0 s warm/cold) and
+generates coherent text; the **reference and optimized backends produce
+byte-identical greedy output** — the token-for-token acceptance holds on a real
+~1B-class model, not just the tiny fixtures. Samples (greedy, `--max-new-tokens`
+as shown):
+
+- Prompt `The capital of France is` →
+  `_______.____。\nParis\nLondon\nGermany\nAustralia\n答案:\n\nA\n\n1000…`
+  (base-completion rambling — no chat template, which is M10 — but coherent
+  English and correctly surfaces "Paris"; identical on both backends).
+- Chat-templated (`<|im_start|>…user\nName three primary colors.<|im_end|>
+  <|im_start|>assistant\n`) → `Here are three examples of primary colors:\n- Red:
+  typically associated with warmth, excitement, and excitement. It is usually a
+  bright, vibrant, and brightly colored color. It is often used in…`
+
+Informal driver timing (the formal ±5% baseline is M6-T08's `bench_generate`, not
+this): optimized **decode 33.3 tok/s / prefill 47.4 tok/s** vs reference **10.4 /
+12.2 tok/s** — ~3.2× decode, ~3.9× prefill on the same prompt (8-thread default),
+the packed-GEMM + blocked-attention win end-to-end. The download stalled hf on
+its final xet-verification step (byte-complete at 988,097,824 = the repo's
+`content-length`); the completed file was placed and validated by loading (291
+BF16 tensors, tied embeddings resolved by the loader alias), so no re-download was
+needed.

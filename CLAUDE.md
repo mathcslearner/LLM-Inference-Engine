@@ -522,13 +522,42 @@ behind an existing subsystem):
   GEMV) — no new logits kernel. `model → kernels` stays PRIVATE. +13 gtest cases
   (embedding_kernel_test/kernels + embedding_logits_test/model, both SCALAR_PASS)
   → **862 green** (875 ctest entries). No fixture change; `src/parallel/`
-  untouched; format + scoped tidy clean.
+  untouched; format + scoped tidy clean. T07 optimized model forward &
+  generation: `src/model/workspace.{h,cpp}` (`Workspace` — the
+  reused-across-layers scratch, ten model-level fp32 slots `x/h/tmp/r` +
+  `q/k/v/ctx` + `gate/up` exposed as `[T,width]` prefix views; monotone
+  grow-on-demand with a high-water mark, all-or-nothing `EnsureCapacity` so a
+  mid-way OOM leaves prior buffers intact and surfaces before any kernel/cache
+  touch → allocation-free steady-state decode; `W_worker=0` as designed; §6.2
+  `bytes()` asserted at tiny-llama's 25.6 KB) and
+  `src/model/optimized_model.{h,cpp}` (`OptimizedModel` — the `kOptimized`
+  backend, a **parallel-implementation graph** not the reference `DecoderLayer`
+  classes so the oracle stays untouched: `Create` builds a `PackedLinear` per
+  projection incl. lm_head, norm scales→fp32 once, **one shared `Rope`** for the
+  whole model — cos/sin are position-only, avoiding ~200 MB of per-layer table
+  duplication on a real model — and honors tied embeddings by sharing the packed
+  lm_head storage before it's moved behind `unique_ptr<Linear>`; `forward` copies
+  the reference's validation verbatim then runs embedding→N layers→final
+  norm→lm_head out of the workspace via the dispatched
+  RmsNorm/PackedGemm/RopeApply/Prefill|DecodeAttention/SiluMul/Add kernels,
+  reading K/V through `cache.view`; logits caller-owned kLast-GEMV/kAll-GEMM; same
+  hook events as the reference). Registry: `BuildReferenceFamily`→`BuildFamily`
+  dispatches on `options.backend` (M5 `Unimplemented` guard gone). Driver:
+  `src/main.cpp` grew an `engine generate` subcommand (load→tokenize→`Generate`→
+  stream-detokenize, the §10 real-model harness until M9's server binary). +15
+  gtest cases (`optimized_model_test`, model label, **SCALAR_PASS** — the first
+  full-model forward under forced-scalar) → **877 green** (905 ctest entries):
+  both backends built on tiny-llama (untied) + tiny-qwen2 (tied+biases,
+  decoupled head_dim), logits vs reference (**2.4e-7** kAll / **1.8e-7** kLast)
+  and vs the HF golden (**3.7e-6**/**3.9e-6**, matching the reference's own HF
+  agreement), greedy token-for-token vs reference *and* `generate.json`, the KV
+  invariant **bit-exact** (0), workspace sizing, and every front-loaded error
+  path. Real ~1B model (Qwen2-0.5B-Instruct bf16) loads and generates coherent
+  text on the dev machine (sample outputs in the PR / PROGRESS.md). No fixture
+  change; `src/parallel/` untouched; format + scoped tidy clean.
 
-Next up: **M6-T07** (optimized model forward & generation: wire the M6 kernels
-into the M5 `Model` interface as the `kOptimized` backend — `OptimizedModel` +
-its reused-across-layers `Workspace`, weight repacking at load with progress
-logging, full prefill + decode forward, greedy loop reused from M5; acceptance:
-tiny-fixture greedy generation token-for-token identical to the reference
-backend and end-to-end logits within tolerance, plus a real ~1B model
-(Llama-3.2-1B or Qwen2.5-0.5B bf16) loading and generating coherent text on the
-dev machine with sample outputs in the PR description).
+Next up: **M6-T08** (generation benchmark & first baseline: `benchmarks/
+bench_generate` measuring prefill tok/s and decode tok/s for a given model /
+prompt length / thread count, stable ±5% across runs; baseline in BASELINES.md
+with a hardware + thread-count fingerprint, and a same-model llama.cpp number
+alongside for context — parity is an M12 goal, not here).

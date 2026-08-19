@@ -43,7 +43,8 @@ namespace engine::model {
 // doc.)
 enum class Backend : std::uint8_t {
   kReference,  // M5: ReferenceModel + ReferenceLinear + cpu:: ops (the oracle)
-  kOptimized,  // M6: repacked weights, dispatched kernels (Unimplemented in M5)
+  kOptimized,  // M6: repacked weights, dispatched kernels (OptimizedModel,
+               // M6-T07)
 };
 
 // Options threaded from `BuildModel` into the resolved builder.
@@ -72,10 +73,10 @@ core::Status RegisterArchitecture(std::string_view hf_arch_name,
 
 // Builds an executable `Model` from `model`, dispatching on
 // `model.config.architecture_name`. Consumes `model`. An unregistered
-// architecture → `Unimplemented` listing the supported strings; a
-// `kOptimized` backend in M5 → `Unimplemented` (M6 fills it in). Any error the
-// resolved builder returns (missing weight, shape/rope mismatch) propagates
-// unchanged.
+// architecture → `Unimplemented` listing the supported strings. The backend is
+// selected by `options.backend`: `kReference` builds the oracle, `kOptimized`
+// builds the `OptimizedModel` (M6-T07). Any error the resolved builder returns
+// (missing weight, shape/rope mismatch) propagates unchanged.
 [[nodiscard]] core::StatusOr<std::unique_ptr<Model>> BuildModel(
     LoadedModel model, const BuildOptions& options = {});
 

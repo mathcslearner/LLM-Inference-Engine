@@ -96,6 +96,7 @@ Files this milestone creates:
 | `src/model/packed_linear.h` / `.cpp` | model | `PackedLinear` (repack at construction; GEMM/GEMV in `forward`) | T02 |
 | `src/model/optimized_model.h` / `.cpp` | model | `OptimizedModel` + its workspace; the `kOptimized` family builder | T07 |
 | `src/model/workspace.h` / `.cpp` | model | `Workspace` (model-level buffers + per-worker scratch, §6) | T07 |
+| `src/main.cpp` (`engine generate`) | server-layer driver | real-model greedy-generation driver (load → tokenize → `Generate` → stream-detokenize); the §10 real-model acceptance harness until M9's server binary replaces it | T07 |
 | `benchmarks/bench_generate.cpp` | benchmarks | prefill/decode tokens/sec harness (M6-T08) | T08 |
 
 ### 2.1 Layering — the edges M6 uses
@@ -487,6 +488,19 @@ an optional caller-supplied output-buffer field to `ForwardRequest` (additive, t
 eliminate the per-step logits allocation in a tight server loop) — but that is an
 optimization behind an unchanged default, not M6's contract.
 
+**As-built (M6-T07):** `Workspace` (`src/model/workspace.{h,cpp}`) holds ten
+model-level slots as separate contiguous fp32 tensors — the four `c_stream`
+E-width buffers `x`/`h`/`tmp`/`r` (residual stream, norm output, projection
+output, post-attention residual), the projections `q [T,H·d]`/`k`/`v [T,Hkv·d]`/
+`ctx [T,H·d]`, and the MLP `gate`/`up [T,I]` — allocated with `Tensor::empty`
+(uninitialized: every slot is written by a kernel before it is read) and exposed
+as `[T,width]` prefix views. `EnsureCapacity(T)` allocates all ten into locals
+and commits only when all succeed (a mid-way OOM leaves the prior buffers intact,
+front-loaded before any kernel or cache touch). Per-slot tensors, not one arena
++ offsets, chosen for simplicity — same guarantees. `bytes()` computes the §6.2
+formula and is asserted against the instantiated tiny-llama 25.6 KB and its
+monotone growth. `W_worker = 0` as designed (the attention accumulator is `out`).
+
 ### 6.4 The `parallel_for` worker-index overload
 
 **Status (M6-T04): NOT added — deferred until a kernel actually needs it.** The
@@ -725,6 +739,24 @@ starting point.
 - **`model` label** (like M5) for `ctest -L model`; kernel suites keep the
   `kernels` label pattern.
 
+**As-built (M6-T07).** The `BuildReferenceFamily` builder was renamed
+`BuildFamily` and now dispatches on `options.backend`: `kOptimized` →
+`OptimizedModel::Create`, else `ReferenceModel::Create` (the M5 `Unimplemented`
+guard is gone; `registry.h`/its docs updated, and the stale
+`registry_test` "kOptimized is Unimplemented" case is now
+"kOptimized builds through the registry"). `optimized_model_test` (the
+`SCALAR_PASS` model suite — the first full-model forward under forced-scalar)
+builds *both* backends on the same fixture — loading it once per backend, since
+`BuildModel` consumes the `LoadedModel` — and asserts optimized == reference. The
+`OptimizedModel::forward` validation block is copied from `ReferenceModel::forward`
+verbatim (same order, same messages with the `OptimizedModel::` prefix), so the
+error-path tests match 1:1. `OptimizedModel` builds one shared `Rope` for the
+whole model, not one table per layer as the reference does — the cos/sin tables
+are position-only, so a single copy suffices and a real model avoids hundreds of
+MB of duplicated tables; the vectorized `kernels::RopeApplyF32` reads that shared
+table's `cos()`/`sin()` pointers directly rather than going through the
+reference's `Rope::apply` (which calls `cpu::rope_apply`).
+
 ---
 
 ## 10. Kernel-validation methodology & tolerance table
@@ -841,7 +873,18 @@ why:**
   identical** on the tiny fixtures. The M5-T09/T10 prompt selection (min top-2
   logit gap > 1e-2, model-execution.md §10) is what makes token-for-token robust
   for the optimized backend too — the reference-vs-optimized logit gap is orders
-  of magnitude below that separation, so the argmax never flips.
+  of magnitude below that separation, so the argmax never flips. *Landed
+  (M6-T07, NEON dev machine; band `rtol 2e-4, atol 2e-4`): optimized vs the
+  reference **2.4e-7** (kAll) / **1.8e-7** (kLast) on both tiny-llama and
+  tiny-qwen2; optimized vs the HF `activations.safetensors` logits golden
+  **3.7e-6** (llama) / **3.9e-6** (qwen) — indistinguishable from the reference's
+  own HF agreement, so the optimized path is as accurate against HF as the oracle;
+  greedy generation token-for-token identical to both the reference backend and
+  the `generate.json` goldens on every committed prompt of both fixtures. The KV
+  invariant (full prefill vs token-by-token, chunked prefill) is **bit-exact**
+  (max-abs-diff 0), matching the reference — GEMV≡GEMM-row (T02) and
+  decode≡prefill(T=1) (T05) are bitwise, and each row's online-softmax recurrence
+  is T-independent within one thread.*
 
 **M6-T03 observed (NEON, dev machine; thresholds set above these):** softmax
 max-abs-diff 6.0e-7 at n=4096 (`atol 1e-6, rtol 1e-4`); SiLU-and-mul 9.5e-7 at

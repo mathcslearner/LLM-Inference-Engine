@@ -163,6 +163,22 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::engine engine::model engine::kvcache nlohmann_json::nlohmann_json
   LABELS model)
 
+# optimized_model_test (M6-T07): the OptimizedModel (kOptimized backend) end to
+# end — logits vs the ReferenceModel oracle and the HF activations golden,
+# greedy generation token-for-token vs the reference and generate.json, the
+# per-layer hook parity, the KV invariant, the Workspace sizing, and the
+# front-loaded error paths — on both tiny-llama (untied) and tiny-qwen2
+# (tied + biases). The dispatched kernels run inside, so SCALAR_PASS registers
+# it twice (host ISA + forced-scalar): the first full-model forward covered by
+# the forced-scalar pass (design §9). Builds through the registry and generator
+# (engine::engine), replays the goldens (nlohmann_json). `model` label.
+engine_add_tests(TREE unit SOURCES
+  optimized_model_test.cpp
+  DEPS engine::engine engine::model engine::kvcache engine::cpu
+       nlohmann_json::nlohmann_json
+  LABELS model
+  SCALAR_PASS)
+
 # tokenizer_test parses the committed real tokenizer.json fixtures (design
 # §7.1, §8); the `tokenizer` label lets `ctest -L tokenizer` iterate the
 # golden suite alone. Ordinary portable C++ — no SCALAR_PASS.

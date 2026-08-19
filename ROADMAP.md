@@ -917,7 +917,7 @@ share storage across different layouts — resolved in the design doc).
 **Acceptance criteria:**
 - Tests: lookup matches reference for random id sets (incl. repeated ids); logits match the reference within tolerance on the fixture model.
 
-### M6-T07 · Optimized model forward & generation
+### M6-T07 · Optimized model forward & generation — ✅ DONE (2026-08-18)
 Wire the optimized kernels into the M5 `Model` interface as the `optimized` backend:
 weight repacking at load (with progress logging), workspace allocation, full
 prefill + decode forward, greedy loop reused from M5.

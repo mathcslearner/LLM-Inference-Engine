@@ -175,14 +175,15 @@ TEST(RegistryTest, Qwen2ArchStringRoutesToFamilyBuilder) {
 }
 
 // ===========================================================================
-// The optimized backend is not available in M5.
+// The optimized backend builds through the same family builder (M6-T07).
 // ===========================================================================
 
-TEST(RegistryTest, OptimizedBackendIsUnimplemented) {
+TEST(RegistryTest, OptimizedBackendBuildsThroughRegistry) {
   const BuildOptions opts{.backend = Backend::kOptimized};
   const auto built = BuildModel(LoadTiny(), opts);
-  ASSERT_FALSE(built.ok());
-  EXPECT_TRUE(IsUnimplemented(built.status()));
+  ASSERT_TRUE(built.ok()) << built.status().ToString();
+  EXPECT_NE(*built, nullptr);
+  EXPECT_EQ((*built)->config().architecture_name, "LlamaForCausalLM");
 }
 
 // ===========================================================================

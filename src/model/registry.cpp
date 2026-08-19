@@ -3,6 +3,7 @@
 #include "core/status.h"
 #include "model/loader.h"
 #include "model/model.h"
+#include "model/optimized_model.h"
 #include "model/reference_model.h"
 
 #include <algorithm>
@@ -18,18 +19,20 @@ namespace engine::model {
 
 namespace {
 
-// The reference (oracle) family builder shared by Llama and Qwen2 (design §9):
-// the two families differ only in `attention_bias` (Qwen2 biases q/k/v) and
-// config field *values*, both of which flow through the same
-// `ReferenceModel::Create` — the diff is config/wiring, not layer code, so one
-// builder serves both. M5-T10 adds the Qwen fixture; the wiring is already
-// here.
-core::StatusOr<std::unique_ptr<Model>> BuildReferenceFamily(
+// The family builder shared by Llama and Qwen2 (design §9): the two families
+// differ only in `attention_bias` (Qwen2 biases q/k/v) and config field
+// *values*, both of which flow through the same `Create` — the diff is
+// config/wiring, not layer code, so one builder serves both, and it serves both
+// backends. `kReference` builds the `cpu::`-op oracle (M5); `kOptimized` builds
+// the repacked-weight, dispatched-kernel `OptimizedModel` (M6-T07). Both
+// implement the same `Model` interface, so a single test builds both and
+// asserts token-for-token equality.
+core::StatusOr<std::unique_ptr<Model>> BuildFamily(
     LoadedModel loaded, const BuildOptions& options) {
   if (options.backend == Backend::kOptimized) {
-    return core::UnimplementedError(
-        "BuildModel: the optimized backend lands in M6; only the reference "
-        "backend is available");
+    ASSIGN_OR_RETURN(std::unique_ptr<OptimizedModel> model,
+                     OptimizedModel::Create(std::move(loaded)));
+    return std::unique_ptr<Model>(std::move(model));
   }
   ASSIGN_OR_RETURN(std::unique_ptr<ReferenceModel> model,
                    ReferenceModel::Create(std::move(loaded)));
@@ -50,8 +53,8 @@ struct Registry {
 Registry& GetRegistry() {
   static Registry* const registry = [] {
     auto* r = new Registry();
-    r->builders.emplace("LlamaForCausalLM", BuildReferenceFamily);
-    r->builders.emplace("Qwen2ForCausalLM", BuildReferenceFamily);
+    r->builders.emplace("LlamaForCausalLM", BuildFamily);
+    r->builders.emplace("Qwen2ForCausalLM", BuildFamily);
     return r;
   }();
   return *registry;

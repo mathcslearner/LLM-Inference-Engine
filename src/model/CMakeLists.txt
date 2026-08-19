@@ -6,8 +6,9 @@
 # PRIVATE.
 add_library(engine_model STATIC checkpoint.cpp config.cpp loader.cpp
                                 mapped_file.cpp modules.cpp optimized_embedding.cpp
-                                packed_linear.cpp reference_model.cpp registry.cpp
-                                safetensors.cpp weight_map.cpp)
+                                optimized_model.cpp packed_linear.cpp
+                                reference_model.cpp registry.cpp safetensors.cpp
+                                weight_map.cpp workspace.cpp)
 add_library(engine::model ALIAS engine_model)
 target_include_directories(engine_model PUBLIC ${PROJECT_SOURCE_DIR}/src)
 # engine::cpu is PRIVATE: modules.cpp/reference_model.cpp call cpu:: ops, but no
