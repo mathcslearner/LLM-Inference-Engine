@@ -512,6 +512,53 @@ class Engine {
   concurrent consumers — no deadlock, no lost/duplicated tokens, every channel
   eventually closes.
 
+> **As built (M9-T03).** `src/runtime/engine.{h,cpp}` (`EngineConfig`,
+> `RequestHandle`, `Engine`). Deviations from the §5 sketch, all deliberate:
+> - **`Engine::Create` returns `StatusOr<std::unique_ptr<Engine>>`**, not
+>   `StatusOr<Engine>`: the engine owns a `std::thread`, a mutex/condvar, and a
+>   map of heap-pinned `Entry`s whose `Sequence::request_` borrows into the map,
+>   so the object must be address-stable — it is non-movable and non-copyable.
+>   `Create` also rejects a pool whose geometry does not match the model's
+>   `cache_geometry()` (every forward would otherwise fail).
+> - **`Submit` builds the `Sequence` on the client thread** (before assigning the
+>   id): `Sequence::Create` is where the sampler/stop validation lives and the
+>   client must receive that status synchronously. Constructing the empty
+>   `PagedKvCache` touches no pool block state, so the single-mutator invariant
+>   (§5.3) holds. The id and `arrival_index` are assigned under the queue lock at
+>   enqueue time, so arrival order matches queue order. Peak-length rejection uses
+>   `prompt_len + max_tokens - 1` (matching `Generate`) against both
+>   `max_model_len` and the pool's token capacity.
+> - **`Step()` ships the full §9.1 loop shape with two labelled placeholders** the
+>   later tickets substitute *in place*: (a) admission is a plain FCFS walk under
+>   `max_num_seqs` / the token budget / `free_blocks` (M9-T04 swaps in
+>   `scheduler::Scheduler`; no preemption yet), and (b) execution runs one
+>   `model::forward` **per sequence** — the body of `engine::Generate`'s decode
+>   loop, lifted onto the `Sequence` — so a request's output is bit-identical to a
+>   standalone `Generate` (a T03 test asserts exactly that). The batched passes
+>   (M9-T05…T08) replace the per-sequence execution, preserving that output. The
+>   decode set is snapshotted **before** admission, so a freshly admitted sequence
+>   produces exactly one token this step (its prefill) and decodes from the next.
+> - **Cancellation is handled entirely up front in T03** (`RetireCancelled`, step
+>   2 extended to RUNNING as well as WAITING/PREEMPTED): the per-sequence model
+>   has no in-flight batch at a step boundary, so a cancel of a sequence in any
+>   live state is applied immediately. The batched loop (M9-T08) moves
+>   RUNNING-cancel handling to the end of the step, where a cancel that lands
+>   during the forward is applied at the next boundary (§11.1).
+> - **`Stop` is abort-and-close and idempotent**; `~Engine` calls it. It joins the
+>   thread, then closes every still-open channel `kCancelled` (including undrained
+>   submissions) and drops every `Sequence` (RAII frees blocks). `Submit` after
+>   `Stop` → `FailedPrecondition`. A per-request `forward`/sampler fault fails only
+>   that sequence (`kFailed` + close + free), never the loop (ADR-003, §11.2) —
+>   the isolation the T03 mock-fault test covers; graceful preemption of a
+>   *decode*-time pool exhaustion is deferred to M9-T09 (in T03 it surfaces as a
+>   per-request failure).
+> - **`OutputChannel` gained `AwaitFinish()`** (blocks until closed, returns the
+>   `FinishInfo` without consuming items) — what `RequestHandle::await_completion`
+>   needs. `Entry::seq` is a `std::unique_ptr<Sequence>` (two-phase init: the
+>   `Request` lands first so the `Sequence` can borrow it, then the sequence is
+>   built) rather than an `optional`, to keep the loop clear of
+>   `bugprone-unchecked-optional-access`.
+
 ---
 
 ## 6. Scheduling policy v1 (M9-T04)

@@ -2820,3 +2820,89 @@ no new ADR edge — every dependency is already below `runtime` on the diagram.
 SCALAR_PASS — pure bookkeeping + threading, no model/kernel/forward) →
 **1232 green**. Design scheduler-runtime.md §3/§4 gained an "as built" note;
 format + scoped tidy clean.
+
+### M9-T03 — Engine API & request queue (2026-08-19)
+
+Landed `src/runtime/engine.{h,cpp}` — the runtime's public async surface and the
+single-engine-thread loop scaffold (design: scheduler-runtime.md §5, §9.1).
+`EngineConfig` (`max_num_seqs`, `max_num_batched_tokens`, `max_model_len`);
+`RequestHandle` (copyable, holds a `shared_ptr<OutputChannel>`:
+`next_token`/`try_next_token`/`await_completion`); `Engine`
+(`Create`/`Submit`/`Cancel`/`Start`/`Stop`/`Step`). Clients `Submit` from any
+thread into a mutex+condvar command queue (`std::variant<SubmitCmd, CancelCmd>`);
+the single engine thread drains it at each step boundary, admits, executes,
+delivers to per-request channels, and retires terminals. `OutputChannel` gained
+one additive method, `AwaitFinish()` (block until closed, return the `FinishInfo`
+without consuming items). +25 gtest cases (new `runtime_engine_test`; `runtime`
+label, no SCALAR_PASS — pure orchestration over a mock model) → **1257 green**.
+
+Non-obvious decisions:
+
+- **`Create` returns `StatusOr<unique_ptr<Engine>>`, and `Engine` is
+  non-movable/non-copyable.** It owns a `std::thread`, a mutex/condvar, and an
+  `unordered_map<RequestId, unique_ptr<Entry>>` whose `Sequence::request_`
+  borrows into the heap-pinned `Entry`, so the object must be address-stable.
+  `Create` also rejects a pool whose geometry disagrees with the model's
+  `cache_geometry()` (every forward would otherwise fail) and resolves
+  `max_model_len` (config, else `max_position_embeddings`). The private-ctor +
+  `new`-in-`unique_ptr` factory trips a `clang-analyzer` `NewDeleteLeaks` false
+  positive (the movable-temporary `make_unique<T>(T(...))` idiom can't apply to a
+  non-movable type); suppressed with a documented `NOLINTNEXTLINE`.
+
+- **`Submit` does all fallible per-sequence work on the client thread, before
+  assigning the id.** `Sequence::Create` front-loads sampler/stop validation and
+  the client needs that status synchronously; constructing the empty
+  `PagedKvCache` touches no pool block state, so the single-mutator invariant
+  (§5.3) holds. The id and `arrival_index` are assigned under the queue lock at
+  enqueue, so arrival order matches queue order. A rejected submit consumes no id
+  and enqueues nothing. Peak-length rejection uses `prompt_len + max_tokens - 1`
+  (matching `Generate`) against both `max_model_len` and the pool token capacity;
+  `prompt_len > max_num_batched_tokens` → `InvalidArgument` (the §6.4 v1 ceiling);
+  `Submit` after `Stop` → `FailedPrecondition`.
+
+- **`Step()` ships the full §9.1 loop shape with two labelled placeholders** the
+  later tickets substitute *in place*, not restructure: (a) admission is a plain
+  FCFS walk under `max_num_seqs` / the token budget / `free_blocks`
+  (`scheduler::Scheduler` replaces it in M9-T04; no preemption yet), and (b)
+  execution runs one `model::forward` **per sequence** over the existing
+  single-sequence `ForwardRequest` — the body of `engine::Generate`'s decode loop
+  lifted onto the `Sequence` (sample-before-append so penalty history keys on the
+  prior tokens, then `StopChecker::Observe`/`Finish`, then `channel->Push`). A
+  request's output is therefore bit-identical to a standalone `Generate` — a test
+  asserts exactly that against `engine::Generate` on the shared mock. The decode
+  set is snapshotted **before** admission, so a freshly admitted sequence produces
+  one token this step (its prefill) and decodes from the next. M9-T05…T08 replace
+  the per-sequence execution with the batched passes, preserving the output.
+
+- **Cancellation is handled entirely up front in T03** (`RetireCancelled`
+  extended to RUNNING as well as WAITING/PREEMPTED): the per-sequence model has no
+  in-flight batch at a step boundary, so a cancel in any live state applies
+  immediately (`kCancelled` + close + RAII block reclaim). The batched loop
+  (M9-T08) moves RUNNING-cancel handling to the end of the step, where a cancel
+  landing during the forward is applied at the next boundary (§11.1). A cancel
+  that empties the engine makes the applying `Step()` return `false` (idle), which
+  is correct — the cancel still took effect that step.
+
+- **`Stop` is abort-and-close and idempotent** (`~Engine` calls it): join the
+  thread, drain undrained submissions and close their channels `kCancelled`, then
+  close + drop every live `Sequence` (RAII frees blocks — "no leaks" holds on
+  every teardown path). Per-request failure isolation falls out of the
+  per-sequence execution for free: a `forward` or sampler fault sets the
+  sequence's `error_`, transitions it `kFailed`, closes `kFailed`, and frees its
+  blocks, while every other sequence is delivered normally (ADR-003; §11.2) — the
+  mock injects an all-NaN logits row for a poison prompt to exercise it. Graceful
+  preemption of a *decode*-time pool exhaustion is deferred to M9-T09 (in T03 it
+  surfaces as a per-request failure).
+
+- **`Entry::seq` is `unique_ptr<Sequence>`, not `optional<Sequence>`** — same
+  two-phase init (the `Request` lands first so the `Sequence` can borrow it, then
+  the sequence is built), but keeps the loop clear of
+  `bugprone-unchecked-optional-access`. Tests use the M9-T02 `Require`
+  explicit-guard idiom; the stress test (6 submitters × 40 requests, random
+  cancels, blocking consumers) ran clean across 20 repeats with `pool.stats().used
+  == 0` at the end.
+
+CMake: `engine_runtime` gains `engine.cpp` and links `engine::model` PUBLIC (the
+header names `model::Model`); no new ADR edge — `runtime → model` is already on
+the diagram. Design scheduler-runtime.md §5 gained an "as built" note. Format +
+scoped tidy clean.

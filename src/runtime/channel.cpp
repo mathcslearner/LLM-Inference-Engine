@@ -51,6 +51,15 @@ std::optional<OutputItem> OutputChannel::TryNext() {
   return item;
 }
 
+FinishInfo OutputChannel::AwaitFinish() {
+  std::unique_lock<std::mutex> lock(mu_);
+  cv_.wait(lock, [this] { return closed_; });
+  // `finish_` is set atomically with `closed_` under `mu_`, so a closed channel
+  // always carries it; the CHECK narrows the optional for the analyzer.
+  CHECK(finish_.has_value(), "a closed channel must carry a FinishInfo");
+  return *finish_;
+}
+
 bool OutputChannel::closed() const {
   const std::lock_guard<std::mutex> lock(mu_);
   return closed_;

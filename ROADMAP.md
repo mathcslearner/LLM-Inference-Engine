@@ -1112,7 +1112,7 @@ blocking and polling consumption.
 **Acceptance criteria:**
 - Unit tests: state transitions enforced (illegal transition = CHECK failure), output channel delivers in order across threads, channel close semantics on finish/cancel.
 
-### M9-T03 · Engine API & request queue
+### M9-T03 · Engine API & request queue — ✅ DONE (2026-08-19)
 `src/runtime/engine.h`: public async API — `submit(request) → RequestHandle`,
 `handle.next_token()/await_completion()`, `cancel(id)`; internal waiting queue;
 `Engine::step()` skeleton that the loop thread will drive.

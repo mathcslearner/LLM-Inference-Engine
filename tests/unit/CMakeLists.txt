@@ -267,6 +267,20 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::runtime engine::kvcache engine::tensor
   LABELS runtime)
 
+# runtime_engine_test (M9-T03): the Engine API & submission queue — a CannedModel
+# (deterministic canned logits) drives Step()-determinism, per-request output
+# equal to a standalone engine::Generate, FCFS admission under batch/token/block
+# caps, cancellation in every state, per-request failure isolation, and a
+# multi-threaded stress test (many submitters, random cancels, concurrent
+# consumers) with no deadlock, every channel closed, and no block leaks. Pure
+# orchestration over a mock model — no kernel/forced-scalar path, so no
+# SCALAR_PASS. `runtime` label.
+engine_add_tests(TREE unit SOURCES
+  runtime_engine_test.cpp
+  DEPS engine::runtime engine::engine engine::model engine::kvcache
+       engine::sampling engine::tensor
+  LABELS runtime)
+
 # qwen2_family_test (M5-T10): the Qwen-family reference path on the shared M5
 # modules — the tiny-qwen2 fixture (q/k/v biases, head_dim decoupled from
 # hidden/heads, tied embeddings) validated against its HF golden: config/loader

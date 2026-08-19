@@ -1008,13 +1008,52 @@ behind an existing subsystem):
   `ASSERT_TRUE`). `engine_runtime` links `PUBLIC core/engine/sampling/kvcache/
   tokenizer` — no new ADR edge. design §3/§4 gained an "as built" note. +25
   tests (`channel_test` 12, `request_test` 13; `runtime` label, no SCALAR_PASS)
-  → **1232 green**; format + scoped tidy clean.
+  → **1232 green**; format + scoped tidy clean. T03 engine API & request queue:
+  `src/runtime/engine.{h,cpp}` — the runtime's public async surface + the
+  single-engine-thread loop scaffold (§5, §9.1). `EngineConfig`
+  (`max_num_seqs`/`max_num_batched_tokens`/`max_model_len`); `RequestHandle`
+  (copyable `shared_ptr<OutputChannel>`: `next_token`/`try_next_token`/
+  `await_completion`); `Engine` (`Create`/`Submit`/`Cancel`/`Start`/`Stop`/
+  `Step`). Clients `Submit` from any thread into a mutex+condvar command queue
+  (`variant<SubmitCmd, CancelCmd>`); the single engine thread drains at each step
+  boundary, admits, executes, delivers to per-request channels, retires
+  terminals. **`Create` returns `StatusOr<unique_ptr<Engine>>`, `Engine`
+  non-movable/non-copyable** (owns a thread + mutex + a map of heap-pinned
+  `Entry`s the `Sequence` borrows into; the private-ctor `new`-in-`unique_ptr`
+  factory carries a documented `NewDeleteLeaks` NOLINT). **`Submit` does all
+  fallible per-sequence work (`Sequence::Create` validation) on the client thread
+  before assigning the id** under the queue lock (arrival order == queue order);
+  rejections front-loaded (empty prompt / `prompt_len > max_num_batched_tokens`
+  → InvalidArgument; peak `prompt_len + max_tokens - 1` over `max_model_len` or
+  the pool token capacity → ResourceExhausted; geometry mismatch at `Create`;
+  post-`Stop` → FailedPrecondition). **`Step()` ships the §9.1 loop shape with
+  two placeholders the later tickets swap in place**: FCFS admission under
+  `max_num_seqs`/token-budget/`free_blocks` (M9-T04 → `scheduler::Scheduler`; no
+  preemption yet) and **per-sequence execution** (one `model::forward` over the
+  single-sequence `ForwardRequest` = the `engine::Generate` decode-loop body
+  lifted onto the `Sequence`), so a request's output is bit-identical to a
+  standalone `Generate` (asserted). Decode set snapshotted before admission
+  (admitted seqs produce one token via prefill, decode next step).
+  **Cancellation handled up front in T03** (no in-flight batch at a boundary;
+  batched loop moves RUNNING-cancel to step end in M9-T08). **`Stop`
+  abort-and-close + idempotent** (`~Engine` calls it); per-request forward/sampler
+  fault → that seq `kFailed` + close + free, loop survives (ADR-003; mock injects
+  a NaN row). `OutputChannel` gained `AwaitFinish()`; `Entry::seq` is
+  `unique_ptr<Sequence>` (two-phase init, avoids the optional-access lint).
+  `engine_runtime` links `engine::model` PUBLIC (no new ADR edge). +25 tests
+  (`runtime_engine_test`; `runtime` label, no SCALAR_PASS; stress = 6 submitters
+  × 40 reqs, random cancels, clean ×20, no leaks) → **1257 green**; design §5
+  "as built"; format + scoped tidy clean.
 
-Next up: **M9-T03** (engine API & request queue) — write
-`src/runtime/engine.{h,cpp}`: the public async API (`submit`/`cancel`/handle),
-the thread-safe submission queue, `Engine::step()`, and the loop-thread
-scaffold. Conform to `docs/design/scheduler-runtime.md` §5. Acceptance (§13
-M9-T03): a mock `Model` (canned logits) drives submit/consume/cancel from
-multiple client threads; `Step()`-driven determinism; a stress test (many
-submitters, random cancels, concurrent consumers) with no deadlock and every
-channel closed. No real forward yet. Per ROADMAP M9-T03.
+Next up: **M9-T04** (scheduler v1) — write `src/scheduler/scheduler.{h,cpp}`:
+the pure decision component. Given `ScheduleInputs` (waiting/running `SeqDesc`
+spans + `PoolSnapshot` + `SchedulerConfig`) emit a `SchedulerOutput`
+(prefill+lengths, decode, preempt). FCFS admission, decode-first priority,
+block-availability + `max_num_seqs`/token-budget checks, latest-arrived
+preemption — a `core`-only leaf, no engine/pool/model (ADR-002 rule 4). Conform
+to `docs/design/scheduler-runtime.md` §6. Acceptance (§13 M9-T04): table-driven
+tests — admission blocked when blocks insufficient, token budget respected
+across mixed prefill sizes, decode starvation impossible, preemption picks the
+latest-arrived, FCFS order preserved, `max_num_seqs` capped. The M9-T03 engine's
+placeholder admission (`engine.cpp` `AdmitWaiting`) is then replaced by a
+`Scheduler::schedule` call. Per ROADMAP M9-T04.

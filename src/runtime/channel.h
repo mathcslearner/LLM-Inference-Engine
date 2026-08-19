@@ -68,6 +68,13 @@ class OutputChannel {
   // checks.
   [[nodiscard]] std::optional<OutputItem> TryNext();
 
+  // Block until the channel is closed and return its finish descriptor. Unlike
+  // `Next`, this does not consume queued items — a consumer may still drain
+  // them via `Next`/`TryNext` afterward. The seam `RequestHandle::
+  // await_completion` (M9-T03) uses to wait for a terminal state without
+  // pulling tokens.
+  [[nodiscard]] FinishInfo AwaitFinish();
+
   // --- status --------------------------------------------------------------
 
   [[nodiscard]] bool closed() const;
