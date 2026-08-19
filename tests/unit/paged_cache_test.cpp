@@ -32,7 +32,6 @@ namespace {
 namespace ops = engine::tensor::ops;
 using engine::core::IsInvalidArgument;
 using engine::core::IsResourceExhausted;
-using engine::core::IsUnimplemented;
 using engine::core::StatusOr;
 using engine::kvcache::BlockPool;
 using engine::kvcache::CacheGeometry;
@@ -143,6 +142,34 @@ void VerifyLayer(const PagedKvCache& cache, const CacheGeometry& geom,
         EXPECT_EQ(pv.v_slab[base + e], Expect(layer, pos, h, e, 1))
             << "V layer " << layer << " pos " << pos << " h " << h << " e "
             << e;
+      }
+    }
+  }
+}
+
+// Check `cache.view(layer)` (the contiguous gather, M8-T06) returns a
+// head-major [Hkv, expected_len, d] snapshot whose every element equals the
+// appended value — for both K and V.
+void VerifyView(const PagedKvCache& cache, const CacheGeometry& geom, int layer,
+                std::int64_t expected_len) {
+  const engine::kvcache::KvView kv = Unwrap(cache.view(layer));
+  ASSERT_EQ(kv.k.shape().rank(), 3);
+  ASSERT_EQ(kv.k.shape().dim(0), geom.num_kv_heads);
+  ASSERT_EQ(kv.k.shape().dim(1), expected_len);
+  ASSERT_EQ(kv.k.shape().dim(2), geom.head_dim);
+  ASSERT_TRUE(kv.k.is_contiguous());
+  ASSERT_TRUE(kv.v.is_contiguous());
+  const float* kp = kv.k.data_ptr<float>();
+  const float* vp = kv.v.data_ptr<float>();
+  const std::int64_t d = geom.head_dim;
+  for (std::int64_t h = 0; h < geom.num_kv_heads; ++h) {
+    for (std::int64_t pos = 0; pos < expected_len; ++pos) {
+      for (std::int64_t e = 0; e < d; ++e) {
+        const std::int64_t idx = (((h * expected_len) + pos) * d) + e;
+        EXPECT_EQ(kp[idx], Expect(layer, pos, h, e, 0))
+            << "K layer " << layer << " pos " << pos << " h " << h;
+        EXPECT_EQ(vp[idx], Expect(layer, pos, h, e, 1))
+            << "V layer " << layer << " pos " << pos << " h " << h;
       }
     }
   }
@@ -435,12 +462,106 @@ TEST(PagedKvCacheTest, TruncateMidForwardResetsProtocol) {
 // paged_view / view surfaces.
 // ===========================================================================
 
-TEST(PagedKvCacheTest, ViewIsUnimplementedUntilT06) {
+// ===========================================================================
+// view(layer): the contiguous gather (M8-T06, GatherLayerKV) — the prefill read
+// path. Returns a fresh head-major [Hkv, len, d] snapshot of the committed
+// history.
+// ===========================================================================
+
+TEST(PagedKvCacheTest, ViewGathersCommittedHistory) {
+  const CacheGeometry geom = TinyGeom();
+  BlockPool pool = MakePool(geom, 8);
+  PagedKvCache cache(&pool);
+  // Cross several block boundaries so the gather walks a multi-block table.
+  AppendAllLayers(cache, geom, 0, 20);  // bs=8 -> 3 blocks
+  VerifyView(cache, geom, 0, 20);
+  VerifyView(cache, geom, 1, 20);
+}
+
+TEST(PagedKvCacheTest, ViewMatchesPagedViewElementwise) {
+  const CacheGeometry geom = TinyGeom();
+  BlockPool pool = MakePool(geom, 8);
+  PagedKvCache cache(&pool);
+  AppendAllLayers(cache, geom, 0, 11);  // partial tail block
+  // Both VerifyView and VerifyLayer check the same Expect() values — view via
+  // the gather, paged_view via the raw slabs — so agreement is transitive.
+  VerifyView(cache, geom, 0, 11);
+  VerifyLayer(cache, geom, 0, 11);
+}
+
+TEST(PagedKvCacheTest, ViewOnEmptyCacheIsZeroLength) {
+  const CacheGeometry geom = TinyGeom();
+  BlockPool pool = MakePool(geom, 8);
+  const PagedKvCache cache(&pool);
+  const engine::kvcache::KvView kv = Unwrap(cache.view(0));
+  EXPECT_EQ(kv.k.shape().dim(0), geom.num_kv_heads);
+  EXPECT_EQ(kv.k.shape().dim(1), 0);
+  EXPECT_EQ(kv.k.shape().dim(2), geom.head_dim);
+}
+
+TEST(PagedKvCacheTest, ViewRejectsBadLayer) {
+  const CacheGeometry geom = TinyGeom();
+  BlockPool pool = MakePool(geom, 8);
+  const PagedKvCache cache(&pool);
+  EXPECT_TRUE(IsInvalidArgument(cache.view(-1).status()));
+  EXPECT_TRUE(IsInvalidArgument(cache.view(geom.num_layers).status()));
+}
+
+// A view is a fresh snapshot: a later append does not mutate a view taken
+// earlier (it owns its storage, not a slab alias).
+TEST(PagedKvCacheTest, ViewIsAFreshSnapshot) {
   const CacheGeometry geom = TinyGeom();
   BlockPool pool = MakePool(geom, 8);
   PagedKvCache cache(&pool);
   AppendAllLayers(cache, geom, 0, 4);
-  EXPECT_TRUE(IsUnimplemented(cache.view(0).status()));
+  const engine::kvcache::KvView snap = Unwrap(cache.view(0));
+  ASSERT_EQ(snap.k.shape().dim(1), 4);
+  // Append more; the earlier snapshot's length and bytes are unchanged.
+  AppendAllLayers(cache, geom, 4, 4);
+  EXPECT_EQ(snap.k.shape().dim(1), 4);
+  const float* kp = snap.k.data_ptr<float>();
+  const std::int64_t d = geom.head_dim;
+  for (std::int64_t h = 0; h < geom.num_kv_heads; ++h) {
+    for (std::int64_t pos = 0; pos < 4; ++pos) {
+      for (std::int64_t e = 0; e < d; ++e) {
+        const std::int64_t idx = (((h * 4) + pos) * d) + e;
+        EXPECT_EQ(kp[idx], Expect(0, pos, h, e, 0));
+      }
+    }
+  }
+}
+
+// Mid-forward, a layer whose K/V has not been appended yet exposes only its
+// previously committed length — matching SimpleKvCache's per-layer fill (so a
+// view never returns unwritten slot bytes).
+TEST(PagedKvCacheTest, ViewMidForwardUsesPerLayerVisibleLength) {
+  const CacheGeometry geom = TinyGeom();
+  BlockPool pool = MakePool(geom, 8);
+  PagedKvCache cache(&pool);
+  AppendAllLayers(cache, geom, 0, 5);  // both layers committed at 5
+  // Open a new forward: append layer 0 only (positions 5..7).
+  ASSERT_TRUE(
+      cache.append(0, MakeKV(0, 5, 3, geom, 0), MakeKV(0, 5, 3, geom, 1)).ok());
+  // Layer 0 sees the new tokens (8), layer 1 still sees the committed 5.
+  EXPECT_EQ(Unwrap(cache.view(0)).k.shape().dim(1), 8);
+  EXPECT_EQ(Unwrap(cache.view(1)).k.shape().dim(1), 5);
+  VerifyView(cache, geom, 0, 8);
+  VerifyView(cache, geom, 1, 5);
+  // Complete the forward; both layers now see 8.
+  ASSERT_TRUE(
+      cache.append(1, MakeKV(1, 5, 3, geom, 0), MakeKV(1, 5, 3, geom, 1)).ok());
+  VerifyView(cache, geom, 0, 8);
+  VerifyView(cache, geom, 1, 8);
+}
+
+TEST(PagedKvCacheTest, ViewAfterTruncate) {
+  const CacheGeometry geom = TinyGeom();
+  BlockPool pool = MakePool(geom, 8);
+  PagedKvCache cache(&pool);
+  AppendAllLayers(cache, geom, 0, 20);
+  ASSERT_TRUE(cache.truncate(6).ok());
+  VerifyView(cache, geom, 0, 6);
+  VerifyView(cache, geom, 1, 6);
 }
 
 TEST(PagedKvCacheTest, PagedViewRejectsBadLayer) {

@@ -857,15 +857,43 @@ behind an existing subsystem):
   whole-step comparison is T07's job. **1133 → 1149 green** (+16). design
   paged-kv-cache.md §9.2 "as built" + optimized-cpu-execution.md §8 landed-note;
   format + scoped tidy clean (attention_impl.h header edit → attention TUs/tests/
-  bench swept; avx2 one-liner hand-reviewed, CI-proven).
+  bench swept; avx2 one-liner hand-reviewed, CI-proven). T06 paged prefill
+  attention path: `PagedKvCache::view(layer)` (Unimplemented since T04) now
+  **gathers** the layer's committed `[Hkv, len, d]` history — the layout the
+  **unchanged** M6 `PrefillAttentionF32` reads — so prefill/prefill-continuation
+  through a `PagedKvCache` work on **both backends with zero consumer change**
+  (`Attention::forward` and `OptimizedModel::forward` already do append→view→
+  attention over a `KvCache&`). New `src/kernels/kv_gather.{h,cpp}`
+  (`KvGatherF32`, the `KvScatterF32` mirror: one `memcpy` of `rows·d` floats per
+  (head, block), `rows=min(bs, len−b·bs)` clipping the tail; **Class E** →
+  single scalar TU, no per-ISA variant, no SCALAR_PASS) and
+  `src/kvcache/paged_gather.{h,cpp}` (`GatherLayerKV` — validate, `Tensor::empty`
+  outputs, call the kernel over the existing PRIVATE `kvcache → kernels` edge; no
+  new link edge). `view` exposes a **per-layer visible length** (mid-forward, a
+  not-yet-appended layer sees only its committed history — reproduces
+  `SimpleKvCache::view`'s per-layer fill, one int compare). The single-layer
+  `attention_test` golden stays on SimpleKvCache (its layer-1-in-isolation
+  appends violate the paged layer-0-first protocol by design); reference-backend
+  paged coverage lives in `model_test`. +19 tests (**1149 → 1168 green**):
+  `kv_gather_test` (kernel vs a reverse-permuted/poisoned simulated layout +
+  scatter→gather round trip), `paged_cache_test` (view gathers, per-layer
+  mid-forward length, fresh-snapshot, truncate), `optimized_model_test`
+  (**paged prefill-continuation bit-exact vs SimpleKvCache**, 1.8e-7 vs
+  reference; paged KV invariant; paged greedy), `model_test` (reference-backend
+  paged continuation + KV invariant). No BASELINES entry (no perf claim; decode
+  still routes through `view()` on a paged cache until T07 swaps in `paged_view`).
+  design §2 table + §9.3 "as built"; format + scoped tidy clean.
 
-Next up: **M8-T06** (`paged_gather` + paged prefill path): implement
-`PagedKvCache::view(layer)` (Unimplemented since T04) as the contiguous gather
-that walks the block table and copies each block's `[Hkv, bs, d]` tile (clipping
-the last block to `length % bs`) into a fresh `[Hkv, length, d]` head-major
-tensor — the shape the **unchanged** M6 `PrefillAttentionF32` reads. Prefill
-(T > 1, incl. prefill-continuation with `P > 0` cached tokens) gathers once per
-layer and calls the M6 blocked prefill kernel; a block-walking prefill kernel is
-deferred to M12. Per paged-kv-cache.md §9.3. Acceptance: the gather independently
-unit-tested vs a simulated layout, and prefill-with-existing-paged-cache matches
-the reference backend (prefill-continuation).
+Next up: **M8-T07** (engine integration): swap the paged cache into the
+single-request generation path behind the M5 `KvCache` interface. The paged
+cache already drives both backends via `view` (T06); T07's job is (1) route the
+optimized decode step through the zero-copy `paged_view` fast path (§8.3) instead
+of `view()`'s full gather — trying `paged_view` first, falling back to `view()` +
+the contiguous decode kernel on `Unimplemented` so `SimpleKvCache` keeps working;
+(2) wire `--kv-cache-memory` capacity config (absolute-or-fraction-of-host-RAM,
+the §5 blocks-per-pool formula + a host-RAM detection helper) and
+`--kv-block-size` into `engine generate`; (3) expose cache stats (blocks
+used/free/utilization) and log them. Acceptance: tiny-fixture greedy output
+**identical** to the pre-paging engine on both fixtures; 1B-model generation
+works with memory stats logged; `bench_generate` decode throughput within 10% of
+the M6 baseline (recorded). Per paged-kv-cache.md §10.

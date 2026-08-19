@@ -2419,3 +2419,88 @@ microbenchmark.
 clean (attention_impl.h is a header edit → its includer set — the attention TUs,
 attention_kernel/decode_attention_kernel tests, the bench — was tidy-swept;
 avx2/attention.cpp is not in the arm64 compile DB, its one-liner hand-reviewed).
+
+### M8-T06 — Paged prefill attention path (2026-08-19)
+
+**What landed.** The paged cache's read side — `PagedKvCache::view` (stubbed
+`Unimplemented` since T04) now gathers the layer's committed history into a
+contiguous head-major `[Hkv, len, d]` tensor, the layout the **unchanged** M6
+`PrefillAttentionF32` reads. With that one method wired, prefill and
+prefill-continuation through a `PagedKvCache` work on **both backends with zero
+consumer change**: `Attention::forward` (reference) and `OptimizedModel::forward`
+(optimized) already do `append(layer) → view(layer) → Prefill/DecodeAttention`
+over a `KvCache&`. Two new files:
+
+- `src/kernels/kv_gather.{h,cpp}` — `KvGatherF32(k_slab, v_slab, block_table, bs,
+  length, Hkv, d, out_k, out_v)`, the exact mirror of `KvScatterF32`: one
+  `memcpy` of `rows·d` floats per (head, logical block), `rows = min(bs, length −
+  b·bs)` clipping the partial tail block, `parallel_for` over `Hkv·⌈length/bs⌉`
+  disjoint tiles. **Class E** (pure fp32→fp32 copy) — bit-identical across ISAs
+  and thread counts, so a **single scalar TU** ships (no per-ISA variant, no
+  dispatch table, no `SCALAR_PASS`), exactly like `kv_scatter.cpp` and the M6-T06
+  embedding gather.
+- `src/kvcache/paged_gather.{h,cpp}` — `GatherLayerKV(pool, table, layer, length)
+  → StatusOr<KvView>`, the thin `kvcache` wrapper: front-loaded validation
+  (layer range, `length ∈ [0, num_tokens]`), allocates the two `[Hkv, length, d]`
+  outputs with `Tensor::empty` (every element overwritten — no zero-fill), calls
+  `KvGatherF32`. Header stays kernels-free → the second call over the existing
+  PRIVATE `kvcache → kernels` edge (after `KvScatterF32`), so no ADR change and no
+  new link edge.
+
+**Non-obvious decisions.**
+
+- **Kernel in `kernels`, not inline in `kvcache`.** The tile copy is a kernel so
+  the threading (`parallel_for`) stays in the layer-1 module — `kvcache` never
+  links `parallel` — and the physical layout stays `kvcache`-private behind a
+  raw-pointer signature (M12/M13 can change it without touching the wrapper).
+- **`view` exposes a per-layer visible length.** Layer 0 grows the table (bumping
+  `length()`) while layers `≥ next_layer_` have their new slots allocated but
+  unwritten mid-forward. So `view(layer)` gathers only the layer's *committed*
+  length: `length()` when the forward is complete (`next_layer_ == 0`) or `layer <
+  next_layer_`, else `length() − pending`. This reproduces `SimpleKvCache::view`'s
+  per-layer-fill semantics bit-for-bit — a not-yet-appended layer sees the prior
+  committed history, never stale slot bytes — for one integer compare. Real
+  consumers always `view(layer)` right after `append(layer)`, so they always see
+  the full length; the rule only matters for tests that view an un-appended layer.
+- **Fresh tensor, not a workspace slot.** The `KvView` owns its storage, so the
+  gather allocates per call; a workspace-resident prefill gather buffer is a
+  T07/M12 option (decode never gathers — it reads `paged_view` zero-copy, §8.3).
+- **The reference-backend single-layer attention golden test is not paged.** The
+  `attention_test` `MatchesFixtureGolden` cases append to one layer in isolation
+  (some at layer 1), which the paged layer-0-first protocol rejects by design.
+  Reference-backend paged coverage lives in `model_test.cpp` instead (full model,
+  layers appended in order — the protocol's natural shape).
+
+**Tests (+19 → 1149 → 1168 ctest green).**
+
+- `kv_gather_test` (kernels, no SCALAR_PASS): the kernel vs an independently
+  simulated paged layout — a **reverse-permuted** block table with **poisoned**
+  unused/tail slots (a stray read returns poison) — across `bs ∈ {8,16,32,64}` ×
+  lengths {1, bs−1, bs, bs+1, 2bs, 3bs+5} × Hkv {1,2,4} × d {18,24,64}, empty
+  length (null pointers, proven no-op), thread-count invariance, exact NaN/−0.0/
+  denormal bit patterns, and a **scatter→gather round trip** (`KvScatterF32` with
+  a permuted mapping then gather == identity) that proves the M8-T04 write and
+  M8-T06 read kernels against each other.
+- `paged_cache_test`: replaced the `ViewIsUnimplementedUntilT06` stub with view
+  gathers matching `Expect()` (and agreeing with `paged_view`), empty-cache
+  zero-length view, bad-layer rejection, a fresh-snapshot check (a later append
+  does not mutate an earlier view), the **per-layer mid-forward visible length**,
+  and view-after-truncate.
+- `optimized_model_test` (model, SCALAR_PASS): **paged prefill-continuation**
+  (chunk A then chunk B, `P > 0`) on the optimized backend is **bit-exact** to the
+  same two-chunk run on `SimpleKvCache` (max_abs_diff 0 — identical K/V bytes into
+  identical kernels) and within tolerance of a one-shot reference-backend full
+  prefill (**1.8e-7**), both fixtures; the **KV invariant** (token-by-token ==
+  full prefill) bit-exact through the paged cache; a paged greedy loop matching
+  the simple-cache greedy (transitively `generate.json`).
+- `model_test` (model): **reference-backend** paged prefill-continuation
+  bit-exact vs simple + reproducing the full-prefill last-row logit, and the paged
+  KV invariant.
+
+**Docs.** paged-kv-cache.md §2 table (kv_gather + paged_gather rows) and §9.3
+"as built" block. No BASELINES entry (no perf claim this ticket; decode still
+routes through `view()` on a paged cache until T07 swaps in `paged_view`).
+Format + scoped tidy clean (paged_cache.h header edit → its includer set —
+paged_cache.cpp, paged_gather.cpp, paged_cache_test, paged_decode_attention_
+kernel_test, optimized_model_test, model_test — was tidy-swept; kv_cache.h
+untouched, so no full-tree sweep).

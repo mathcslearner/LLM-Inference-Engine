@@ -98,7 +98,8 @@ New files, all under existing modules:
 | `src/kvcache/paged_cache.{h,cpp}` | kvcache | M8-T04/T07 | `PagedKvCache : KvCache` — the paged implementation of the M5 interface |
 | `src/kernels/kv_scatter.{h,cpp}` | kernels | M8-T04 | `KvScatterF32` — write new K/V into paged storage given a slot mapping |
 | `src/kernels/paged_attention.{h,cpp}` (+ per-ISA TUs) | kernels | M8-T05 | `PagedDecodeAttentionF32` — decode reading K/V through a block table |
-| `src/kvcache/paged_gather.{h,cpp}` | kvcache | M8-T06 | Gather paged K/V for one layer → contiguous workspace for M6 prefill |
+| `src/kernels/kv_gather.{h,cpp}` | kernels | M8-T06 | `KvGatherF32` — read paged K/V into a contiguous head-major slab (the scatter's mirror) |
+| `src/kvcache/paged_gather.{h,cpp}` | kvcache | M8-T06 | `GatherLayerKV` — one layer's paged K/V → contiguous `KvView` for M6 prefill (calls `KvGatherF32`) |
 
 **Layering.** `kvcache` is a layer-2 domain module (ADR-002 §layers). Today it
 links only `tensor`/`memory`/`core`. M8-T04 adds a **downward** edge
@@ -839,6 +840,38 @@ gathers once per layer and calls the **unchanged** M6 blocked prefill kernel.
 Simple and correct; a block-walking prefill kernel is M12. The gather is
 independently unit-tested (M8-T06 acceptance) and, fed to prefill, matches the
 reference backend on prefill-with-existing-cache.
+
+**M8-T06 implementation notes** (as built — additive clarifications of §9.3/§8,
+no divergence):
+
+- **The copy is a layout-agnostic kernel, not inline `kvcache` code.** The tile
+  copy lives in the layer-1 kernel `KvGatherF32(k_slab, v_slab, block_table, bs,
+  length, Hkv, d, out_k, out_v)` (`src/kernels/kv_gather.h`) — the exact mirror
+  of `KvScatterF32`. `GatherLayerKV` (`src/kvcache/paged_gather.h`) is the thin
+  `kvcache` wrapper: it validates, allocates the two `[Hkv, length, d]` outputs
+  with `Tensor::empty` (every element is overwritten — no zero-fill), and calls
+  the kernel over the same PRIVATE `kvcache → kernels` edge as the scatter. This
+  keeps `parallel` out of `kvcache` (the kernel threads over `(head, block)`
+  tiles) and lets M12/M13 change the physical layout without touching the
+  wrapper. Per-forward work unit: one `memcpy` of `rows·d` floats per (head,
+  block), `rows = min(bs, length − b·bs)`; **Class E (bit-exact across ISAs and
+  thread counts)** — a single scalar TU ships, no per-ISA variant, no
+  `SCALAR_PASS` (like the scatter and the embedding gather).
+- **Fresh tensor, not a workspace slot.** The gather owns its output storage (the
+  `KvView` contract), so it allocates per call rather than reusing an
+  `OptimizedModel::Workspace` slot. A workspace-resident gather buffer (to make
+  prefill allocation-free) is a T07/M12 option, not needed for correctness; decode
+  never gathers (it reads through `paged_view`, §8.3).
+- **`PagedKvCache::view` exposes a per-layer visible length.** Because layer 0
+  grows the table (bumping `length()`) while layers `≥ next_layer_` have their new
+  slots allocated but unwritten mid-forward, `view(layer)` gathers only the
+  layer's *committed* length — `length()` when the forward is complete or `layer <
+  next_layer_`, else `length() − pending`. This reproduces `SimpleKvCache::view`'s
+  per-layer-fill semantics exactly (a not-yet-appended layer sees the prior
+  committed history, never stale slot bytes) and costs one integer compare. The
+  real consumers always call `view(layer)` right after `append(layer)`, so they
+  always see the full committed length; the rule only matters for tests that view
+  an un-appended layer.
 
 ### 9.4 Batched shape (reserved for M9)
 

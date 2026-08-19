@@ -3,7 +3,9 @@
 #include "common/paths.h"
 #include "core/status.h"
 #include "cpu/ops.h"
+#include "kvcache/block_pool.h"
 #include "kvcache/kv_cache.h"
+#include "kvcache/paged_cache.h"
 #include "kvcache/simple_cache.h"
 #include "model/loader.h"
 #include "model/modules.h"
@@ -39,7 +41,9 @@ namespace ops = engine::tensor::ops;
 using engine::core::IsInvalidArgument;
 using engine::core::IsResourceExhausted;
 using engine::core::StatusOr;
+using engine::kvcache::BlockPool;
 using engine::kvcache::CacheGeometry;
+using engine::kvcache::PagedKvCache;
 using engine::kvcache::SimpleKvCache;
 using engine::model::ActivationEvent;
 using engine::model::ActivationHook;
@@ -476,6 +480,108 @@ TEST(ReferenceModelTest, KvInvariantChunkedPrefillAndTruncate) {
        .cache = &chunk,
        .logits_mode = LogitsMode::kLast}));
   EXPECT_TRUE(Unwrap(ops::allclose(redo, full_last, 0.0, 0.0)).allclose);
+}
+
+// ===========================================================================
+// Paged KV cache (M8-T06): the reference backend drives a PagedKvCache through
+// the KvCache interface — Attention::forward's append + view (the contiguous
+// gather) feed the same cpu::attention op. "Prefill with existing paged cache
+// content matches the reference backend."
+// ===========================================================================
+
+// A block pool sized for the tiny model (bs=8 so the ~8-12-token prompt
+// straddles several block boundaries; 8 blocks = 64 token slots).
+[[nodiscard]] BlockPool FreshPool(int block_size = 8,
+                                  std::int64_t num_blocks = 8) {
+  auto p = BlockPool::Create(ModelGeometry(), block_size, num_blocks, nullptr);
+  EXPECT_TRUE(p.ok()) << p.status().ToString();
+  return *std::move(p);
+}
+
+// Prefill-continuation (P>0) through a paged cache is bit-exact to the same
+// two-chunk run on a simple cache, and reproduces the one-shot full-prefill
+// last-row logit.
+TEST(ReferenceModelTest, PagedPrefillContinuationMatchesSimple) {
+  const std::unique_ptr<ReferenceModel> model = BuildTiny();
+  const std::vector<std::int32_t> ids = PromptIds();
+  const auto t = static_cast<std::int64_t>(ids.size());
+  const std::vector<std::int32_t> pos = Iota(t);
+  const std::int64_t split = t / 2;
+
+  // One-shot full prefill (simple) → the reference last-row logit.
+  SimpleKvCache full = Unwrap(SimpleKvCache::Create(ModelGeometry(), kMaxPos));
+  const Tensor full_logits =
+      Unwrap(model->forward({.token_ids = ids,
+                             .positions = pos,
+                             .cache = &full,
+                             .logits_mode = LogitsMode::kAll}));
+  const Tensor full_last = Unwrap(full_logits.slice(0, t - 1, t));
+
+  const auto two_chunks = [&](engine::kvcache::KvCache& cache) {
+    EXPECT_TRUE(model
+                    ->forward({.token_ids = std::span(
+                                   ids.data(), static_cast<std::size_t>(split)),
+                               .positions = std::span(
+                                   pos.data(), static_cast<std::size_t>(split)),
+                               .cache = &cache,
+                               .logits_mode = LogitsMode::kAll})
+                    .ok());
+    return Unwrap(model->forward(
+        {.token_ids =
+             std::span(ids.data() + split, static_cast<std::size_t>(t - split)),
+         .positions =
+             std::span(pos.data() + split, static_cast<std::size_t>(t - split)),
+         .cache = &cache,
+         .logits_mode = LogitsMode::kLast}));
+  };
+
+  BlockPool pool = FreshPool();
+  PagedKvCache paged(&pool);
+  const Tensor paged_logits = two_chunks(paged);
+  EXPECT_EQ(paged.length(), t);
+
+  SimpleKvCache simple =
+      Unwrap(SimpleKvCache::Create(ModelGeometry(), kMaxPos));
+  const Tensor simple_logits = two_chunks(simple);
+
+  // Bit-exact vs the same run on a simple cache.
+  EXPECT_TRUE(
+      Unwrap(ops::allclose(paged_logits, simple_logits, 0.0, 0.0)).allclose);
+  // And reproduces the one-shot full-prefill last-row logit.
+  EXPECT_TRUE(
+      Unwrap(ops::allclose(paged_logits, full_last, 0.0, 0.0)).allclose);
+}
+
+// The KV invariant through the paged reference path: token-by-token decode
+// reproduces the full prefill, bit-exact.
+TEST(ReferenceModelTest, PagedKvInvariantTokenByTokenMatchesFullPrefill) {
+  const std::unique_ptr<ReferenceModel> model = BuildTiny();
+  const std::vector<std::int32_t> ids = PromptIds();
+  const auto t = static_cast<std::int64_t>(ids.size());
+  const std::vector<std::int32_t> pos = Iota(t);
+
+  SimpleKvCache full = Unwrap(SimpleKvCache::Create(ModelGeometry(), kMaxPos));
+  const Tensor full_logits =
+      Unwrap(model->forward({.token_ids = ids,
+                             .positions = pos,
+                             .cache = &full,
+                             .logits_mode = LogitsMode::kAll}));
+
+  BlockPool pool = FreshPool();
+  PagedKvCache step(&pool);
+  for (std::int64_t k = 0; k < t; ++k) {
+    const std::span<const std::int32_t> one_id(ids.data() + k, 1);
+    const std::span<const std::int32_t> one_pos(pos.data() + k, 1);
+    const Tensor step_logits =
+        Unwrap(model->forward({.token_ids = one_id,
+                               .positions = one_pos,
+                               .cache = &step,
+                               .logits_mode = LogitsMode::kLast}));
+    const Tensor full_row = Unwrap(full_logits.slice(0, k, k + 1));
+    EXPECT_TRUE(Unwrap(ops::allclose(step_logits, full_row, 0.0, 0.0)).allclose)
+        << "step " << k;
+  }
+  EXPECT_EQ(step.length(), t);
 }
 
 // ===========================================================================

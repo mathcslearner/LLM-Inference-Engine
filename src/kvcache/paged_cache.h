@@ -31,8 +31,11 @@
 // (kernels/kv_scatter.h) — the paged replacement for v0's transpose-copy.
 //
 // `view(layer)` (the contiguous gather that feeds M6 prefill) lands with the
-// paged gather in **M8-T06**; until then it returns `Unimplemented`. The decode
-// path does not use it — it reads through `paged_view` (§8.3) with zero copy.
+// paged gather in **M8-T06** (`GatherLayerKV`, paged_gather.h): it walks the
+// block table and copies the layer's committed history into a fresh
+// head-major `[Hkv, len, d]` tensor — the layout the unchanged M6
+// `PrefillAttentionF32` reads. The decode path does not use it — it reads
+// through `paged_view` (§8.3) with zero copy.
 //
 // Layering (ADR-002): `kvcache` links `tensor`/`memory`/`core`, and — new in
 // M8-T04 — the downward `kvcache → kernels` edge (the scatter kernel). This
@@ -87,9 +90,12 @@ class PagedKvCache final : public KvCache {
   [[nodiscard]] core::Status append(int layer, const tensor::Tensor& k,
                                     const tensor::Tensor& v) override;
 
-  // Contiguous gather of `layer`'s `[Hkv, len, d]` history — the M6 prefill
-  // read path. Lands with the paged gather in M8-T06; returns `Unimplemented`
-  // here.
+  // Contiguous gather of `layer`'s committed `[Hkv, len, d]` history — the M6
+  // prefill read path (M8-T06, `GatherLayerKV`). Mirrors
+  // `SimpleKvCache::view`'s observable semantics: a layer whose K/V for the
+  // in-progress forward has not been appended yet exposes only its previously
+  // committed length (its new slots are allocated but unwritten), so `view`
+  // never returns stale bytes. Out-of-range `layer` → `InvalidArgument`.
   [[nodiscard]] core::StatusOr<KvView> view(int layer) const override;
 
   // Zero-copy paged view of `layer` (the decode fast path, §8.3). Out-of-range

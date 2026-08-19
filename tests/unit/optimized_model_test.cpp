@@ -3,7 +3,9 @@
 #include "common/paths.h"
 #include "core/status.h"
 #include "engine/generator.h"
+#include "kvcache/block_pool.h"
 #include "kvcache/kv_cache.h"
+#include "kvcache/paged_cache.h"
 #include "kvcache/simple_cache.h"
 #include "model/loader.h"
 #include "model/model.h"
@@ -53,8 +55,10 @@ using engine::core::IsResourceExhausted;
 using engine::core::StatusOr;
 using engine::engine::Generate;
 using engine::engine::GenerateOptions;
+using engine::kvcache::BlockPool;
 using engine::kvcache::CacheGeometry;
 using engine::kvcache::KvCache;
+using engine::kvcache::PagedKvCache;
 using engine::kvcache::SimpleKvCache;
 using engine::model::ActivationEvent;
 using engine::model::ActivationHook;
@@ -116,6 +120,14 @@ void Unwrap0(const engine::core::Status& status) {
 [[nodiscard]] SimpleKvCache FreshCache(const Model& model,
                                        std::int64_t capacity = 128) {
   return Unwrap(SimpleKvCache::Create(model.cache_geometry(), capacity));
+}
+
+// A block pool sized for `model`'s geometry (bs=8 so tiny-fixture prompts of
+// ~8-12 tokens straddle several block boundaries; 8 blocks = 64 token slots).
+[[nodiscard]] BlockPool FreshPool(const Model& model, int block_size = 8,
+                                  std::int64_t num_blocks = 8) {
+  return Unwrap(BlockPool::Create(model.cache_geometry(), block_size,
+                                  num_blocks, nullptr));
 }
 
 [[nodiscard]] std::vector<std::int32_t> Iota(std::int64_t n) {
@@ -475,6 +487,135 @@ TEST(OptimizedModelTest, KvInvariantChunkedPrefill) {
   const ops::AllCloseResult r =
       Unwrap(ops::allclose(logits_chunked, logits_full, 0.0, 0.0));
   EXPECT_TRUE(r.allclose) << r.Summary();
+}
+
+// ===========================================================================
+// Paged KV cache (M8-T06): the optimized backend drives a PagedKvCache through
+// the unchanged KvCache interface — append + view (the contiguous gather) feed
+// the same M6 prefill/decode kernels. These are the "prefill with existing
+// paged cache matches the reference backend" acceptance tests.
+// ===========================================================================
+
+// Prefill-continuation (P>0): a first prefill chunk fills the paged cache, then
+// a second chunk continues from it. The paged run must be bit-exact to the same
+// two-chunk run on SimpleKvCache (same K/V bytes into the same kernels), and
+// within tolerance of a one-shot reference-backend full prefill.
+TEST(OptimizedModelTest, PagedPrefillContinuationMatchesSimpleAndReference) {
+  for (const char* fixture : {kLlama, kQwen}) {
+    SCOPED_TRACE(fixture);
+    std::unique_ptr<Model> opt = Optimized(fixture);
+    std::unique_ptr<Model> ref = Reference(fixture);
+    const std::vector<std::int32_t> ids = PromptIds(fixture);
+    const auto t = static_cast<std::int64_t>(ids.size());
+    ASSERT_GE(t, 4);
+    const std::int64_t split = t / 2;
+
+    // Two-chunk continuation on a paged cache and on a simple cache.
+    const auto run_two_chunks = [&](Model& model, KvCache& cache) {
+      {
+        const std::span<const std::int32_t> a(ids.data(),
+                                              static_cast<std::size_t>(split));
+        const std::vector<std::int32_t> pa = Iota(split);
+        const ForwardRequest req{.token_ids = a,
+                                 .positions = pa,
+                                 .cache = &cache,
+                                 .logits_mode = LogitsMode::kLast,
+                                 .hook = nullptr};
+        EXPECT_TRUE(model.forward(req).ok());
+      }
+      const std::span<const std::int32_t> b(
+          ids.data() + split, static_cast<std::size_t>(t - split));
+      std::vector<std::int32_t> pb(static_cast<std::size_t>(t - split));
+      std::iota(pb.begin(), pb.end(), static_cast<std::int32_t>(split));
+      const ForwardRequest req{.token_ids = b,
+                               .positions = pb,
+                               .cache = &cache,
+                               .logits_mode = LogitsMode::kLast,
+                               .hook = nullptr};
+      return Unwrap(model.forward(req));
+    };
+
+    BlockPool pool = FreshPool(*opt);
+    PagedKvCache paged(&pool);
+    const Tensor logits_paged = run_two_chunks(*opt, paged);
+    EXPECT_EQ(paged.length(), t);
+
+    SimpleKvCache simple = FreshCache(*opt);
+    const Tensor logits_simple = run_two_chunks(*opt, simple);
+
+    // Bit-exact vs the same run on SimpleKvCache: identical K/V bytes into
+    // identical kernels (the gather reproduces the contiguous layout).
+    const ops::AllCloseResult rs =
+        Unwrap(ops::allclose(logits_paged, logits_simple, 0.0, 0.0));
+    EXPECT_TRUE(rs.allclose) << rs.Summary();
+
+    // Within tolerance vs a one-shot full prefill on the reference backend.
+    SimpleKvCache ref_cache = FreshCache(*ref);
+    const Tensor logits_ref =
+        ForwardOnce(*ref, ids, LogitsMode::kLast, ref_cache);
+    const ops::AllCloseResult rr =
+        Unwrap(ops::allclose(logits_paged, logits_ref, kRtol, kAtol));
+    EXPECT_TRUE(rr.allclose) << rr.Summary();
+    std::cerr << "[paged] " << fixture
+              << " continuation vs simple max_abs_diff=" << rs.max_abs_diff
+              << " vs reference max_abs_diff=" << rr.max_abs_diff << "\n";
+  }
+}
+
+// The KV invariant through the paged cache: token-by-token decode reproduces a
+// one-shot full prefill, bit-exact (masked keys contribute exactly 0).
+TEST(OptimizedModelTest, PagedKvInvariantTokenByTokenMatchesFullPrefill) {
+  for (const char* fixture : {kLlama, kQwen}) {
+    SCOPED_TRACE(fixture);
+    std::unique_ptr<Model> opt = Optimized(fixture);
+    const std::vector<std::int32_t> ids = PromptIds(fixture);
+    const auto t = static_cast<std::int64_t>(ids.size());
+
+    BlockPool full_pool = FreshPool(*opt);
+    PagedKvCache full(&full_pool);
+    const Tensor logits_full = ForwardOnce(*opt, ids, LogitsMode::kLast, full);
+    EXPECT_EQ(full.length(), t);
+
+    BlockPool step_pool = FreshPool(*opt);
+    PagedKvCache step(&step_pool);
+    Tensor logits_step;
+    for (std::int64_t i = 0; i < t; ++i) {
+      const std::array<std::int32_t, 1> one{ids[static_cast<std::size_t>(i)]};
+      const std::array<std::int32_t, 1> pos{static_cast<std::int32_t>(i)};
+      const ForwardRequest req{.token_ids = one,
+                               .positions = pos,
+                               .cache = &step,
+                               .logits_mode = LogitsMode::kLast,
+                               .hook = nullptr};
+      logits_step = Unwrap(opt->forward(req));
+    }
+    const ops::AllCloseResult r =
+        Unwrap(ops::allclose(logits_step, logits_full, 0.0, 0.0));
+    EXPECT_TRUE(r.allclose) << r.Summary();
+  }
+}
+
+// A paged cache drives the greedy loop identically to a simple cache (a cheap
+// pre-check of the M8-T07 integration; the simple-cache path already matches
+// generate.json, so transitively the paged path does too).
+TEST(OptimizedModelTest, PagedGreedyMatchesSimpleCache) {
+  for (const char* fixture : {kLlama, kQwen}) {
+    SCOPED_TRACE(fixture);
+    std::unique_ptr<Model> opt = Optimized(fixture);
+    const std::vector<std::int32_t> prompt = PromptIds(fixture);
+    const GenerateOptions options{.sampling = SamplingParams::Greedy(8),
+                                  .eos_ids = {}};
+
+    SimpleKvCache simple = FreshCache(*opt, 256);
+    const std::vector<std::int32_t> want =
+        Unwrap(Generate(*opt, simple, prompt, options)).tokens;
+
+    BlockPool pool = FreshPool(*opt, /*block_size=*/8, /*num_blocks=*/16);
+    PagedKvCache paged(&pool);
+    const std::vector<std::int32_t> got =
+        Unwrap(Generate(*opt, paged, prompt, options)).tokens;
+    EXPECT_EQ(got, want);
+  }
 }
 
 // ===========================================================================

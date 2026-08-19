@@ -41,6 +41,10 @@ add_library(engine_kernels STATIC
   # thread counts, so a single scalar TU ships (paged-kv-cache.md §9.1), like the
   # embedding gather above.
   kv_scatter.cpp
+  # kv_gather.cpp has no per-ISA TU (M8-T06): the paged KV read is the mirror of
+  # the scatter — a pure fp32->fp32 memcpy per (head, block) tile, Class E, so a
+  # single scalar TU ships (paged-kv-cache.md §9.3).
+  kv_gather.cpp
   scalar/probe.cpp
   scalar/elementwise.cpp
   scalar/reduce.cpp

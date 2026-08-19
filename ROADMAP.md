@@ -1054,7 +1054,7 @@ sequence), GQA, fp32 accumulation.
 **Acceptance criteria:**
 - Tests: matches the M6-T05 contiguous decode kernel results exactly (same inputs materialized both ways) for cache lengths crossing many blocks, including length exactly at a block boundary.
 
-### M8-T06 · Paged prefill attention path
+### M8-T06 · Paged prefill attention path — ✅ DONE (2026-08-19)
 Prefill attention over paged cache: gather cached K/V to a contiguous workspace for
 the M6 blocked prefill path (simple, correct; fully paged-aware prefill comes with
 the M12 tuning pass). Handles prefill-continuation (cache hit + new tokens)

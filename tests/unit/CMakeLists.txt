@@ -147,6 +147,18 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::kernels
   LABELS kernels)
 
+# kv_gather_test (M8-T06): the paged KV-read kernel (KvGatherF32) vs an
+# independently-simulated paged layout — a reverse-permuted block table with
+# poisoned unused/tail slots, so a stray read is caught — across a block-size ×
+# length × geometry sweep, empty length, thread-count invariance, exact
+# bit-pattern preservation, and a scatter->gather round trip that proves the
+# M8-T04 write and M8-T06 read kernels against each other. Pure memcpy (Class E),
+# single scalar TU, no dispatched path — so no SCALAR_PASS. `kernels` label.
+engine_add_tests(TREE unit SOURCES
+  kv_gather_test.cpp
+  DEPS engine::kernels
+  LABELS kernels)
+
 # paged_cache_test (M8-T04): PagedKvCache over BlockPool + BlockTable — the
 # layer-0-grows/layers-reuse append protocol, the KvScatterF32 write verified by
 # reading back through paged_view, front-loaded validation, the ordering

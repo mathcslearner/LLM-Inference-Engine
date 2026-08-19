@@ -4,6 +4,7 @@
 #include "core/status.h"
 #include "kernels/kv_scatter.h"
 #include "kvcache/kv_cache.h"
+#include "kvcache/paged_gather.h"
 #include "tensor/dtype.h"
 #include "tensor/tensor.h"
 
@@ -113,11 +114,24 @@ core::Status PagedKvCache::append(int layer, const tensor::Tensor& k,
   return core::OkStatus();
 }
 
-core::StatusOr<KvView> PagedKvCache::view(int /*layer*/) const {
-  return core::UnimplementedError(
-      "PagedKvCache::view: the contiguous gather lands with the paged gather "
-      "in "
-      "M8-T06; the decode path reads through paged_view (§8.3)");
+core::StatusOr<KvView> PagedKvCache::view(int layer) const {
+  if (!layer_in_range(layer)) {
+    return core::InvalidArgumentError(
+        "PagedKvCache::view: layer {} out of range [0, {})", layer,
+        pool_->geometry().num_layers);
+  }
+  // A layer whose K/V for this forward has not been appended yet (its slot
+  // mapping is allocated but unwritten) must expose only its *committed*
+  // history — exactly what SimpleKvCache::view does with its per-layer fill.
+  // Layer 0 grows the table (bumping num_tokens); mid-forward, layers
+  // >= next_layer_ have not written the new tokens, so they see
+  // num_tokens - pending. Layers < next_layer_ (and a completed forward,
+  // next_layer_ == 0 with no pending) see the full length.
+  const std::int64_t committed = table_.num_tokens();
+  const auto pending = static_cast<std::int64_t>(pending_slots_.size());
+  const bool layer_written = (next_layer_ == 0) || (layer < next_layer_);
+  const std::int64_t visible = layer_written ? committed : committed - pending;
+  return GatherLayerKV(*pool_, table_, layer, visible);
 }
 
 core::StatusOr<PagedKvView> PagedKvCache::paged_view(int layer) const {
