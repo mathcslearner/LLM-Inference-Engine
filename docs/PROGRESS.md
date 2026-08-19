@@ -1565,3 +1565,63 @@ its final xet-verification step (byte-complete at 988,097,824 = the repo's
 `content-length`); the completed file was placed and validated by loading (291
 BF16 tensors, tied embeddings resolved by the loader alias), so no re-download was
 needed.
+
+### M6-T08 — generation benchmark & first baseline (2026-08-18)
+
+New `benchmarks/bench_generate.cpp` (+ target and two smoke `add_test`s in
+`benchmarks/CMakeLists.txt`): an end-to-end prefill/decode tokens-per-second
+harness that drives the real greedy `Generate` loop and splits the run via its
+per-token callback timestamps — **prefill tok/s** = `prompt_len /` (start → first
+token), **decode tok/s** = `1000 /` the run's *median* per-step latency. Median
+(not whole-window average) is the steady-state rate: on a non-quiesced machine a
+single background hiccup inflates one step out of 128 (the `p90 ≪ max` gap)
+without reflecting steady-state throughput, and it is what makes the per-run
+number repeatable within the ±5% target. The prompt is synthetic random ids in
+`[0, vocab)` (like `llama-bench -p N` — only length drives the compute, no
+tokenizer dependency). One warmup run absorbs first-touch faults + workspace
+grow-on-demand. Flags: `--model --backend --threads --prompt-len --new-tokens
+--runs --seed --markdown`. `--threads N` sets `ENGINE_NUM_THREADS` **before**
+`load_model` (weight packing already touches `DefaultPool`, which sizes once), so
+a thread sweep is a shell loop. The report prints a hardware/thread/ISA/dtype
+fingerprint (CPU brand via `sysctlbyname` on macOS), the per-run table, a summary
+(best-of-N prefill, median decode, decode-step p50/p90/max), and a PASS/OVER
+verdict against ±5%. Backend-agnostic: reference and optimized run the identical
+path. Not registered with CTest for perf (run by hand, numbers in BASELINES.md),
+but two tiny smoke `add_test`s on the committed tiny-llama fixture (both
+backends, `--runs 2`) give CI runtime coverage of the harness — the binary also
+builds warnings-as-errors in CI (benchmarks build by default).
+
+**Baseline (BASELINES.md M6-T08).** Qwen2-0.5B-Instruct (bf16), M2, 8-thread NEON
+optimized: **prefill ~133 tok/s (best), decode ~31 tok/s (median), decode
+run-to-run ±3.9% — PASS** (step p50 32.1 ms / p90 37.4 ms). The 8-thread row is
+the recorded baseline; 4t (~101/~26) and 2t (~57/~15) are advisory (light
+background load), and the full quiescing + thread/ISA sweep discipline is
+M12-T01. Honest stability caveat recorded: back-to-back invocations on this
+laptop intermittently spike a decode step to 130–650 ms (OS/background, not the
+engine) — run one config at a time on an idle machine for a clean ±5%.
+
+**llama.cpp context number** (parity is M12, not here). Cloned + built
+`ggml-org/llama.cpp` @ `6d05498`, CPU-only (`-DGGML_METAL=OFF -DGGML_ACCELERATE=OFF
+-DGGML_BLAS=OFF -DLLAMA_CURL=OFF`), same Homebrew LLVM 20 toolchain (Apple clang
+is broken here) with `-Wno-elaborated-enum-base` to clear the CLT-SDK
+CoreFoundation headers (the same broken-CLT wall the M6-T02 Accelerate number
+hit). Converted the same checkpoint to bf16 and f16 GGUF via
+`convert_hf_to_gguf.py`. `llama-bench -p 128 -n 128 -r 5`: f16 = **192.5±8.3
+pp128 / 18.2±8.4 tg128 (8t)**, **111.9±7.0 / 34.0±7.1 (4t)**; bf16 = 7.7±5.0 /
+5.1±1.0 (8t). Findings: (1) llama.cpp's CPU **bf16** GEMM is unvectorized on ARM
+(~20–25× slower than its f16), so its **f16** GGUF is the fair opponent for our
+bf16-first model; (2) we sit at ballpark parity — within ~1.4× on prefill, ~par
+on decode; (3) the M2 **efficiency cores throttle memory-bound decode in both
+engines** (llama.cpp decode is *faster at 4 threads than 8*), motivating an
+E-core-aware/P-core-only decode pool as an M12 lever, compounding our decode
+kernel's `Hkv`-only parallel width (`Hkv=2` here; design §8, the M12-T03
+motivator). Conversion pulled a few packages into `tools/.venv`; the pinned
+fixture-generation environment was **restored** afterward (torch/transformers/
+tokenizers/hf-hub/safetensors/numpy back at their pins, extras removed). The
+llama.cpp build (`~/llama.cpp`) and the two ~1 GB GGUFs (`~/models/`) are kept
+uncommitted for the M12 sweep and are safe to delete.
+
+Design docs synced: `optimized-cpu-execution.md` §10 benchmark-obligations M6-T08
+bullet marked landed with the numbers; §5 pool note updated (the consequential
+finding is the heterogeneous cores, not the briefly-idle core). No `src/` change;
+907 ctest entries green (905 prior + 2 smoke); format + scoped tidy clean.

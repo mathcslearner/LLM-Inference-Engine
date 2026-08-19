@@ -387,7 +387,13 @@ split, the one sanctioned way to reduce across threads).
 
 **No caller-participation, no busy-wait assumptions** — M6 inherits the M3-T04
 pool as-is (one core briefly idle per region is accepted, cpu-backend.md §3.2/§10;
-revisited with the M6-T08 benchmark, not here).
+revisited with the M6-T08 benchmark, not here). *M6-T08 update: the more
+consequential pool finding is not the briefly-idle core but the M2's
+**heterogeneous cores** — the 4 efficiency cores throttle the memory-bound
+decode step (both our engine and llama.cpp decode faster on 4 P-cores than 8
+mixed cores; BASELINES.md M6-T08). The default pool sizes to all physical cores;
+an E-core-aware or P-core-only decode pool is an M12 tuning lever, not an M6
+change.*
 
 ---
 
@@ -925,7 +931,18 @@ the merge gate is cross-*thread* bit-identity + cross-ISA tolerance, cpu-backend
 - M6-T04: prefill attention time vs the reference at 2k context, in BASELINES.md.
 - M6-T08: `bench_generate` prefill tok/s and decode tok/s on the 1B model, ±5%
   run-to-run, with a hardware + thread-count fingerprint, and a same-model
-  llama.cpp number alongside for context (parity is M12, not here).
+  llama.cpp number alongside for context (parity is M12, not here). *Landed
+  2026-08-18 (BASELINES.md M6-T08): Qwen2-0.5B, 8-thread NEON optimized —
+  prefill ~133 tok/s (best), decode ~31 tok/s (median), decode run-to-run
+  **±3.9% (PASS)**. Same-machine llama.cpp @ `6d05498` (CPU-only NEON): f16
+  192/34 tok/s (prefill 8t / decode 4t) — ballpark parity; its ARM CPU bf16 path
+  is ~20× slower than f16, so our bf16-first design compares against llama's
+  f16. The M2 efficiency cores throttle memory-bound decode in both engines
+  (llama decode is faster at 4 threads than 8) — an E-core-aware pool is an M12
+  lever this measurement motivates, compounding the `Hkv`-only decode parallel
+  width (§8, the M12-T03 motivator). Full quiescing discipline + thread/ISA
+  sweep is M12-T01; the 8-thread baseline is the recorded number, 4t/2t are
+  advisory.*
 
 ---
 

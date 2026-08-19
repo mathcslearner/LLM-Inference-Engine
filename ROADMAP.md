@@ -926,7 +926,7 @@ prefill + decode forward, greedy loop reused from M5.
 - Tiny-fixture greedy generation on the optimized backend matches the reference backend token-for-token; end-to-end logits within documented tolerance.
 - A real ~1B model (e.g. Llama-3.2-1B or Qwen2.5-0.5B, bf16) loads and generates coherent text on the dev machine (sample outputs committed to the PR description).
 
-### M6-T08 · Generation benchmark & first baseline
+### M6-T08 · Generation benchmark & first baseline — ✅ DONE (2026-08-18)
 `benchmarks/bench_generate`: measures prefill tokens/sec and decode tokens/sec for a
 given model, prompt length, and thread count; prints a small report.
 **Depends on:** M6-T07.

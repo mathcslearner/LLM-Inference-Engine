@@ -390,7 +390,7 @@ behind an existing subsystem):
   logits ~0.98), greedy match/determinism/KV-invariant. `--verify` byte-clean;
   format + scoped tidy clean. +8 tests (729 green).
 
-- **M6 (optimized CPU execution engine) — in progress** (2026-08-18): T01
+- **M6 (optimized CPU execution engine) — complete** (2026-08-18): T01
   `docs/design/optimized-cpu-execution.md` — the contract M6-T02…T08 build on.
   **Docs-only.** Fixes: the **packed weight tile** (checkpoint `[N=out,K=in]`
   stays source of truth, derived at load into K-major panels of `NR=16` output
@@ -554,10 +554,32 @@ behind an existing subsystem):
   invariant **bit-exact** (0), workspace sizing, and every front-loaded error
   path. Real ~1B model (Qwen2-0.5B-Instruct bf16) loads and generates coherent
   text on the dev machine (sample outputs in the PR / PROGRESS.md). No fixture
-  change; `src/parallel/` untouched; format + scoped tidy clean.
+  change; `src/parallel/` untouched; format + scoped tidy clean. T08 generation
+  benchmark & first baseline: new `benchmarks/bench_generate.cpp` (+ target and
+  two smoke `add_test`s) drives the real greedy `Generate` loop and splits it by
+  per-token callback timestamps — prefill tok/s = `prompt_len/`(start→first
+  token), decode tok/s = `1000/`median-per-step (median = steady-state, absorbs
+  isolated background spikes), synthetic random prompt ids (length-only,
+  tokenizer-free, like `llama-bench -p N`), one warmup run, `--threads N` sets
+  `ENGINE_NUM_THREADS` before `load_model` since `DefaultPool` sizes once at
+  weight-packing time; report carries a host/thread/ISA/dtype fingerprint and a
+  ±5% PASS/OVER verdict; backend-agnostic. Baseline (BASELINES.md M6-T08):
+  Qwen2-0.5B bf16, 8-thread NEON optimized — **prefill ~133 / decode ~31 tok/s,
+  decode run-to-run ±3.9% (PASS)**; 4t/2t advisory; full quiescing + sweep
+  discipline deferred to M12-T01. Same-machine **llama.cpp** context number @
+  `6d05498` (CPU-only NEON build, `-Wno-elaborated-enum-base` past the broken
+  CLT SDK; bf16+f16 GGUF via `convert_hf_to_gguf.py`): f16 192/34 tok/s (prefill
+  8t / decode 4t) → ballpark parity; llama's ARM CPU **bf16** GEMM is ~20×
+  slower than its f16 (so our bf16-first design compares vs llama f16); the M2
+  **efficiency cores throttle memory-bound decode in both engines** (llama
+  decode faster at 4t than 8t) — an E-core-aware decode pool is an M12 lever,
+  compounding the `Hkv`-only decode parallel width (§8, M12-T03 motivator). No
+  `src/` change; `tools/.venv` restored to its pins after conversion; 907 ctest
+  green; format + scoped tidy clean.
 
-Next up: **M6-T08** (generation benchmark & first baseline: `benchmarks/
-bench_generate` measuring prefill tok/s and decode tok/s for a given model /
-prompt length / thread count, stable ±5% across runs; baseline in BASELINES.md
-with a hardware + thread-count fingerprint, and a same-model llama.cpp number
-alongside for context — parity is an M12 goal, not here).
+Next up: **M7-T01** (SamplingParams & pipeline skeleton: define/validate
+`SamplingParams` — temperature, top_k, top_p, penalties, seed, max_tokens, stop
+tokens/strings, logprobs — document the pipeline stage order in
+model-execution.md, and route the existing greedy path through the new pipeline
+structure so greedy output is unchanged; the first ticket of Milestone 7,
+Sampling & Generation Controls).

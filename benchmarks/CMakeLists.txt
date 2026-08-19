@@ -50,3 +50,30 @@ if(ENGINE_BENCH_BLAS)
 else()
   target_link_libraries(gemm_bench PRIVATE engine_warnings)
 endif()
+
+# bench_generate (M6-T08): end-to-end prefill/decode tokens/sec through the real
+# greedy Generate loop, with a run-to-run stability verdict (the ±5% acceptance
+# criterion). Perf numbers are run by hand and recorded in BASELINES.md; the
+# smoke test below is the only ctest-registered invocation.
+add_executable(bench_generate bench_generate.cpp)
+target_link_libraries(bench_generate PRIVATE
+  engine::engine
+  engine::kernels
+  engine::parallel
+  fmt::fmt
+  engine_warnings)
+
+# A fast smoke run on the committed tiny-llama fixture so CI exercises the
+# harness end-to-end (arg parsing, both backends, the stats path) — kept tiny so
+# it stays a correctness check, never a perf measurement. enable_testing() is
+# called at the root only under ENGINE_BUILD_TESTS, so guard on it.
+if(ENGINE_BUILD_TESTS)
+  add_test(NAME bench_generate_smoke
+    COMMAND bench_generate
+      --model "${CMAKE_SOURCE_DIR}/tests/fixtures/models/tiny-llama"
+      --prompt-len 8 --new-tokens 4 --runs 2 --backend optimized)
+  add_test(NAME bench_generate_smoke_reference
+    COMMAND bench_generate
+      --model "${CMAKE_SOURCE_DIR}/tests/fixtures/models/tiny-llama"
+      --prompt-len 8 --new-tokens 4 --runs 2 --backend reference)
+endif()

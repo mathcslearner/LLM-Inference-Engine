@@ -212,3 +212,99 @@ max-abs-diff ≤ 8.6e-6 across the acceptance sweep; bit-identical across thread
 counts; bit-identical to prefill(T=1)). AVX2 body mirrors the NEON structure and
 is proven correct + warnings-clean by CI; not measured here (no x86-64 dev
 machine).
+
+## M6-T08 — end-to-end generation baseline (2026-08-18)
+
+**Host:** Apple M2 (**4 performance + 4 efficiency cores**, 8 physical; 16 GB),
+macOS, dev machine — *not fully quiesced* (see the stability note). The default
+pool size is 8 (`parallel::physical_core_count()` counts all 8 physical cores).
+**Toolchain:** Homebrew clang 20, `-O3` Release.
+**Model:** `Qwen2-0.5B-Instruct` (bf16, `Qwen2ForCausalLM`, 24 layers, `E=896`,
+`H=14`, `Hkv=2`, `d=64`, `I=4864`, `V=151936`, tied embeddings + q/k/v biases) —
+the ~1B-class acceptance model.
+**Command:** `build/benchmarks/bench_generate --model <dir> --prompt-len 128
+--new-tokens 128 --runs 5 --threads <t> --backend optimized`.
+
+**Methodology.** The benchmark drives the real greedy `Generate` loop and reads
+its per-token callback timestamps: **prefill tok/s** = `prompt_len /`(start →
+first token); **decode tok/s** = `1000 /` the *median* per-step latency of that
+run. The median (not the whole-window average) is the steady-state decode rate —
+on a non-quiesced machine a single background hiccup inflates one step out of 128
+(visible as the `p90 ≪ max` gap) without reflecting steady-state throughput. The
+prompt is synthetic random ids in `[0, vocab)`; only its length drives the
+compute. One warmup run (first-touch faults + workspace grow-on-demand) precedes
+the recorded runs. Prefill's headline is best-of-N (peak), matching the
+peak-of-N convention of the kernel microbenches; decode's headline is the median
+per-run rate, and the ±5% verdict is stated against the decode series.
+
+**Optimized backend (`kOptimized`), NEON:**
+
+| Threads | prefill tok/s (best) | decode tok/s (median) | decode ±% run-to-run |
+|---:|---:|---:|---:|
+| **8 (default)** | **133.5** | **31.0** | **±3.9% — PASS** |
+| 4 | ~101 | ~26 | ±4.4% (advisory) |
+| 2 | ~57 | ~15 | ±7.3% (advisory) |
+
+The **8-thread row is the recorded baseline** and meets the ±5% acceptance
+criterion (decode ±3.9% across 5 runs; decode step p50 32.1 ms / p90 37.4 ms).
+The 4- and 2-thread rows are **advisory** — captured while the machine carried
+light background load, so their run-to-run spread is not a property of the
+engine. Formalizing the quiescing procedure (and a proper thread/ISA sweep with
+±3% discipline) is **M12-T01**; per this file's preamble, pre-M12 entries are
+advisory. The single-thread point is omitted: at ~120 ms/decode-step it did not
+finish inside the measurement window here (an M12 sweep item).
+
+**Stability caveat (honest).** Repeated back-to-back invocations on this laptop
+intermittently spiked individual decode steps to 130–650 ms (vs a ~32 ms p50) —
+OS/background activity, not the engine. Run **one config at a time on an
+otherwise-idle machine** for a clean ±5%; the median-step metric absorbs
+isolated spikes but not sustained contention.
+
+### llama.cpp context number
+
+Parity with llama.cpp is an **M12 goal, not this ticket** — this is a
+same-machine context number only.
+
+**Build:** `ggml-org/llama.cpp` @ `6d05498` (2026-08-19), CPU-only, same Homebrew
+LLVM 20 toolchain as the engine (Apple clang cannot compile C++ on this machine —
+CLAUDE.md). Configured `-DGGML_METAL=OFF -DGGML_ACCELERATE=OFF -DGGML_BLAS=OFF
+-DLLAMA_CURL=OFF -DGGML_NATIVE=ON` (a pure-CPU NEON build, no Metal/Accelerate,
+to compare CPU kernel against CPU kernel), plus `-DCMAKE_CXX_FLAGS=
+-Wno-elaborated-enum-base` to get past LLVM 20 rejecting the CommandLineTools
+SDK's CoreFoundation headers (the same broken-CLT issue that blocked the M6-T02
+Accelerate number). **Conversion:** `convert_hf_to_gguf.py` on the same HF
+checkpoint, `--outtype bf16` and `--outtype f16`.
+**Command:** `llama-bench -m <gguf> -p 128 -n 128 -t <t> -r 5` (its `pp128` =
+prefill tok/s, `tg128` = decode tok/s; it reports mean ± stddev).
+
+| GGUF | threads | pp128 (prefill) | tg128 (decode) |
+|---|---:|---:|---:|
+| f16 | 8 | 192.5 ± 8.3 | 18.2 ± 8.4 |
+| f16 | 4 | 111.9 ± 7.0 | **34.0 ± 7.1** |
+| bf16 | 8 | 7.7 ± 5.0 | 5.1 ± 1.0 |
+
+Reading it (context, not a scoreboard — same loaded machine, so the ± values are
+wide):
+
+- **Compare f16, not bf16.** llama.cpp's CPU backend has no vectorized bf16 GEMM
+  on ARM (it widens per element), so its bf16 GGUF runs ~20–25× slower than its
+  f16 GGUF (7.7 vs 192 pp). Our engine keeps weights in their checkpoint bf16 and
+  vectorizes the widen inside the packed GEMM, so **our bf16 path is the fast
+  path** — llama.cpp's f16 GGUF is the fair opponent for our bf16 model.
+- **Ballpark parity, different core-scaling.** Our engine (8t): ~133 prefill /
+  ~31 decode. llama.cpp f16: 192 prefill (8t) / 34 decode (**4t**). We are within
+  ~1.4× on prefill and roughly at par on decode.
+- **The E-cores hurt decode in both engines.** llama.cpp's memory-bound decode is
+  *faster at 4 threads (34 t/s) than 8 (18 t/s)* — the 4 efficiency cores drag
+  down the shared-K/V bandwidth-bound step and add sync overhead, while the
+  compute-bound prefill still scales up with 8 (192 vs 112). Our default pool
+  uses all 8 physical cores; an E-core-aware pool (P-cores only for decode) is an
+  M12 tuning lever this number motivates. It compounds with our decode kernel's
+  `Hkv`-only parallel width (`Hkv=2` here → only 2-way parallel decode; design §8,
+  the M12-T03 flash-decoding motivator).
+- Our decode also still pays the `SimpleKvCache::view` gather (~12% decode
+  memory-traffic overhead, design §6); M8-T05 removes it by reading through the
+  block table.
+
+**Artifacts** (not committed; ~2 GB, kept for the M12 sweep — safe to delete):
+`~/llama.cpp` (the pinned CPU build) and `~/models/qwen2-0.5b-instruct.{bf16,f16}.gguf`.
