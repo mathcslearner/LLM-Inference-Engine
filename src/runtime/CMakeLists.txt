@@ -15,12 +15,13 @@
 # every dependency is already below `runtime` on the diagram. The public headers
 # expose Status/StatusOr, the `engine::engine` finish taxonomy (stop.h),
 # sampling::Sampler/SamplingParams/StepLogprobs, kvcache::BlockPool/PagedKvCache,
-# model::Model (the forward contract, engine.h), and tokenizer::Tokenizer, so
-# those modules link PUBLIC.
+# model::Model (the forward contract, engine.h), tokenizer::Tokenizer, and (from
+# M9-T04) scheduler::Scheduler/SchedulerOutput (engine.h names them in Step's
+# private helper), so those modules link PUBLIC.
 add_library(engine_runtime STATIC channel.cpp engine.cpp sequence.cpp)
 add_library(engine::runtime ALIAS engine_runtime)
 target_include_directories(engine_runtime PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(engine_runtime
   PUBLIC engine::core engine::engine engine::model engine::sampling
-         engine::kvcache engine::tokenizer
+         engine::kvcache engine::scheduler engine::tokenizer
   PRIVATE engine_warnings)

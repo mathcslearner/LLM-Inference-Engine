@@ -281,6 +281,20 @@ engine_add_tests(TREE unit SOURCES
        engine::sampling engine::tensor
   LABELS runtime)
 
+# scheduler_test (M9-T04): the pure scheduling policy — table-driven over plain
+# descriptor structs (no engine/model/pool/allocator on the hot path): decode-
+# first (starvation impossible), admission blocked on block availability, token
+# budget across mixed prefill sizes (head-of-line blocking), max_num_seqs cap,
+# latest-arrived preemption (cascade + refund-then-admit), FCFS order preserved,
+# determinism, and a randomized structural-invariant fuzz. One test cross-checks
+# BlocksNeeded against a real BlockPool (the only fixture), so it links
+# engine::kvcache/tensor. Pure decision logic — no kernels/forward, no
+# SCALAR_PASS. `scheduler` label.
+engine_add_tests(TREE unit SOURCES
+  scheduler_test.cpp
+  DEPS engine::scheduler engine::kvcache engine::tensor
+  LABELS scheduler)
+
 # qwen2_family_test (M5-T10): the Qwen-family reference path on the shared M5
 # modules — the tiny-qwen2 fixture (q/k/v biases, head_dim decoupled from
 # hidden/heads, tied embeddings) validated against its HF golden: config/loader

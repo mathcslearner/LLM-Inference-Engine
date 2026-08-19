@@ -1120,7 +1120,7 @@ blocking and polling consumption.
 **Acceptance criteria:**
 - Unit tests with a mock model: submit/consume/cancel from multiple client threads; no deadlocks under a stress test (many submitters, random cancels).
 
-### M9-T04 · Scheduler v1
+### M9-T04 · Scheduler v1 — ✅ DONE (2026-08-19)
 `src/scheduler/scheduler.h`: pure decision component — given queue + running set +
 block-pool stats + token budget, emit `SchedulerOutput`: sequences to prefill (with
 lengths), sequences to decode, sequences to preempt. FCFS admission, decode-first

@@ -2906,3 +2906,78 @@ CMake: `engine_runtime` gains `engine.cpp` and links `engine::model` PUBLIC (the
 header names `model::Model`); no new ADR edge — `runtime → model` is already on
 the diagram. Design scheduler-runtime.md §5 gained an "as built" note. Format +
 scoped tidy clean.
+
+### M9-T04 — Scheduler v1 (2026-08-19)
+
+**What landed.** `src/scheduler/scheduler.{h,cpp}` — the pure decision component
+of the continuous-batching runtime (design §6). `Scheduler::Schedule(inputs) →
+SchedulerOutput` maps plain descriptor structs — `waiting`/`running`
+`SeqDesc`s (id, arrival_index, num_computed_tokens, num_prompt_tokens,
+blocks_held) + a `PoolSnapshot` (free/total blocks, block_size) +
+`SchedulerConfig` (max_num_seqs, max_num_batched_tokens) — to the three
+decisions: `prefill` (admitted, each with an explicit `num_tokens`), `decode`
+(one token per running sequence), `preempt` (evicted this step). The M9-T03
+placeholder `Engine::AdmitWaiting` is replaced by a `Scheduler` call
+(`Engine::ScheduleStep` + a generalized `Step`). +21 scheduler tests + 1 engine
+preemption/resume test → **1279 ctest green** (from 1257).
+
+**The policy (design §6.2), three ordered passes.**
+- **Decode-first** — every running sequence decodes (`decode = running`);
+  starvation is impossible. Demand = `Σ BlocksNeeded(num_computed, 1)`.
+- **Preempt-to-fit** — while decode demand exceeds free blocks, evict the
+  **latest-arrived** running sequence (max `arrival_index`, ties → last in the
+  span), refund its `blocks_held`, drop its demand; repeat. Emitted
+  latest-first (the engine `push_front`s each, landing them in arrival order at
+  the head of `waiting_`). No oldest-alone special case — a lone non-fitting
+  decode is still preempted; liveness is a config-sizing guarantee (§10.3),
+  not the pure policy's job.
+- **FCFS admission** — walk `waiting` in order; admit while `num_scheduled <
+  max_num_seqs`, `tokens_so_far + prompt ≤ budget`, and `BlocksNeeded(0,
+  prompt) ≤ remaining_free`; **stop at the first failure** (order-preserving,
+  head-of-line blocking accepted). Refunded preemption blocks are available to
+  admission the same step.
+
+**Non-obvious decisions.**
+- **`class Scheduler`, stateless in v1** with a `const` `Schedule` (a documented
+  `readability-convert-member-functions-to-static` NOLINT) — the class is the
+  M11 prefix-reuse hook's home (§6.5), so keeping it an instance method avoids
+  future call-site churn. The block math is a public `constexpr BlocksNeeded(cur,
+  add, bs)`, cross-checked bit-for-bit against `BlockPool::blocks_needed` over a
+  sweep (the one test that touches a real pool).
+- **`RequestId` redeclared in `scheduler.h`** — the scheduler links only `core`
+  (ADR-002 rule 4), never `runtime/request.h` which sits above it; `engine.cpp`
+  `static_assert`s the two aliases are the same type. Table-testable with no
+  model/pool/allocator → `scheduler`-labelled suite, no `SCALAR_PASS`.
+- **Preemption mechanics land in T04, not T09.** Once the scheduler is wired in
+  it can legitimately emit a `preempt` (admission reserves prompt blocks only,
+  §6.3), so the engine must act: `Step()` applies preempt (`ReleaseCache` →
+  `kPreempted` → head of `waiting_`) before any forward, and the prefill path was
+  generalized to re-prefill `prompt ++ generated` so a resumed sequence's next
+  token is bit-identical to an uninterrupted run (§10.2, the M8-T08 resumable
+  seam). M9-T09 keeps its own scope: preemption under the *batched* loop, the
+  tiny-pool forced-preemption / no-leak acceptance, and pool-sizing config
+  validation.
+- **`ScheduleStep` reads the cache as ground truth** — running
+  `num_computed_tokens` = `cache().length()`, `blocks_held` =
+  `cache().block_table().num_blocks()`; waiting `num_prompt_tokens` = prompt +
+  `num_generated()` (0 for fresh, the resume length for preempted).
+
+**Tests.** `scheduler_test.cpp` (21): `BlocksNeeded` hand table + pool
+cross-check; decode-only / prefill-only / empty; decode-never-starved at
+free=0; admission block boundary (need==free admits, +1 rejects);
+decode-demand-before-admission; token budget with head-of-line blocking
+([40,50,30,10]/budget 100 → {40,50}); exact-fit budget; `max_num_seqs` cap
+(counting running) + already-met; latest-arrived preemption (unsorted arrivals,
+cascade to two victims, refund-then-admit, lone-non-fitting evicted); FCFS
+prefix + resume-length; determinism; and a 2000-iteration randomized
+structural-invariant fuzz (`decode ⊎ preempt == running`, width/budget/block
+accounting with refunds, prefill-is-a-prefix). `runtime_engine_test.cpp` (+1):
+`PreemptionResumesWithIdenticalOutput` on a 2-block pool forces a real
+preemption (num_waiting=1 after step 2) and the preempted request resumes to
+output identical to a standalone `Generate`, `pool.stats().used == 0` at end.
+
+CMake: `engine_scheduler` gains `scheduler.cpp` and links `engine::core` (CHECK);
+`engine_runtime` links `engine::scheduler` PUBLIC (`engine.h` names
+`SchedulerOutput` in `ScheduleStep`). No new ADR edge (`runtime → scheduler` is
+on the diagram). design scheduler-runtime.md §6.6 "as built" added. Format +
+scoped tidy clean.

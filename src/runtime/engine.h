@@ -5,6 +5,7 @@
 #include "model/model.h"
 #include "runtime/channel.h"
 #include "runtime/request.h"
+#include "scheduler/scheduler.h"
 
 #include <condition_variable>
 #include <cstddef>
@@ -31,9 +32,13 @@
 // §9.1 loop with two labelled placeholders the later tickets substitute in
 // place, not restructure:
 //
-//   * admission is a plain FCFS walk under `max_num_seqs` / the per-step token
-//     budget / block availability (§6.2); the `scheduler::Scheduler` decision
-//     component replaces it in M9-T04, and preemption arrives in M9-T09.
+//   * admission is now the `scheduler::Scheduler` decision component (M9-T04):
+//     `ScheduleStep()` builds the plain descriptor inputs (§6.1) from the
+//     engine-thread state, and `Step()` applies the resulting prefill / decode
+//     / preempt decisions (§6.2). Preemption is evict-and-recompute
+//     (`ReleaseCache` → re-prefill `prompt ++ generated` on re-admission, the
+//     §10.2 resumable seam); the batched loop that validates it under memory
+//     pressure is M9-T09.
 //   * execution runs one `model::forward` **per sequence** over the existing
 //     single-sequence `ForwardRequest` — the body of `engine::Generate`'s
 //     decode loop, lifted onto the `Sequence` — so a request's output equals a
@@ -180,10 +185,10 @@ class Engine {
   // --- engine-thread internals (design §9.1) ------------------------------
   void Run();              // the loop-thread body
   void DrainCommands();    // step 1
-  void RetireCancelled();  // step 2 (all states in T03)
-  [[nodiscard]] std::vector<RequestId> AdmitWaiting();  // step 4 (placeholder)
-  void ExecuteAndDeliver(Entry& entry, bool prefill);   // steps 5/6 per seq
-  void RetireTerminal();                                // step 7
+  void RetireCancelled();  // step 2 (all states)
+  [[nodiscard]] scheduler::SchedulerOutput ScheduleStep();  // step 3
+  void ExecuteAndDeliver(Entry& entry, bool prefill);       // steps 5/6 per seq
+  void RetireTerminal();                                    // step 7
   static void CloseCancelled(Entry& entry);  // transition + close a live seq
   void Shutdown();                           // post-join teardown
 
@@ -202,7 +207,7 @@ class Engine {
 
   // Engine-thread-owned state (no lock — single mutator, §5.3).
   std::unordered_map<RequestId, std::unique_ptr<Entry>> requests_;
-  std::deque<RequestId> waiting_;   // FCFS order (preempted at head, M9-T09)
+  std::deque<RequestId> waiting_;   // FCFS order (preempted at head, §3.2)
   std::vector<RequestId> running_;  // sequences being decoded
 
   std::thread thread_;

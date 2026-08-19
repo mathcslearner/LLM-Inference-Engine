@@ -1043,17 +1043,52 @@ behind an existing subsystem):
   `engine_runtime` links `engine::model` PUBLIC (no new ADR edge). +25 tests
   (`runtime_engine_test`; `runtime` label, no SCALAR_PASS; stress = 6 submitters
   × 40 reqs, random cancels, clean ×20, no leaks) → **1257 green**; design §5
-  "as built"; format + scoped tidy clean.
+  "as built"; format + scoped tidy clean. T04 scheduler v1 (2026-08-19):
+  `src/scheduler/scheduler.{h,cpp}` — the pure decision component (design §6),
+  a `core`-only leaf (ADR-002 rule 4): `Scheduler::Schedule(ScheduleInputs) →
+  SchedulerOutput` over plain descriptor structs (`waiting`/`running` `SeqDesc`
+  + `PoolSnapshot` + `SchedulerConfig`), emitting `prefill` (admitted, explicit
+  `num_tokens`), `decode` (one token/running seq), `preempt` (evicted).
+  Three ordered passes: **decode-first** (unconditional up to memory →
+  starvation impossible), **preempt-to-fit** (evict the latest-arrived — max
+  `arrival_index` — refund its `blocks_held`, repeat; emitted latest-first; no
+  oldest-alone special case — liveness is a config-sizing guarantee, §10.3),
+  **FCFS admission** (walk `waiting` in order; admit while `max_num_seqs` /
+  token budget / `BlocksNeeded(0,prompt) ≤ free` hold; **stop at first failure**,
+  head-of-line blocking accepted). `class Scheduler` stateless in v1 (the M11
+  hook's home, §6.5; documented static-NOLINT); block math a public `constexpr
+  BlocksNeeded(cur,add,bs)` cross-checked bit-for-bit vs `BlockPool::
+  blocks_needed`; `RequestId` redeclared here (`static_assert`ed == the runtime's
+  in `engine.cpp`). Engine wiring: the M9-T03 placeholder `AdmitWaiting` →
+  `Engine::ScheduleStep` (fills descriptors from each `Sequence`'s cache —
+  `length()`/`block_table().num_blocks()`; waiting prefill = prompt +
+  `num_generated()`) + a generalized `Step` that **applies preempt** (§9.1
+  step 4: `ReleaseCache` → `kPreempted` → head of `waiting_`) before prefill →
+  decode. **Preemption mechanics land in T04, not T09** (the scheduler can now
+  emit `preempt`, so the engine must act): the prefill path re-prefills `prompt
+  ++ generated` so a resumed sequence's next token is bit-identical to an
+  uninterrupted run (§10.2, the M8-T08 resumable seam); M9-T09 keeps the batched-
+  loop validation, tiny-pool forced-preemption/no-leak acceptance, and pool-
+  sizing config check. `runtime → scheduler` links PUBLIC (`engine.h` names
+  `SchedulerOutput`); no new ADR edge. +21 scheduler tests (`scheduler_test`,
+  `scheduler` label, no SCALAR_PASS — decode-never-starved, admission block
+  boundary, token-budget head-of-line, `max_num_seqs` cap, latest-arrived
+  preemption incl. cascade/refund-then-admit, FCFS prefix, determinism, a
+  2000-iter structural-invariant fuzz) + 1 engine test
+  (`PreemptionResumesWithIdenticalOutput`: 2-block pool forces a real preemption,
+  the resumed request's output == a standalone `Generate`, `used == 0` at end) →
+  **1279 green**. design scheduler-runtime.md §6.6 "as built"; format + scoped
+  tidy clean.
 
-Next up: **M9-T04** (scheduler v1) — write `src/scheduler/scheduler.{h,cpp}`:
-the pure decision component. Given `ScheduleInputs` (waiting/running `SeqDesc`
-spans + `PoolSnapshot` + `SchedulerConfig`) emit a `SchedulerOutput`
-(prefill+lengths, decode, preempt). FCFS admission, decode-first priority,
-block-availability + `max_num_seqs`/token-budget checks, latest-arrived
-preemption — a `core`-only leaf, no engine/pool/model (ADR-002 rule 4). Conform
-to `docs/design/scheduler-runtime.md` §6. Acceptance (§13 M9-T04): table-driven
-tests — admission blocked when blocks insufficient, token budget respected
-across mixed prefill sizes, decode starvation impossible, preemption picks the
-latest-arrived, FCFS order preserved, `max_num_seqs` capped. The M9-T03 engine's
-placeholder admission (`engine.cpp` `AdmitWaiting`) is then replaced by a
-`Scheduler::schedule` call. Per ROADMAP M9-T04.
+Next up: **M9-T05** (batch assembly) — write `src/engine/batch.h`: flatten a
+`SchedulerOutput` into staged batch inputs — concatenated token ids, positions,
+sequence start offsets (`cu_seqlens`), slot mappings, block-table tensor,
+per-request sampling metadata — assembled in one pass into preallocated staging
+buffers (no per-step allocation after warm-up). An `engine`-module type
+(`engine::engine::BatchInputs`/`AssembleBatch`), beside `Generate`, over the
+existing `model`/`kvcache`/`sampling` edges — no new ADR edge. Conform to
+`docs/design/scheduler-runtime.md` §8.1/§8.2. Acceptance (§13 M9-T05):
+hand-verified assembled metadata for {2 prefills of different lengths}, {3
+decodes}, {mixed} — `token_ids`/`positions`/`cu_seqlens`/`block_table` exact on
+every element (`EXPECT_EQ`); no per-step allocation after warm-up (staging
+high-water stable). Per ROADMAP M9-T05.

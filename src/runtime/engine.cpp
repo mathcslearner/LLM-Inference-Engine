@@ -9,6 +9,7 @@
 #include "runtime/request.h"
 #include "sampling/logprobs.h"
 #include "sampling/sampler.h"
+#include "scheduler/scheduler.h"
 #include "tensor/tensor.h"
 
 #include <cstddef>
@@ -20,6 +21,7 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -32,6 +34,13 @@
 // per-sequence execution) the later tickets substitute in place.
 
 namespace engine::runtime {
+
+// The runtime and the (core-only) scheduler each declare their own `RequestId`
+// alias rather than share a header across the layer boundary (§2); they must
+// name the same integer type so ids pass through the scheduler unchanged.
+static_assert(std::is_same_v<RequestId, scheduler::RequestId>,
+              "runtime and scheduler RequestId must be the same type");
+
 namespace {
 
 // The `[·, V]` logits from `forward` as a flat `[V]` span over its final row —
@@ -219,25 +228,44 @@ bool Engine::Step() {
     return false;  // idle
   }
 
-  // The decode set is the sequences already RUNNING at the top of this step —
-  // snapshot it before admission so a freshly admitted sequence produces
-  // exactly one token this step (its prefill) and decodes only from the next
-  // step (design §9.1 / §7: prefill produces the first token, decode advances
-  // the already-running sequences).
-  const std::vector<RequestId> decode_set = running_;
+  // 3. Schedule: the scheduler names which sequences to prefill (admit), decode
+  //    (advance one token), and preempt (evict this step). It reads the current
+  //    waiting_/running_ and one pool snapshot; it never mutates engine state.
+  const scheduler::SchedulerOutput out = ScheduleStep();
 
-  // 4/5. Admission (placeholder) + prefill pass.
-  for (const RequestId id : AdmitWaiting()) {
+  // 4. Apply preemptions before any forward, so their blocks are free this step
+  //    for the decode/prefill that needed them (design §9.1 step 4 / §10.1).
+  //    Evict-and-recompute: drop the cache (RAII frees every block), keep the
+  //    generated ids / sampler / stop state, and requeue at the head of
+  //    waiting_ ahead of never-started requests — resume re-prefills
+  //    prompt ++ generated (§10.2).
+  for (const RequestId id : out.preempt) {
     Entry& entry = *requests_.at(id);
+    entry.seq->ReleaseCache();
+    entry.seq->Transition(SeqState::kPreempted);
+    std::erase(running_, id);
+    waiting_.push_front(id);
+  }
+
+  // 5. Prefill pass over the admitted sequences (design §9.1 step 5). A newly
+  //    admitted sequence samples its first token from this forward and joins
+  //    the decode batch next step; a resumed (preempted) sequence re-prefills
+  //    its whole progress and samples the next token, bit-identical to an
+  //    uninterrupted run (§10.2, the KV invariant).
+  for (const auto& p : out.prefill) {
+    Entry& entry = *requests_.at(p.id);
+    std::erase(waiting_, p.id);
     entry.seq->EnsureCache(&pool_);
     entry.seq->Transition(SeqState::kRunning);
-    running_.push_back(id);
+    running_.push_back(p.id);
     ExecuteAndDeliver(entry, /*prefill=*/true);
   }
 
-  // 6. Decode pass over the pre-admission running set (skip any that finished
-  //    during their own prefill this step — they are not in `decode_set`).
-  for (const RequestId id : decode_set) {
+  // 6. Decode pass over the scheduler's decode set. Skip any that finished
+  //    during their own prefill earlier this step (a sequence is never both
+  //    admitted and decoded in one step — prefill produces its first token,
+  //    decode advances the already-running set, design §7).
+  for (const RequestId id : out.decode) {
     Entry& entry = *requests_.at(id);
     if (entry.seq->state() == SeqState::kRunning) {
       ExecuteAndDeliver(entry, /*prefill=*/false);
@@ -294,38 +322,53 @@ void Engine::RetireCancelled() {
   }
 }
 
-std::vector<RequestId> Engine::AdmitWaiting() {
-  // Placeholder FCFS admission (M9-T04 replaces this with
-  // `scheduler::Scheduler::schedule`). Walk `waiting_` in arrival order and
-  // admit while the batch-width, per-step token budget, and free-block checks
-  // all hold; stop at the first sequence that fails (order-preserving — do not
-  // skip it to admit a smaller one behind it, §6.2). No preemption (M9-T09).
-  std::vector<RequestId> admitted;
-  std::int64_t free_blocks = pool_.free_blocks();
-  std::int64_t token_budget = config_.max_num_batched_tokens;
-  auto num_seqs = static_cast<std::int64_t>(running_.size());
-  while (!waiting_.empty()) {
-    const RequestId id = waiting_.front();
+scheduler::SchedulerOutput Engine::ScheduleStep() {
+  // Fill the scheduler's plain descriptors (design §6.1) from the engine-thread
+  // state and one pool snapshot. The scheduler sees no Sequence, cache, or pool
+  // type — only these structs — so the whole policy is table-testable (§2).
+  std::vector<scheduler::SeqDesc> waiting_descs;
+  waiting_descs.reserve(waiting_.size());
+  for (const RequestId id : waiting_) {
     const Sequence& seq = *requests_.at(id)->seq;
     const auto prompt_len =
         static_cast<std::int64_t>(seq.request().prompt_ids.size());
-    if (num_seqs >= config_.max_num_seqs) {
-      break;
-    }
-    if (prompt_len > token_budget) {
-      break;
-    }
-    const std::int64_t need = pool_.blocks_needed(0, prompt_len);
-    if (need > free_blocks) {
-      break;
-    }
-    waiting_.pop_front();
-    admitted.push_back(id);
-    free_blocks -= need;
-    token_budget -= prompt_len;
-    ++num_seqs;
+    // Admission demand is this step's prefill length: the prompt for a fresh
+    // WAITING sequence, or prompt ++ generated for a PREEMPTED one being
+    // resumed (§10.2). `num_generated()` is 0 for a fresh sequence, so this is
+    // uniform.
+    waiting_descs.push_back(
+        {.id = id,
+         .arrival_index = seq.request().arrival_index,
+         .num_computed_tokens = 0,
+         .num_prompt_tokens = prompt_len + seq.num_generated(),
+         .blocks_held = 0});
   }
-  return admitted;
+
+  std::vector<scheduler::SeqDesc> running_descs;
+  running_descs.reserve(running_.size());
+  for (const RequestId id : running_) {
+    Sequence& seq = *requests_.at(id)->seq;
+    const kvcache::PagedKvCache* cache = seq.cache();
+    // A RUNNING sequence always holds a cache (ensured at admission). Read the
+    // committed length and blocks held straight from it — the ground truth the
+    // decode-demand and preemption arithmetic key on.
+    running_descs.push_back({.id = id,
+                             .arrival_index = seq.request().arrival_index,
+                             .num_computed_tokens = cache->length(),
+                             .num_prompt_tokens = 0,
+                             .blocks_held = cache->block_table().num_blocks()});
+  }
+
+  const scheduler::ScheduleInputs inputs{
+      .waiting = waiting_descs,
+      .running = running_descs,
+      .pool = {.free_blocks = pool_.free_blocks(),
+               .total_blocks = pool_.num_blocks(),
+               .block_size = pool_.block_size()},
+      .config = {.max_num_seqs = config_.max_num_seqs,
+                 .max_num_batched_tokens = config_.max_num_batched_tokens},
+  };
+  return scheduler::Scheduler{}.Schedule(inputs);
 }
 
 void Engine::ExecuteAndDeliver(Entry& entry, bool prefill) {
@@ -337,15 +380,27 @@ void Engine::ExecuteAndDeliver(Entry& entry, bool prefill) {
   // running cache position (`== num_computed_tokens`). Both request kLast — one
   // logits row to sample from. This is exactly what `Generate` builds.
   std::vector<std::int32_t> positions;
+  std::vector<std::int32_t> prefill_tokens;
   std::span<const std::int32_t> token_ids;
   std::int32_t decode_token = 0;
   if (prefill) {
+    // Prefill covers the whole context to re-materialize: the prompt for a
+    // fresh admission, or prompt ++ generated when resuming a preempted
+    // sequence into a fresh cache (design §10.2). The re-prefilled prefix
+    // reproduces the same K/V bit-for-bit (the KV invariant), so the next
+    // sampled token is identical to an uninterrupted run. A fresh sequence has
+    // empty `generated_ids()`, so this reduces to prefilling the prompt.
     const auto& prompt = seq.request().prompt_ids;
-    positions.resize(prompt.size());
-    for (std::size_t t = 0; t < prompt.size(); ++t) {
+    const auto& generated = seq.generated_ids();
+    prefill_tokens.reserve(prompt.size() + generated.size());
+    prefill_tokens.insert(prefill_tokens.end(), prompt.begin(), prompt.end());
+    prefill_tokens.insert(prefill_tokens.end(), generated.begin(),
+                          generated.end());
+    positions.resize(prefill_tokens.size());
+    for (std::size_t t = 0; t < prefill_tokens.size(); ++t) {
       positions[t] = static_cast<std::int32_t>(t);
     }
-    token_ids = std::span<const std::int32_t>{prompt};
+    token_ids = std::span<const std::int32_t>{prefill_tokens};
   } else {
     decode_token = seq.generated_ids().back();
     positions.assign(1, static_cast<std::int32_t>(cache.length()));

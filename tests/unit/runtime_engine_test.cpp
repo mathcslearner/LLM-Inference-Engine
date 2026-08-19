@@ -401,6 +401,45 @@ TEST(EngineTest, AdmissionWaitsOnBlockAvailability) {
   EXPECT_EQ(pool.stats().used, 0);
 }
 
+// --- Scheduler-driven preemption & resume (M9-T04) --------------------------
+
+TEST(EngineTest, PreemptionResumesWithIdenticalOutput) {
+  CannedModel model;
+  // 2 blocks × 8 = 16 token-slots. Two 8-token prompts each take exactly one
+  // block to prefill (used=2, free=0). Next step, both want to decode past
+  // their block boundary (pos 8 → block 1) but only one block can be freed, so
+  // the scheduler preempts the latest-arrived (r2) to let the oldest (r1)
+  // proceed. r2 later resumes by re-prefilling prompt ++ generated, producing
+  // output bit-identical to an uninterrupted run (design §10.2).
+  BlockPool pool = MakePool(/*num_blocks=*/2);
+  auto engine = Unwrap(Engine::Create(
+      model, pool, EngineConfig{.max_num_batched_tokens = 4096}));
+
+  const std::vector<std::int32_t> prompt = {1, 2, 3, 4, 5, 6, 7, 8};
+  auto h1 = Unwrap(engine->Submit(GreedyRequest(prompt, /*max_tokens=*/6)));
+  auto h2 = Unwrap(engine->Submit(GreedyRequest(prompt, /*max_tokens=*/6)));
+
+  ASSERT_TRUE(engine->Step());  // step 1: admit + prefill both
+  EXPECT_EQ(engine->num_running(), 2U);
+  EXPECT_EQ(engine->num_waiting(), 0U);
+
+  ASSERT_TRUE(engine->Step());  // step 2: preempt the latest, decode the oldest
+  EXPECT_EQ(engine->num_running(), 1U);  // r1 advances
+  EXPECT_EQ(engine->num_waiting(), 1U);  // r2 preempted back to the queue
+  EXPECT_EQ(engine->num_live(), 2U);     // r2 is not dropped
+
+  RunToIdle(*engine);
+
+  // Both complete with output identical to a standalone Generate — the
+  // preempted-and-resumed r2 included (the resume-equivalence invariant §9.2).
+  const std::vector<std::int32_t> reference = ReferenceTokens(model, prompt, 6);
+  EXPECT_EQ(DrainTokens(h1), reference);
+  EXPECT_EQ(DrainTokens(h2), reference);
+  EXPECT_EQ(h1.await_completion().terminal, SeqState::kFinished);
+  EXPECT_EQ(h2.await_completion().terminal, SeqState::kFinished);
+  EXPECT_EQ(pool.stats().used, 0);  // no leaks after resume
+}
+
 // --- Cancellation -----------------------------------------------------------
 
 TEST(EngineTest, CancelBeforeAdmission) {

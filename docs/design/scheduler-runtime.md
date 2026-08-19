@@ -681,6 +681,49 @@ Recorded here so the M12 change is a planned relaxation, not a surprise.
   tokens-this-step count (the accepted-window size), and the step loop appends a
   variable number of tokens per sequence.
 
+### 6.6 As built (M9-T04)
+
+`src/scheduler/scheduler.{h,cpp}` implements exactly this section. Notes:
+
+- **`class Scheduler` with a `const` `Schedule` method**, stateless in v1 (a
+  free function would do, but the class is the M11 hook's home per §6.5 — so
+  call sites never churn). The block arithmetic is a public `constexpr
+  BlocksNeeded(cur, add, bs)`, cross-checked bit-for-bit against
+  `BlockPool::blocks_needed` in a test (the only test that touches a real pool);
+  everything else is pure struct-in / struct-out, so the suite is `scheduler`-
+  labelled with **no** model/pool/allocator and no `SCALAR_PASS`.
+- **`preempt` is emitted latest-arrived-first** (the eviction order). The engine
+  requeues each at the head of `waiting_` via `push_front`, which lands them in
+  arrival order among themselves (§3.2). Ties on `arrival_index` break to the
+  last such element in the `running` span (deterministic).
+- **The scheduler does not special-case the oldest-alone sequence.** If a lone
+  running sequence's decode does not fit, it is still preempted (empty decode
+  set that step). Liveness (§10.3) is a *config-sizing* guarantee — the pool
+  holds at least one `max_model_len` sequence — enforced where the pool is
+  sized, not inside the pure policy.
+- **`RequestId` is redeclared in `scheduler.h`** (the scheduler links only
+  `core`, never `runtime/request.h`, which sits above it). `engine.cpp`
+  `static_assert`s `runtime::RequestId` and `scheduler::RequestId` are the same
+  type.
+- **Runtime wiring (`Engine::ScheduleStep` + `Step`).** The M9-T03 placeholder
+  `AdmitWaiting` is replaced: `ScheduleStep()` fills the descriptors from the
+  engine-thread state — running `num_computed_tokens`/`blocks_held` read
+  straight from each `Sequence`'s `PagedKvCache` (`length()` /
+  `block_table().num_blocks()`), waiting `num_prompt_tokens` = prompt length +
+  `num_generated()` (0 for a fresh sequence; the resume length for a preempted
+  one, §10.2) — and `Step()` applies preempt (§9.1 step 4: `ReleaseCache` →
+  PREEMPTED → head of `waiting_`) then prefill then decode. **Preemption
+  mechanics land here** rather than waiting for M9-T09, because the scheduler
+  can now legitimately emit a `preempt` (admission reserves prompt blocks only,
+  §6.3) and the engine must act on it; the prefill path was generalized to
+  re-prefill `prompt ++ generated` so a resumed sequence's next token is
+  bit-identical to an uninterrupted run. M9-T09 keeps its own scope: validating
+  preemption under the *batched* loop, the tiny-pool forced-preemption / no-leak
+  acceptance, and the pool-sizing config validation.
+- **`runtime → scheduler` links PUBLIC** (`engine.h` names `SchedulerOutput` in
+  `ScheduleStep`'s private declaration). No new ADR edge — the edge is already
+  on the diagram (`server → runtime → scheduler`).
+
 ---
 
 ## 7. Batch composition: two passes, not mixed
