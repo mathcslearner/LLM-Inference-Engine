@@ -374,7 +374,9 @@ block-boundary crossings, never per token — off the hot path, matching the
 `CachingAllocator` stance).
 
 ```cpp
-struct BlockPoolStats { int64_t total, used, free; double utilization; };
+struct BlockPoolStats { int64_t total, used, free; double utilization;
+                        int64_t peak_used, exhaustions; int block_size; };
+                        // last three added M8-T08 (§10.2)
 
 class BlockPool {
  public:
@@ -442,6 +444,17 @@ additive clarifications of the sketch above, no divergence):
   (`Hkv·bs·d`), `head_stride()` (`bs·d`), `row_stride()` (`d`) — plus
   `slab_bytes()`/`total_bytes()` for the M8-T07 stats log and
   `block_size()`/`num_blocks()`/`geometry()`.
+
+**M8-T08 metrics additions** (`BlockPoolStats` gained three fields). Maintained
+under the same mutex the block lifecycle already holds and monotone since
+`Create` (they only ever grow, and survive a sequence's blocks being reclaimed):
+- **`peak_used`** — high-water mark of `used`, bumped in `Allocate` on success.
+  The sizing / M16 gauge signal.
+- **`exhaustions`** — count of `Allocate` calls that returned `ResourceExhausted`
+  (one per drained append attempt). The "did this pool ever run dry?" observable
+  the M8-T08 acceptance and M16's counter want.
+- **`block_size`** — tokens per block, so a consumer holding only the stats can
+  print token capacity (`total · block_size`) without the pool.
 
 ### 6.3 Refcount lifecycle
 
@@ -954,6 +967,40 @@ cache-usage stats API (`BlockPool::stats()` — blocks used/free, utilization,
 §6.2) is the surface M9's scheduler admits against and M16's metrics endpoint
 exports.
 
+**M8-T08 as built.** Two error classes, distinguished by *when* they fire, with
+different cache/output guarantees (spelled out in `generator.h`):
+
+- **Front-loaded exhaustion.** `Generate` checks the worst-case peak occupancy
+  against `cache.capacity()` before any forward runs (model-execution.md §10). For
+  a **private** cache `PagedKvCache::capacity()` is exact — owned slots
+  (`num_blocks·bs`) plus the free pool — so a run that cannot fit is rejected
+  here with the cache untouched and nothing allocated. This is the common
+  single-request case; the test drives it with a one-block pool.
+- **Mid-generation exhaustion.** With a **shared** pool (M9), another sequence
+  can drain the free blocks *after* this run's up-front check passed, so a later
+  decode step's `capacity()`/`Allocate` trips `ResourceExhausted` — either the
+  model's per-forward `length()+T > capacity()` guard (when the pool has 0 free
+  blocks the shrinking advisory `capacity()` catches it) or, one layer deeper,
+  `BlockPool::Allocate` inside `PagedKvCache::append` (exercised by a forward-hook
+  test that drains the pool between the capacity check and the layer-0 append).
+  Either way the failing forward wrote nothing (front-loaded inside `forward`),
+  the tokens produced so far were already delivered through the `on_token`
+  callback (the partial-result channel — a `StatusOr` cannot carry a partial
+  vector), and the cache holds a consistent prefix of exactly `cache.length()`
+  committed tokens. Generation is therefore **resumable**: once capacity frees
+  up, `Generate(model, cache, {last delivered token}, …)` continues the identical
+  greedy trajectory (the KV invariant as a resumability guarantee — the test
+  asserts `delivered ++ resumed == uninterrupted`). This is the seam M9
+  preemption/resume and M10 streaming-with-cancel build on.
+
+Reclamation holds on every error path: dropping the sequence's `PagedKvCache`
+returns all its blocks (RAII, §7.3), so `stats().used` is 0 afterward. The new
+`peak_used`/`exhaustions` counters (§6.2) are monotone, so the pool still records
+that it ran dry after the blocks are reclaimed. The CLI (`engine generate`)
+reports the pool stats — used/free/util, peak, exhaustions — on both the success
+and the failure path, and streams the tokens produced before a mid-run failure
+before surfacing the error.
+
 ---
 
 ## 11. Interactions with later milestones
@@ -1023,9 +1070,19 @@ validate the reference; the reference validates the paged path. Concretely:
   invariant (token-by-token == full-recompute) bit-exact through the paged
   cache; real-model generation smoke; `bench_generate` decode regression ≤ 10%
   recorded.
-- **M8-T08 (exhaustion).** A generation exceeding capacity fails gracefully with
-  `ResourceExhausted`; pool stats zero after (no leaked blocks — RAII
-  reclamation asserted).
+- **M8-T08 (exhaustion & metrics).** `BlockPool` counters (`peak_used`
+  high-water/never-decreases, `exhaustions` per failed `Allocate`, `block_size`,
+  surviving full reclamation). `PagedKvCache` mid-sequence boundary exhaustion:
+  committed prefix + `view`/`paged_view` intact, competitor-release recovery,
+  drop-reclaims-all. `Generate` end-to-end: front-loaded paged rejection (nothing
+  allocated) **and** the mid-generation shared-pool drain (via a hog in the token
+  callback) failing gracefully with `ResourceExhausted`, the delivered prefix
+  matching the uninterrupted trajectory, `cache.length()` consistent, resume from
+  the last delivered token reproducing the full trajectory, and pool stats
+  returning to zero after drop (no leaked blocks). `OptimizedModel` (SCALAR_PASS):
+  the pool `Allocate → ResourceExhausted` chain from inside a `forward`
+  (hook-drained after the capacity check) propagating + recovering, and paged
+  greedy exhaustion reclaiming all blocks on the optimized backend.
 
 Suites touching a kernel or a full forward register `SCALAR_PASS` so the
 forced-scalar pass (`ENGINE_FORCE_ISA=scalar`) covers the shipped bytes on both

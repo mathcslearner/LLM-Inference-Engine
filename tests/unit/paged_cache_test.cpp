@@ -395,6 +395,11 @@ TEST(PagedKvCacheTest, ExhaustionAtLayerZeroLeavesStateUnchanged) {
       cache.append(0, MakeKV(0, kBs, 1, geom, 0), MakeKV(0, kBs, 1, geom, 1))));
   EXPECT_EQ(cache.length(), len_before);
   EXPECT_EQ(pool.free_blocks(), 0);
+  EXPECT_EQ(pool.stats().exhaustions, 1);
+
+  // The committed history is still readable after a failed append.
+  VerifyLayer(cache, geom, 0, kBs);
+  VerifyView(cache, geom, 0, kBs);
 
   // Truncate frees the block; a smaller append then succeeds.
   ASSERT_TRUE(cache.truncate(0).ok());
@@ -402,6 +407,62 @@ TEST(PagedKvCacheTest, ExhaustionAtLayerZeroLeavesStateUnchanged) {
   AppendAllLayers(cache, geom, 0, 4);
   EXPECT_EQ(cache.length(), 4);
   VerifyLayer(cache, geom, 0, 4);
+}
+
+// Exhaustion at a block boundary mid-sequence (not the first append): a partial
+// tail block fills, and the next token that would cross into a new block trips
+// ResourceExhausted. The committed prefix and the view are intact; a competitor
+// releasing its blocks lets the same append succeed (the M8-T08 recover path).
+TEST(PagedKvCacheTest, MidSequenceBoundaryExhaustionRecoversWhenBlocksFree) {
+  const CacheGeometry geom = TinyGeom();
+  BlockPool pool = MakePool(geom, 2);  // two blocks total: 16 token slots
+  PagedKvCache cache(&pool);
+
+  // A second sequence holds one block, leaving exactly one for `cache`.
+  PagedKvCache hog(&pool);
+  AppendAllLayers(hog, geom, 0, 3);  // hog owns block 0
+  EXPECT_EQ(pool.free_blocks(), 1);
+
+  // `cache` fills its one remaining block (8 tokens across a boundary
+  // crossing).
+  AppendAllLayers(cache, geom, 0, kBs);
+  EXPECT_EQ(cache.length(), kBs);
+  EXPECT_EQ(pool.free_blocks(), 0);
+
+  // The next token crosses into a second block for `cache`: pool is dry.
+  EXPECT_TRUE(IsResourceExhausted(
+      cache.append(0, MakeKV(0, kBs, 1, geom, 0), MakeKV(0, kBs, 1, geom, 1))));
+  EXPECT_EQ(cache.length(), kBs);  // committed prefix unchanged
+  EXPECT_EQ(pool.stats().exhaustions, 1);
+  VerifyLayer(cache, geom, 0, kBs);  // still readable
+  VerifyView(cache, geom, 0, kBs);
+
+  // The competitor frees its block; the previously-failing append now succeeds.
+  hog.reset();
+  EXPECT_EQ(pool.free_blocks(), 1);
+  AppendAllLayers(cache, geom, kBs, 1);
+  EXPECT_EQ(cache.length(), kBs + 1);
+  VerifyLayer(cache, geom, 0, kBs + 1);
+}
+
+// After a generation that exceeds capacity fails, dropping the sequence's cache
+// reclaims every block (RAII) — pool stats return to zero, but peak/exhaustions
+// remember it ran dry (the M8-T08 acceptance, at the cache level).
+TEST(PagedKvCacheTest, ExhaustionThenDropReclaimsAllBlocks) {
+  const CacheGeometry geom = TinyGeom();
+  BlockPool pool = MakePool(geom, 1);
+  {
+    PagedKvCache cache(&pool);
+    AppendAllLayers(cache, geom, 0, kBs);  // fills the one block
+    EXPECT_TRUE(IsResourceExhausted(cache.append(0, MakeKV(0, kBs, 1, geom, 0),
+                                                 MakeKV(0, kBs, 1, geom, 1))));
+    EXPECT_EQ(pool.stats().used, 1);
+  }
+  const engine::kvcache::BlockPoolStats s = pool.stats();
+  EXPECT_EQ(s.used, 0);  // no leaked blocks
+  EXPECT_EQ(s.free, s.total);
+  EXPECT_GE(s.peak_used, 1);    // remembers the block was held
+  EXPECT_EQ(s.exhaustions, 1);  // remembers the pool ran dry
 }
 
 // ===========================================================================

@@ -864,4 +864,137 @@ TEST(OptimizedModelTest, OverCapacityCacheLeavesCacheUnchanged) {
   EXPECT_EQ(cache.length(), 0);
 }
 
+// A hook that drains `count` tokens' worth of blocks from a shared pool via a
+// competitor cache, exactly once, when the named activation event fires. Used
+// to trip the pool mid-forward — after the model's capacity check, before the
+// layer-0 append allocates.
+class PoolDrainingHook final : public ActivationHook {
+ public:
+  PoolDrainingHook(PagedKvCache* hog, std::int64_t count, std::string on_event)
+      : hog_(hog), count_(count), on_event_(std::move(on_event)) {}
+
+  void on_activation(const ActivationEvent& event) override {
+    if (drained_ || event.name != on_event_) {
+      return;
+    }
+    drained_ = true;
+    const CacheGeometry geom = hog_->geometry();
+    for (int layer = 0; layer < geom.num_layers; ++layer) {
+      const Tensor k = Unwrap(ops::zeros(
+          Shape{count_, geom.num_kv_heads, geom.head_dim}, DataType::kFloat32));
+      const Tensor v = Unwrap(ops::zeros(
+          Shape{count_, geom.num_kv_heads, geom.head_dim}, DataType::kFloat32));
+      EXPECT_TRUE(hog_->append(layer, k, v).ok());
+    }
+  }
+
+ private:
+  PagedKvCache* hog_;
+  std::int64_t count_;
+  std::string on_event_;
+  bool drained_ = false;
+};
+
+// The §10.2 chain end-to-end from inside a forward: a decode step passes the
+// model's capacity check, but the block pool is drained (by the hook) before
+// its layer-0 append allocates the crossing block, so BlockPool::Allocate →
+// ResourceExhausted propagates out of `forward`. The committed cache is
+// untouched, the pool records the exhaustion, and once the competitor releases
+// its block the same forward succeeds (M8-T08 recovery).
+TEST(OptimizedModelTest, PagedForwardExhaustionFromPoolPropagatesAndRecovers) {
+  std::unique_ptr<Model> opt = Optimized(kLlama);
+  constexpr int kBs = 8;
+  BlockPool pool = FreshPool(*opt, /*block_size=*/kBs, /*num_blocks=*/2);
+  PagedKvCache cache(&pool);
+  PagedKvCache hog(&pool);
+
+  // Prefill exactly one block (kBs tokens) — no hook, no crossing.
+  const std::vector<std::int32_t> prefill = Iota(kBs);
+  (void)ForwardOnce(*opt, prefill, LogitsMode::kLast, cache);
+  ASSERT_EQ(cache.length(), kBs);
+  ASSERT_EQ(pool.free_blocks(), 1);  // one block left for the crossing
+
+  // Decode step at position kBs needs a new block. Its capacity check passes
+  // (1 free block), but the hook drains that block on the `embeddings` event
+  // before the layer-0 append allocates it.
+  PoolDrainingHook drain(&hog, /*count=*/kBs, /*on_event=*/"embeddings");
+  const std::array<std::int32_t, 1> one{prefill.front()};
+  const std::array<std::int32_t, 1> at{static_cast<std::int32_t>(kBs)};
+  const ForwardRequest req{.token_ids = one,
+                           .positions = at,
+                           .cache = &cache,
+                           .logits_mode = LogitsMode::kLast,
+                           .hook = &drain};
+  const StatusOr<Tensor> failed = opt->forward(req);
+  ASSERT_FALSE(failed.ok());
+  EXPECT_TRUE(IsResourceExhausted(failed.status()))
+      << failed.status().ToString();
+  EXPECT_EQ(cache.length(), kBs);          // committed prefix untouched
+  EXPECT_GE(pool.stats().exhaustions, 1);  // the pool Allocate path fired
+
+  // The competitor releases its block; the identical forward now succeeds
+  // (no hook this time).
+  hog.reset();
+  ASSERT_EQ(pool.free_blocks(), 1);
+  const ForwardRequest retry{.token_ids = one,
+                             .positions = at,
+                             .cache = &cache,
+                             .logits_mode = LogitsMode::kLast,
+                             .hook = nullptr};
+  EXPECT_TRUE(opt->forward(retry).ok());
+  EXPECT_EQ(cache.length(), kBs + 1);
+}
+
+// Greedy generation on the optimized backend (the `engine generate` default)
+// over a shared pool drained mid-run: the run fails gracefully with
+// ResourceExhausted, and after both caches drop every block is reclaimed
+// (pool stats zero — the M8-T08 no-leak acceptance, on the optimized path and,
+// via SCALAR_PASS, under forced-scalar).
+TEST(OptimizedModelTest, PagedGreedyExhaustionReclaimsAllBlocks) {
+  std::unique_ptr<Model> opt = Optimized(kLlama);
+  const std::vector<std::int32_t> prompt = PromptIds(kLlama);
+  constexpr int kBs = 8;
+  constexpr std::int64_t kMax = 32;
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(kMax),
+                                .eos_ids = {}};
+
+  // Pool sized so the up-front worst-case check passes (num_blocks·bs >=
+  // prompt + kMax - 1) but the free blocks are drained mid-run.
+  const auto blocks =
+      static_cast<std::int64_t>(prompt.size()) + kMax;  // generous, /bs rounded
+  BlockPool pool = FreshPool(*opt, kBs, ((blocks + kBs - 1) / kBs) + 1);
+  {
+    PagedKvCache cache(&pool);
+    PagedKvCache hog(&pool);
+    bool drained = false;
+    const auto on_token = [&](const engine::engine::TokenEvent& /*ev*/) {
+      if (!drained) {
+        drained = true;
+        // Consume every remaining free block so the sequence cannot grow.
+        const std::int64_t free_now = pool.free_blocks();
+        if (free_now > 0) {
+          const CacheGeometry geom = hog.geometry();
+          const std::int64_t count = free_now * kBs;
+          for (int layer = 0; layer < geom.num_layers; ++layer) {
+            const Tensor k = Unwrap(
+                ops::zeros(Shape{count, geom.num_kv_heads, geom.head_dim},
+                           DataType::kFloat32));
+            const Tensor v = Unwrap(
+                ops::zeros(Shape{count, geom.num_kv_heads, geom.head_dim},
+                           DataType::kFloat32));
+            ASSERT_TRUE(hog.append(layer, k, v).ok());
+          }
+        }
+      }
+    };
+    const auto got = Generate(*opt, cache, prompt, options, on_token);
+    ASSERT_FALSE(got.ok());
+    EXPECT_TRUE(IsResourceExhausted(got.status())) << got.status().ToString();
+  }
+  // Both caches dropped → RAII reclaims every block.
+  const engine::kvcache::BlockPoolStats st = pool.stats();
+  EXPECT_EQ(st.used, 0);  // no leaked blocks
+  EXPECT_EQ(st.free, st.total);
+}
+
 }  // namespace

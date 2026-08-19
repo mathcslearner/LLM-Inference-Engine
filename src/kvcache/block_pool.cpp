@@ -136,7 +136,9 @@ BlockPool::BlockPool(BlockPool&& other) noexcept
       mutex_(std::move(other.mutex_)),
       refcount_(std::move(other.refcount_)),
       free_list_(std::move(other.free_list_)),
-      used_(other.used_) {
+      used_(other.used_),
+      peak_used_(other.peak_used_),
+      exhaustions_(other.exhaustions_) {
   // A BlockTable holds a raw BlockPool*; moving after a block is handed out
   // would dangle it. Create move-constructs out before any Allocate.
   CHECK(other.used_ == 0,
@@ -230,6 +232,13 @@ core::StatusOr<BlockPool> BlockPool::Create(CacheGeometry geom, int block_size,
 core::StatusOr<std::int32_t> BlockPool::Allocate() {
   const std::lock_guard<std::mutex> lock(*mutex_);
   if (free_list_.empty()) {
+    // Pool ran dry. Until the M9 scheduler brings preemption, this is a
+    // graceful, recoverable error (§10.2): it propagates out through
+    // BlockTable::AppendTokens → PagedKvCache::append → the forward → Generate,
+    // and every block already held by the failing sequence is still reclaimed
+    // when its cache drops (RAII). Record it so a consumer can see the pool
+    // ever ran dry after the fact.
+    ++exhaustions_;
     return core::ResourceExhaustedError(
         "BlockPool::Allocate: no free blocks ({} of {} in use)", used_,
         num_blocks_);
@@ -238,6 +247,9 @@ core::StatusOr<std::int32_t> BlockPool::Allocate() {
   free_list_.pop_back();
   refcount_[static_cast<std::size_t>(block)] = 1;
   ++used_;
+  if (used_ > peak_used_) {
+    peak_used_ = used_;
+  }
   return block;
 }
 
@@ -287,6 +299,9 @@ BlockPoolStats BlockPool::stats() const {
   s.utilization = num_blocks_ > 0 ? static_cast<double>(used_) /
                                         static_cast<double>(num_blocks_)
                                   : 0.0;
+  s.peak_used = peak_used_;
+  s.exhaustions = exhaustions_;
+  s.block_size = block_size_;
   return s;
 }
 

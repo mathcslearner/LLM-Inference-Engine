@@ -29,6 +29,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // The engine entry point. `engine` prints the version; `engine generate`
@@ -342,8 +343,37 @@ struct Args {
     }
   };
 
-  ASSIGN_OR_RETURN(const engine::engine::GenerateResult result,
-                   Generate(*model, *cache, prompt_ids, options, on_token));
+  // Print the paged pool's usage stats (M8-T07/T08). Paged only — the
+  // contiguous cache has no block pool. Reused on both the success and the
+  // exhaustion paths so a failed run still reports where memory stood.
+  const auto print_pool_stats = [&]() {
+    if (pool == nullptr) {
+      return;
+    }
+    const engine::kvcache::BlockPoolStats st = pool->stats();
+    LOG_INFO("kvcache",
+             "paged KV: {}/{} blocks used ({:.1f}% util), {} free, peak {}, "
+             "exhaustions {}, block_size {}, sequence {} tokens",
+             st.used, st.total, 100.0 * st.utilization, st.free, st.peak_used,
+             st.exhaustions, st.block_size, cache->length());
+    fmt::print(
+        "kv cache: {}/{} blocks used ({:.1f}% util), peak {}, exhaustions {}, "
+        "block_size {} → {} tokens capacity\n",
+        st.used, st.total, 100.0 * st.utilization, st.peak_used, st.exhaustions,
+        st.block_size, st.total * st.block_size);
+  };
+
+  // On a mid-generation failure (e.g. a paged pool draining, M8-T08) the tokens
+  // produced so far were already streamed through `on_token`; report the
+  // failure gracefully with the pool state before propagating the error.
+  auto gen_result = Generate(*model, *cache, prompt_ids, options, on_token);
+  if (!gen_result.ok()) {
+    fmt::print("\n----\ngeneration stopped: {}\n",
+               gen_result.status().ToString());
+    print_pool_stats();
+    return gen_result.status();
+  }
+  const engine::engine::GenerateResult result = *std::move(gen_result);
   const std::vector<std::int32_t>& generated = result.tokens;
   const auto t_gen1 = std::chrono::steady_clock::now();
 
@@ -363,21 +393,8 @@ struct Args {
   fmt::print("generated {} tokens (finish_reason: {})\n", generated.size(),
              engine::engine::FinishReasonName(result.finish_reason));
 
-  // Cache stats (M8-T07 acceptance: memory stats logged). Paged only — the
-  // contiguous cache has no block pool.
-  if (pool != nullptr) {
-    const engine::kvcache::BlockPoolStats st = pool->stats();
-    LOG_INFO("kvcache",
-             "paged KV: {}/{} blocks used ({:.1f}% util), {} free, block_size "
-             "{}, sequence {} tokens",
-             st.used, st.total, 100.0 * st.utilization, st.free,
-             args.kv_block_size, cache->length());
-    fmt::print(
-        "kv cache: {}/{} blocks used ({:.1f}% util), block_size {} → {} "
-        "tokens capacity\n",
-        st.used, st.total, 100.0 * st.utilization, args.kv_block_size,
-        st.total * args.kv_block_size);
-  }
+  // Cache stats (M8-T07 acceptance: memory stats logged).
+  print_pool_stats();
   fmt::print("prefill: {:.1f} ms ({} prompt tokens, {:.1f} tok/s)\n",
              prefill_ms, prompt_ids.size(),
              prefill_ms > 0 ? static_cast<double>(prompt_ids.size()) /

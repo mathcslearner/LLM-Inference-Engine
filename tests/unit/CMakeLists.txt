@@ -240,7 +240,7 @@ engine_add_tests(TREE unit SOURCES
 engine_add_tests(TREE unit SOURCES
   generator_test.cpp
   DEPS engine::engine engine::model engine::kvcache engine::tokenizer
-       nlohmann_json::nlohmann_json
+       engine::tensor nlohmann_json::nlohmann_json
   LABELS engine)
 
 # stop_test (M7-T04): the stop-condition machinery (engine/stop.{h,cpp}) —

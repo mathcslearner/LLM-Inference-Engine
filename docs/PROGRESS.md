@@ -2598,3 +2598,75 @@ optimized-cpu-execution.md §8 (the M8-T07 consumer-swap landed note);
 BASELINES.md M8-T07 (the A/B). Format clean; scoped tidy clean on all changed
 TUs (loader.h/workspace.h edits were additive declarations — no perturbation of
 existing call sites; the TUs consuming the new symbols were tidy-swept).
+
+### M8-T08 — Exhaustion behavior & metrics (2026-08-19)
+
+The pool-dry-mid-generation behavior pinned down as a documented, resumable
+error, plus the cache-usage metrics API finalized. The error plumbing and RAII
+reclamation already existed (§10.2): `BlockPool::Allocate` → `ResourceExhausted`
+→ `BlockTable::AppendTokens` (all-or-nothing) → `PagedKvCache::append` →
+`Model::forward` → `Generate`, and a dropped `PagedKvCache`/`BlockTable` returns
+every block. This ticket added the metrics, the graceful-CLI reporting, the
+contract docs, and the end-to-end tests that were missing.
+
+**Metrics (`src/kvcache/block_pool.{h,cpp}`).** `BlockPoolStats` gained three
+fields — `peak_used` (high-water mark of `used`, bumped in `Allocate` on
+success), `exhaustions` (count of `Allocate` calls that returned
+`ResourceExhausted`, one per drained append attempt), and `block_size` (so a
+consumer holding only the stats prints token capacity as `total · block_size`).
+The two counters are monotone since `Create` and maintained under the mutex the
+block lifecycle already holds — two integer ops, off nothing's hot path — so
+they survive a sequence's blocks being reclaimed and answer "did this pool ever
+run dry?" after the fact. The move-ctor carries them.
+
+**Contract (`src/engine/generator.h`, docs).** Split the `Generate` error
+contract into two classes: *front-loaded* (raised before any forward, cache
+untouched, nothing emitted — including the up-front `capacity()` check, which is
+**exact** for a private paged cache so a run that cannot fit is rejected here);
+and *mid-generation* (any `forward` failure once decoding is under way, including
+a `ResourceExhausted` from a **shared** paged pool drained by another sequence
+after the up-front check passed). A mid-generation failure propagates the
+`forward` status; the already-produced tokens are not in the returned `StatusOr`
+(no partial result beside a Status) but were every one delivered through
+`on_token` (the partial-result channel), the failing forward wrote nothing
+(front-loaded inside `forward`), and the cache holds a consistent
+`cache.length()`-token prefix — so generation is **resumable** from the last
+delivered token, reproducing the identical greedy trajectory (the KV invariant
+as a resumability guarantee). This is the seam M9 preemption/resume and M10
+streaming-with-cancel build on.
+
+**Hardening (`src/kvcache/paged_cache.cpp`).** A failed layer-0 `AppendTokens`
+now explicitly clears `pending_slots_` (it previously kept the prior forward's
+stale mapping; harmless since `next_layer_` stays 0, but the post-failure state
+is now unambiguous — a decode step can be retried once blocks free up).
+
+**CLI (`src/main.cpp`).** `engine generate` now reports pool stats — used/free/
+util, peak, exhaustions — on **both** the success and the failure path (a
+`print_pool_stats` lambda), and on a mid-run failure prints the streamed tokens
+followed by `generation stopped: <status>` and the pool state before propagating
+the error, rather than bailing with a bare error after the streamed text.
+
+**Tests (+12 → 1207 green).** `block_pool_test` (+4): `block_size` exposed,
+`peak_used` high-water/never-decreases, `exhaustions` counts failed allocations
+only, both counters survive full reclamation; concurrency stress asserts the
+counters stay bounded. `paged_cache_test` (+2): mid-sequence block-boundary
+exhaustion (committed prefix + `view`/`paged_view` intact, `exhaustions`
+recorded, competitor-release recovery), and exhaustion-then-drop reclaiming all
+blocks (stats zero, peak/exhaustions retained). `generator_test` (+2, reference
+backend): the paged front-loaded rejection (nothing allocated), and the
+mid-generation acceptance — a hog in the token callback drains the shared pool,
+the run fails gracefully with `ResourceExhausted`, the delivered prefix matches
+the uninterrupted trajectory, `cache.length()` is consistent, resume from the
+last delivered token reproduces the full trajectory token-for-token, and pool
+stats return to zero after drop. `optimized_model_test` (+2, SCALAR_PASS): the
+pool `Allocate → ResourceExhausted` chain from inside a `forward` (a hook drains
+the pool between the capacity check and the layer-0 append) propagating +
+recovering, and paged greedy exhaustion reclaiming all blocks on the optimized
+backend — the `engine generate` default, covered under forced-scalar too.
+
+No perf claim (no BASELINES entry — the counters are two integer ops under an
+already-held lock). Docs: paged-kv-cache.md §6.2 (metrics fields + as-built),
+§10.2 (the M8-T08 as-built: front-loaded vs mid-generation, resumability, CLI
+reporting), §12 (test bullet); model-execution.md §10 (mid-generation
+`ResourceExhausted` note). Format clean; scoped tidy clean on the edited TUs and
+the `block_pool.h`/`generator.h` header-includer sets.

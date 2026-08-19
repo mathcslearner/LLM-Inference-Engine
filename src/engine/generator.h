@@ -108,7 +108,10 @@ struct GenerateResult {
 // detokenized stream, or `sampling.max_tokens`. The first three yield
 // `FinishReason::kStop`; the last, `kLength`.
 //
-// Errors leave nothing generated and, being front-loaded, `cache` unmodified:
+// Two error classes with different cache/output guarantees:
+//
+// *Front-loaded* errors are raised before any forward runs, leave nothing
+// generated, and leave `cache` unmodified:
 //   * empty `prompt_ids` → InvalidArgument.
 //   * an invalid or not-yet-implemented `options.sampling` → InvalidArgument /
 //     Unimplemented (from `Sampler::Create`); `max_tokens <= 0` is one such
@@ -119,9 +122,25 @@ struct GenerateResult {
 //     ResourceExhausted. The check is up front (worst case, ignoring early
 //     stops) because a `StatusOr` cannot return a partial result beside a
 //     Status — a caller who wants "generate up to the cache limit" sizes
-//     `max_tokens` to fit.
-//   * any `model.forward` error (out-of-range id, geometry mismatch, position
-//     overflow) propagates unchanged.
+//     `max_tokens` to fit. For a private cache this bound is exact, so a run
+//     that cannot fit is rejected here with the cache untouched.
+//
+// *Mid-generation* errors surface once decoding is under way (any
+// `model.forward` failure — out-of-range id, geometry mismatch, position
+// overflow, or a `ResourceExhausted` from a **shared** paged pool drained by
+// another sequence after this run's up-front check passed, M8-T08). These
+// propagate the `forward` status unchanged and, because a `StatusOr` cannot
+// carry a partial result, the already-produced tokens are **not** in the
+// returned value — but every one of them was already delivered through
+// `on_token` (the callback is the partial-result channel), and the failing
+// forward wrote nothing (front-loaded inside `forward`), so `cache` holds a
+// consistent prefix of exactly `cache.length()` committed tokens. Generation is
+// therefore **resumable**: once capacity frees up, a later
+// `Generate(model, cache, {last delivered token}, …)` continues the identical
+// greedy trajectory (the KV invariant as a resumability guarantee). The
+// sequence's blocks are reclaimed when its cache drops regardless (RAII), so no
+// blocks leak on the error path. This is the seam M9 preemption/resume and
+// M10 streaming-with-cancel build on.
 [[nodiscard]] core::StatusOr<GenerateResult> Generate(
     model::Model& model, kvcache::KvCache& cache,
     std::span<const std::int32_t> prompt_ids, const GenerateOptions& options,

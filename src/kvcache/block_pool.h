@@ -43,12 +43,20 @@
 
 namespace engine::kvcache {
 
-// Pool occupancy snapshot (design §6.2). `used + free == total` always.
+// Pool occupancy snapshot — the cache-usage metrics surface (design §6.2,
+// §10.2). `used + free == total` always. M9's scheduler admits against
+// `free`/`used`; M16's `/metrics` endpoint exports these. The last three fields
+// are the M8-T08 additions: `peak_used`/`exhaustions` are monotone-since-Create
+// (they only ever grow), and `block_size` lets a consumer holding just the
+// stats print token capacity (`total · block_size`) without the pool.
 struct BlockPoolStats {
-  std::int64_t total = 0;    // num_blocks
-  std::int64_t used = 0;     // blocks with refcount >= 1
-  std::int64_t free = 0;     // blocks on the free list
-  double utilization = 0.0;  // used / total (0 when total == 0)
+  std::int64_t total = 0;        // num_blocks
+  std::int64_t used = 0;         // blocks with refcount >= 1
+  std::int64_t free = 0;         // blocks on the free list
+  double utilization = 0.0;      // used / total (0 when total == 0)
+  std::int64_t peak_used = 0;    // high-water mark of `used` since Create
+  std::int64_t exhaustions = 0;  // Allocate() calls that hit ResourceExhausted
+  int block_size = 0;            // tokens per block (§4)
 };
 
 class BlockPool {
@@ -180,6 +188,14 @@ class BlockPool {
   std::vector<std::int32_t> refcount_;   // per-block refcount
   std::vector<std::int32_t> free_list_;  // stack of free block ids (LIFO)
   std::int64_t used_ = 0;                // blocks with refcount >= 1
+  // Metrics (§10.2), guarded by `mutex_` and monotone since Create: the
+  // high-water mark of `used_`, and the count of Allocate() calls that failed
+  // with ResourceExhausted (one per drained append attempt). Cheap to maintain
+  // — a compare and an increment under the lock the block lifecycle already
+  // holds — and never reset, so they survive a sequence's blocks being
+  // reclaimed and answer "did this pool ever run dry?" after the fact.
+  std::int64_t peak_used_ = 0;
+  std::int64_t exhaustions_ = 0;
 };
 
 }  // namespace engine::kvcache

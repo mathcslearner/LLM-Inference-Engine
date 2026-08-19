@@ -1071,7 +1071,7 @@ interface; wire capacity config (`--kv-cache-memory`); expose cache stats.
 - End-to-end regression: tiny-fixture greedy output identical to pre-paging engine; 1B-model generation works with memory stats logged.
 - `bench_generate` shows no more than 10% decode-throughput regression vs M6 baseline (recorded).
 
-### M8-T08 · Exhaustion behavior & metrics
+### M8-T08 · Exhaustion behavior & metrics — ✅ DONE (2026-08-19)
 Defined behavior when the pool runs dry mid-generation (error for now — preemption
 arrives with the scheduler in M9); cache usage metrics API (blocks used/free,
 utilization) consumed later by scheduler and metrics endpoint.

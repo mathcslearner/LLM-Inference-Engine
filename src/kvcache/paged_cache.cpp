@@ -91,8 +91,16 @@ core::Status PagedKvCache::append(int layer, const tensor::Tensor& k,
 
   if (layer == 0) {
     // Grow the table all-or-nothing; on exhaustion nothing is written and the
-    // cache is left exactly as before (BlockTable's guarantee).
-    ASSIGN_OR_RETURN(pending_slots_, table_.AppendTokens(t_dim));
+    // cache is left exactly as before (BlockTable's guarantee). `next_layer_`
+    // is still 0, so no forward is in progress after a failed open — clear any
+    // stale slot mapping from a prior forward so the post-failure state is
+    // unambiguous (a decode step can be retried once blocks free up, §10.2).
+    auto grown = table_.AppendTokens(t_dim);
+    if (!grown.ok()) {
+      pending_slots_.clear();
+      return grown.status();
+    }
+    pending_slots_ = *std::move(grown);
   } else {
     const auto pending = static_cast<std::int64_t>(pending_slots_.size());
     if (t_dim != pending) {

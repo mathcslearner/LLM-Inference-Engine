@@ -884,7 +884,13 @@ struct GenerateResult {
   EOS) because a `StatusOr<vector>` cannot return a partial result beside a
   Status — a caller wanting "generate up to the cache limit" sizes
   `max_new_tokens` to fit. Any `model.forward` error (bad id, geometry mismatch,
-  position overflow past `max_position_embeddings`) propagates unchanged.
+  position overflow past `max_position_embeddings`) propagates unchanged. *(A
+  `ResourceExhausted` can also surface **mid-generation** — a shared paged pool
+  drained by another sequence after the up-front check passed, M8-T08. That
+  forward wrote nothing, but tokens already produced were delivered through
+  `on_token`, so the cache holds a consistent `cache.length()` prefix and
+  generation is resumable from the last delivered token. See paged-kv-cache.md
+  §10.2.)*
 - **`on_token`** fires **exactly once per returned id, in order**, after that id
   is appended to the result and before the next `forward` — the per-token
   callback hook the roadmap names ("hooks for per-token callbacks, streaming

@@ -3,13 +3,18 @@
 #include "common/paths.h"
 #include "core/status.h"
 #include "engine/backend.h"
+#include "kvcache/block_pool.h"
 #include "kvcache/kv_cache.h"
+#include "kvcache/paged_cache.h"
 #include "kvcache/simple_cache.h"
 #include "model/loader.h"
 #include "model/model.h"
 #include "model/registry.h"
 #include "sampling/params.h"
 #include "tensor/dtype.h"
+#include "tensor/ops.h"
+#include "tensor/shape.h"
+#include "tensor/tensor.h"
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -45,7 +50,9 @@ using engine::engine::Generate;
 using engine::engine::GenerateOptions;
 using engine::engine::ParseBackend;
 using engine::engine::StopTrigger;
+using engine::kvcache::BlockPool;
 using engine::kvcache::CacheGeometry;
+using engine::kvcache::PagedKvCache;
 using engine::kvcache::SimpleKvCache;
 using engine::model::BuildModel;
 using engine::model::ForwardRequest;
@@ -83,6 +90,29 @@ template <typename T>
 
 [[nodiscard]] SimpleKvCache FreshCache(std::int64_t capacity = kMaxPos) {
   return Unwrap(SimpleKvCache::Create(ModelGeometry(), capacity));
+}
+
+// A block pool for the paged-cache exhaustion tests (M8-T08). bs=8 is the
+// smallest valid block size (§4).
+constexpr int kBlockSize = 8;
+[[nodiscard]] BlockPool FreshPool(std::int64_t num_blocks) {
+  return Unwrap(
+      BlockPool::Create(ModelGeometry(), kBlockSize, num_blocks, nullptr));
+}
+
+// Append `count` throwaway tokens to `hog` across every layer, draining blocks
+// from the shared pool (content is irrelevant — this only competes for blocks).
+void DrainWith(PagedKvCache& hog, std::int64_t count) {
+  const CacheGeometry geom = ModelGeometry();
+  for (int layer = 0; layer < geom.num_layers; ++layer) {
+    const engine::tensor::Tensor k = Unwrap(engine::tensor::ops::zeros(
+        engine::tensor::Shape{count, geom.num_kv_heads, geom.head_dim},
+        DataType::kFloat32));
+    const engine::tensor::Tensor v = Unwrap(engine::tensor::ops::zeros(
+        engine::tensor::Shape{count, geom.num_kv_heads, geom.head_dim},
+        DataType::kFloat32));
+    ASSERT_TRUE(hog.append(layer, k, v).ok());
+  }
 }
 
 // One greedy-generation golden case from generate.json.
@@ -410,6 +440,107 @@ TEST(GeneratorTest, InsufficientCapacityIsResourceExhausted) {
   EXPECT_TRUE(IsResourceExhausted(got.status()));
   EXPECT_NE(got.status().message().find("capacity"), std::string::npos);
   EXPECT_EQ(cache.length(), 0);  // front-loaded: nothing appended
+}
+
+// The paged twin of the previous test: a pool too small for prompt + decode is
+// rejected up front (the private cache's capacity() is exact), nothing is
+// allocated, and no blocks leak (M8-T08).
+TEST(GeneratorTest, PagedInsufficientCapacityIsResourceExhaustedUpFront) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  const std::vector<std::int32_t> prompt = {1, 5, 9};
+  // One block = 8 slots; prompt(3) + 8 decode appends cannot fit.
+  BlockPool pool = FreshPool(/*num_blocks=*/1);
+  PagedKvCache cache(&pool);
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(8),
+                                .eos_ids = {}};
+  const auto got = Generate(*model, cache, prompt, options);
+  ASSERT_FALSE(got.ok());
+  EXPECT_TRUE(IsResourceExhausted(got.status()));
+  EXPECT_EQ(cache.length(), 0);     // front-loaded: nothing appended
+  EXPECT_EQ(pool.stats().used, 0);  // no blocks allocated
+  EXPECT_EQ(pool.stats().exhaustions, 0);
+}
+
+// The M8-T08 acceptance at the generation level: a shared pool drained mid-run
+// (by a competitor appending inside the token callback) makes a later decode
+// step fail gracefully with ResourceExhausted. The tokens produced before the
+// failure were all delivered through the callback and match the uninterrupted
+// trajectory; the failing forward committed nothing; dropping the caches
+// reclaims every block (pool stats return to zero); and resuming from the last
+// delivered token reproduces the full uninterrupted trajectory token-for-token.
+TEST(GeneratorTest, PagedMidGenerationExhaustionIsGracefulAndResumable) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  const std::vector<std::int32_t> prompt = {1, 5, 9};
+  constexpr std::int64_t kMax = 16;
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(kMax),
+                                .eos_ids = {}};
+
+  // Reference: uninterrupted greedy on an ample pool.
+  std::vector<std::int32_t> reference;
+  {
+    BlockPool big = FreshPool(/*num_blocks=*/8);
+    PagedKvCache cache(&big);
+    reference = Unwrap(Generate(*model, cache, prompt, options)).tokens;
+    ASSERT_EQ(reference.size(), static_cast<std::size_t>(kMax));
+  }
+
+  // Interrupted: a 3-block pool passes the up-front check (24 slots >= 18), but
+  // a hog drains the two free blocks inside the first callback, so the sequence
+  // fails when it must cross out of its single owned block.
+  BlockPool pool = FreshPool(/*num_blocks=*/3);
+  std::vector<std::int32_t> delivered;
+  engine::core::Status run_status = engine::core::OkStatus();
+  {
+    PagedKvCache cache(&pool);
+    PagedKvCache hog(&pool);
+    bool drained = false;
+    const auto on_token = [&](const engine::engine::TokenEvent& ev) {
+      delivered.push_back(ev.id);
+      if (!drained) {
+        drained = true;
+        // Consume the 2 free blocks.
+        DrainWith(hog, /*count=*/2 * static_cast<std::int64_t>(kBlockSize));
+      }
+    };
+    auto got = Generate(*model, cache, prompt, options, on_token);
+    ASSERT_FALSE(got.ok());
+    run_status = got.status();
+    EXPECT_TRUE(IsResourceExhausted(run_status)) << run_status.ToString();
+
+    // Everything delivered is a proper, matching prefix of the reference.
+    ASSERT_FALSE(delivered.empty());
+    ASSERT_LT(delivered.size(), reference.size());
+    for (std::size_t i = 0; i < delivered.size(); ++i) {
+      EXPECT_EQ(delivered[i], reference[i]) << "token " << i;
+    }
+    // The failing forward committed nothing: the last delivered token was not
+    // appended, so length == prompt + (delivered - 1).
+    EXPECT_EQ(cache.length(), static_cast<std::int64_t>(prompt.size()) +
+                                  static_cast<std::int64_t>(delivered.size()) -
+                                  1);
+
+    // Free the competitor's blocks and resume from the last delivered token.
+    hog.reset();
+    const std::int64_t remaining =
+        kMax - static_cast<std::int64_t>(delivered.size());
+    ASSERT_GT(remaining, 0);
+    const std::vector<std::int32_t> resume_prompt = {delivered.back()};
+    const GenerateOptions resume_opts{
+        .sampling = SamplingParams::Greedy(remaining), .eos_ids = {}};
+    const std::vector<std::int32_t> resumed =
+        Unwrap(Generate(*model, cache, resume_prompt, resume_opts)).tokens;
+
+    // delivered ++ resumed == the uninterrupted trajectory.
+    std::vector<std::int32_t> stitched = delivered;
+    stitched.insert(stitched.end(), resumed.begin(), resumed.end());
+    EXPECT_EQ(stitched, reference);
+  }
+  // Both caches dropped: every block reclaimed, but the pool remembers it ran
+  // dry (M8-T08).
+  const engine::kvcache::BlockPoolStats st = pool.stats();
+  EXPECT_EQ(st.used, 0);  // no leaked blocks
+  EXPECT_EQ(st.free, st.total);
+  EXPECT_GT(st.peak_used, 0);
 }
 
 TEST(GeneratorTest, OutOfRangePromptIdPropagatesFromForward) {

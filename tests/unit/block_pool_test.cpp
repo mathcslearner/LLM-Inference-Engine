@@ -304,6 +304,72 @@ TEST(BlockPoolStatsCheck, AccurateThroughScriptedSequence) {
   expect_stats(0);
 }
 
+// ----------------------------- metrics (M8-T08) -----------------------------
+
+TEST(BlockPoolMetrics, BlockSizeIsExposed) {
+  const BlockPool pool = Unwrap(BlockPool::Create(TinyGeom(), 32, 4, nullptr));
+  EXPECT_EQ(pool.stats().block_size, 32);
+}
+
+TEST(BlockPoolMetrics, PeakUsedTracksHighWaterMarkAndNeverDecreases) {
+  const std::int64_t n = 5;
+  BlockPool pool = Unwrap(BlockPool::Create(TinyGeom(), 16, n, nullptr));
+  EXPECT_EQ(pool.stats().peak_used, 0);
+
+  const std::int32_t a = Unwrap(pool.Allocate());
+  const std::int32_t b = Unwrap(pool.Allocate());
+  const std::int32_t c = Unwrap(pool.Allocate());
+  EXPECT_EQ(pool.stats().peak_used, 3);
+
+  // Releasing lowers `used` but not `peak_used`.
+  pool.Release(a);
+  pool.Release(b);
+  EXPECT_EQ(pool.stats().used, 1);
+  EXPECT_EQ(pool.stats().peak_used, 3);
+
+  // A new high-water mark raises it.
+  (void)Unwrap(pool.Allocate());
+  (void)Unwrap(pool.Allocate());
+  (void)Unwrap(pool.Allocate());
+  (void)Unwrap(pool.Allocate());
+  EXPECT_EQ(pool.stats().used, 5);
+  EXPECT_EQ(pool.stats().peak_used, 5);
+  (void)c;
+}
+
+TEST(BlockPoolMetrics, ExhaustionsCountFailedAllocations) {
+  BlockPool pool = Unwrap(BlockPool::Create(TinyGeom(), 16, 2, nullptr));
+  EXPECT_EQ(pool.stats().exhaustions, 0);
+  const std::int32_t a = Unwrap(pool.Allocate());
+  (void)Unwrap(pool.Allocate());
+
+  // Two failed allocations against the drained pool.
+  EXPECT_TRUE(IsResourceExhausted(pool.Allocate().status()));
+  EXPECT_TRUE(IsResourceExhausted(pool.Allocate().status()));
+  EXPECT_EQ(pool.stats().exhaustions, 2);
+  // A successful allocation does not touch the counter.
+  pool.Release(a);
+  (void)Unwrap(pool.Allocate());
+  EXPECT_EQ(pool.stats().exhaustions, 2);
+}
+
+TEST(BlockPoolMetrics, PeakAndExhaustionsSurviveFullReclamation) {
+  // The whole point of the M8-T08 counters: after every block is reclaimed,
+  // `used` returns to 0 but the pool still records it once ran dry.
+  BlockPool pool = Unwrap(BlockPool::Create(TinyGeom(), 16, 2, nullptr));
+  const std::int32_t a = Unwrap(pool.Allocate());
+  const std::int32_t b = Unwrap(pool.Allocate());
+  EXPECT_TRUE(IsResourceExhausted(pool.Allocate().status()));
+  pool.Release(a);
+  pool.Release(b);
+
+  const BlockPoolStats s = pool.stats();
+  EXPECT_EQ(s.used, 0);
+  EXPECT_EQ(s.free, s.total);
+  EXPECT_EQ(s.peak_used, 2);
+  EXPECT_EQ(s.exhaustions, 1);
+}
+
 // ----------------------------- blocks_needed -----------------------------
 
 TEST(BlockPoolBlocksNeeded, MatchesHandWorkedBoundaryCrossings) {
@@ -446,6 +512,10 @@ TEST(BlockPoolConcurrency, ConcurrentAllocateReleaseKeepsInvariant) {
   EXPECT_EQ(s.used, 0);
   EXPECT_EQ(s.free, n);
   EXPECT_EQ(s.used + s.free, s.total);
+  // The metrics counters stay bounded under contention.
+  EXPECT_GE(s.peak_used, 0);
+  EXPECT_LE(s.peak_used, n);
+  EXPECT_GE(s.exhaustions, 0);
 }
 
 }  // namespace

@@ -716,7 +716,7 @@ behind an existing subsystem):
   **1058 ctest green**; design §15.2/§15.5/§15.6 + optimized-cpu-execution.md §2
   updated; format + scoped tidy clean.
 
-- **M8 (paged KV cache & block manager) — in progress** (2026-08-19–): T01
+- **M8 (paged KV cache & block manager) — complete** (2026-08-19): T01
   `docs/design/paged-kv-cache.md` — the contract M8-T02…T08 (+ the
   M9/M11/M12/M13/M15 interactions) build on. **Docs-only.** Fixes: the
   **physical layout** (two per-layer K/V slabs `[num_blocks, Hkv, bs, d]` fp32,
@@ -913,15 +913,52 @@ behind an existing subsystem):
   `optimized_model_test` +4 ×SCALAR_PASS incl. decode-step bit-exactness +
   paged_view-error-propagation) → **1195 green**. design paged-kv-cache.md
   §5.1/§10.1/§13 + optimized-cpu-execution.md §8 "as built"; format + scoped tidy
-  clean.
+  clean. T08 exhaustion behavior & metrics: pinned the pool-dry-mid-generation
+  behavior down as a documented, **resumable** error and finalized the
+  cache-usage metrics API. The error plumbing + RAII reclamation already existed
+  (`BlockPool::Allocate` → `ResourceExhausted` → `BlockTable::AppendTokens` →
+  `PagedKvCache::append` → `Model::forward` → `Generate`; a dropped cache returns
+  every block), so T08 added the metrics, the graceful-CLI reporting, the
+  contract docs, and the missing end-to-end tests. **Metrics**
+  (`block_pool.{h,cpp}`): `BlockPoolStats` gained `peak_used` (high-water mark,
+  bumped in `Allocate` on success), `exhaustions` (failed-`Allocate` count, one
+  per drained append), and `block_size` — both counters monotone since `Create`,
+  maintained under the existing mutex (two integer ops off any hot path), so they
+  survive full reclamation and answer "did this pool ever run dry?" after the
+  fact. **Contract** (`generator.h`): split into *front-loaded* (before any
+  forward, cache untouched, nothing emitted — the up-front `capacity()` check is
+  **exact** for a private paged cache, so an over-capacity run is rejected here)
+  vs *mid-generation* (a shared paged pool drained by another sequence after the
+  up-front check passes → the `forward` status propagates; the produced tokens
+  are not in the returned `StatusOr` but were each delivered via `on_token`, the
+  failing forward wrote nothing, and the cache holds a consistent
+  `cache.length()` prefix → **resumable** from the last delivered token,
+  reproducing the identical greedy trajectory — the seam M9 preemption/resume and
+  M10 streaming build on). **Hardening** (`paged_cache.cpp`): a failed layer-0
+  append clears `pending_slots_` so the post-failure state is unambiguous.
+  **CLI** (`main.cpp`): `engine generate` reports pool stats (used/free/util,
+  peak, exhaustions) on both success and failure, and on a mid-run failure prints
+  the streamed tokens + `generation stopped: <status>` + pool state before
+  propagating. +12 tests → **1207 green**: `block_pool_test` (+4, counters +
+  reclamation-survival + concurrency-bounded), `paged_cache_test` (+2,
+  mid-sequence boundary exhaustion with view/paged_view intact + recovery,
+  exhaustion-then-drop reclaims all), `generator_test` (+2 reference backend,
+  paged front-loaded rejection + the mid-generation-drain-then-resume acceptance),
+  `optimized_model_test` (+2 ×SCALAR_PASS, the pool `Allocate → ResourceExhausted`
+  chain from inside a `forward` propagating+recovering + paged greedy exhaustion
+  reclaiming all blocks on the optimized backend). No BASELINES entry (no perf
+  claim). design paged-kv-cache.md §6.2/§10.2/§12 + model-execution.md §10;
+  format + scoped tidy clean.
 
-Next up: **M8-T08** (exhaustion behavior & metrics): define graceful behavior
-when the block pool runs dry mid-generation (error for now — preemption arrives
-with the M9 scheduler), and finalize the cache-usage metrics API (blocks
-used/free, utilization) that the scheduler (M9) and metrics endpoint (M16)
-consume. The plumbing already exists — `BlockPool::Allocate` →
-`ResourceExhausted` propagates through `BlockTable::AppendTokens` →
-`PagedKvCache::append` → `Generate` (§10.2), and `BlockPool::stats()` is the
-metrics surface. Acceptance: a generation exceeding capacity fails gracefully
-with `ResourceExhausted`, and pool stats return to zero afterward (no leaked
-blocks — RAII reclamation asserted via stats). Per paged-kv-cache.md §10.2.
+Next up: **M9-T01** (design doc: request lifecycle, scheduler & runtime) — write
+`docs/design/scheduler-runtime.md`: the request/sequence state machine
+(WAITING→RUNNING→(PREEMPTED)→FINISHED), the step loop, scheduling policy v1
+(FCFS, token budget, block-availability admission against `BlockPool::stats()` /
+`free_blocks()` / `blocks_needed()`, decode-priority), batch composition
+(separate vs mixed prefill/decode — choose and justify), the threading model
+(client threads → queue → single engine thread → per-request output channels),
+preemption policy (evict-and-recompute, resting on the M8-T08 resumable-error
+seam and the KV invariant), and cancellation. Docs-only; opens Milestone 9
+(continuous batching scheduler & runtime). Acceptance: state-machine diagram with
+every legal transition, step-loop pseudocode, explicit invariants. Per ROADMAP
+M9-T01.
