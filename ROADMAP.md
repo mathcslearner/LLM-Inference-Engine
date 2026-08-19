@@ -967,7 +967,7 @@ independent of batch composition.
 - Statistical tests: empirical distribution over 10k draws matches expected within chi-square tolerance for known logits; top-k/top-p masks verified exactly.
 - Same seed ⇒ identical sequence across runs; different requests with different seeds are independent.
 
-### M7-T03 · Repetition, presence & frequency penalties
+### M7-T03 · Repetition, presence & frequency penalties — ✅ DONE (2026-08-19)
 Apply penalties over the request's token history (prompt + generated, matching
 OpenAI/vLLM semantics — documented choice) before temperature.
 **Depends on:** M7-T02.

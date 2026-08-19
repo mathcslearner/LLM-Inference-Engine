@@ -14,36 +14,24 @@
 #include <utility>
 #include <vector>
 
-// M7-T02: the sampler with both selection branches. `temperature == 0` is
-// greedy argmax (unchanged from T01); `temperature > 0` runs the stochastic
-// pipeline (temperature -> top-k -> top-p -> Philox categorical draw, design
-// §15.2). The penalty (T03), stop-condition (T04) and logprobs (T05) stages are
+// M7-T03: the sampler with penalties wired into both selection branches. The
+// history-based penalties (repetition/frequency/presence) are stage 1, applied
+// to the raw logits *before* temperature (design §15.2) — and ahead of the
+// greedy argmax too, so a penalty can move the chosen token. `temperature == 0`
+// is greedy argmax (over the penalized logits); `temperature > 0` runs the full
+// stochastic pipeline (penalties -> temperature -> top-k -> top-p -> Philox
+// categorical draw). The stop-condition (T04) and logprobs (T05) stages are
 // still guarded off at `Create` so a requested knob is never silently dropped.
 
 namespace engine::sampling {
 namespace {
 
-// True when `params` stays within the stages M7-T02 implements: any
-// temperature, top-k and top-p (all handled by `Sample`), but no penalties,
-// stop machinery (T04 owns those in the loop), or logprobs.
+// True when `params` stays within the stages implemented through M7-T03: any
+// temperature, top-k, top-p and the three penalties (all handled by `Sample`),
+// but no stop machinery (T04 owns those in the loop) or logprobs (T05).
 // `ValidateSamplingParams` has already run, so the values are in range here.
 [[nodiscard]] core::Status CheckImplementedSubset(
     const SamplingParams& params) {
-  if (params.repetition_penalty != 1.0F) {
-    return core::UnimplementedError(
-        "repetition_penalty is not implemented until M7-T03; got {}",
-        params.repetition_penalty);
-  }
-  if (params.presence_penalty != 0.0F) {
-    return core::UnimplementedError(
-        "presence_penalty is not implemented until M7-T03; got {}",
-        params.presence_penalty);
-  }
-  if (params.frequency_penalty != 0.0F) {
-    return core::UnimplementedError(
-        "frequency_penalty is not implemented until M7-T03; got {}",
-        params.frequency_penalty);
-  }
   if (!params.stop_token_ids.empty()) {
     return core::UnimplementedError(
         "stop_token_ids are not implemented until M7-T04");
@@ -75,6 +63,14 @@ namespace {
   return seed;
 }
 
+// True when any history penalty is non-default, i.e. `ApplyPenalties` would
+// change the logits. Used to keep the default path allocation-free and its
+// result bitwise identical to the pre-T03 sampler.
+[[nodiscard]] bool PenaltiesActive(const SamplingParams& params) {
+  return params.repetition_penalty != 1.0F || params.presence_penalty != 0.0F ||
+         params.frequency_penalty != 0.0F;
+}
+
 // Argmax over a `[V]` fp32 logits row with a strict `>` scan so the lowest
 // vocab index wins ties (deterministic). A NaN maximum is surfaced as
 // `Internal`. Ported verbatim from the M5-T09 generation loop's `ArgmaxLastRow`
@@ -98,21 +94,29 @@ namespace {
   return static_cast<std::int32_t>(best);
 }
 
-// The stochastic branch: temperature -> top-k -> top-p -> Philox draw. `step`
-// is the decode step index (the RNG counter), `seed` the resolved request seed.
+// The stochastic branch: penalties -> temperature -> top-k -> top-p -> Philox
+// draw. `step` is the decode step index (the RNG counter), `seed` the resolved
+// request seed; `context` carries the token history the penalties read.
 [[nodiscard]] core::StatusOr<std::int32_t> SampleStochastic(
-    std::span<const float> logits, const SamplingParams& params,
-    std::uint64_t seed, std::uint64_t step) {
+    std::span<const float> logits, const SampleContext& context,
+    const SamplingParams& params, std::uint64_t seed, std::uint64_t step) {
   if (logits.empty()) {
     return core::InvalidArgumentError("logits row must be non-empty");
   }
   if (core::Status status = detail::CheckFinite(logits); !status.ok()) {
     return status;
   }
-  // Work on a mutable copy — the caller's logits buffer is const, and top-k
-  // masks in place.
+  // Work on a mutable copy — the caller's logits buffer is const, and the
+  // stages mask/scale in place.
   std::vector<float> scratch(logits.begin(), logits.end());
   const std::span<float> work{scratch};
+  if (core::Status status = detail::ApplyPenalties(
+          work, context.prompt_ids, context.generated_ids,
+          params.repetition_penalty, params.presence_penalty,
+          params.frequency_penalty);
+      !status.ok()) {
+    return status;
+  }
   detail::ApplyTemperature(work, params.temperature);
   detail::ApplyTopK(work, params.top_k);
   std::vector<double> probs;
@@ -138,13 +142,29 @@ core::StatusOr<Sampler> Sampler::Create(SamplingParams params) {
 core::StatusOr<std::int32_t> Sampler::Sample(
     std::span<const float> logits, const SampleContext& context) const {
   if (params_.temperature == 0.0F) {
-    return ArgmaxRow(logits);
+    // Greedy: penalties (stage 1) can still move the argmax. When no penalty is
+    // active this stays the allocation-free, bitwise-unchanged pre-T03 path.
+    if (!PenaltiesActive(params_)) {
+      return ArgmaxRow(logits);
+    }
+    if (logits.empty()) {
+      return core::InvalidArgumentError("logits row must be non-empty");
+    }
+    std::vector<float> scratch(logits.begin(), logits.end());
+    if (core::Status status = detail::ApplyPenalties(
+            scratch, context.prompt_ids, context.generated_ids,
+            params_.repetition_penalty, params_.presence_penalty,
+            params_.frequency_penalty);
+        !status.ok()) {
+      return status;
+    }
+    return ArgmaxRow(scratch);
   }
   // The step index the RNG keys on: the number of tokens produced so far this
   // request (0 for the first sampled token). Independent of batch composition,
   // so the draw is reproducible across runs and batch layouts.
   const auto step = static_cast<std::uint64_t>(context.generated_ids.size());
-  return SampleStochastic(logits, params_, seed_, step);
+  return SampleStochastic(logits, context, params_, seed_, step);
 }
 
 }  // namespace engine::sampling

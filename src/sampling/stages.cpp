@@ -9,6 +9,9 @@
 #include <limits>
 #include <numeric>
 #include <span>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // M7-T02: the stochastic-sampling stages. See stages.h for the stage order and
@@ -34,6 +37,68 @@ core::Status CheckFinite(std::span<const float> logits) {
   }
   if (!any_finite) {
     return core::InternalError("every logit is -inf; no token can be sampled");
+  }
+  return core::OkStatus();
+}
+
+core::Status ApplyPenalties(std::span<float> logits,
+                            std::span<const std::int32_t> prompt_ids,
+                            std::span<const std::int32_t> generated_ids,
+                            float repetition_penalty, float presence_penalty,
+                            float frequency_penalty) {
+  const bool repetition = repetition_penalty != 1.0F;
+  const bool presence = presence_penalty != 0.0F;
+  const bool frequency = frequency_penalty != 0.0F;
+  if (!repetition && !presence && !frequency) {
+    return core::OkStatus();  // exact no-op: logits left bitwise unchanged
+  }
+  const auto vocab = static_cast<std::int64_t>(logits.size());
+  const auto validate = [vocab](std::int32_t id,
+                                std::string_view where) -> core::Status {
+    if (id < 0 || static_cast<std::int64_t>(id) >= vocab) {
+      return core::InvalidArgumentError(
+          "{} token id {} out of range for vocab size {}", where, id, vocab);
+    }
+    return core::OkStatus();
+  };
+
+  // Collect the history first (no logit is touched yet) so a bad id leaves the
+  // caller's logits untouched. `counts` is over the generated tokens only
+  // (frequency/presence); `seen` is prompt ∪ generated (repetition).
+  std::unordered_map<std::int32_t, std::int32_t> counts;
+  std::unordered_set<std::int32_t> seen;
+  for (const std::int32_t id : generated_ids) {
+    if (core::Status s = validate(id, "generated"); !s.ok()) {
+      return s;
+    }
+    ++counts[id];
+    seen.insert(id);
+  }
+  for (const std::int32_t id : prompt_ids) {
+    if (core::Status s = validate(id, "prompt"); !s.ok()) {
+      return s;
+    }
+    seen.insert(id);
+  }
+
+  // Apply in vLLM order: repetition (multiplicative, once per distinct seen
+  // token) -> frequency (subtract f * count) -> presence (subtract p once).
+  if (repetition) {
+    for (const std::int32_t id : seen) {
+      float& x = logits[static_cast<std::size_t>(id)];
+      x = x < 0.0F ? x * repetition_penalty : x / repetition_penalty;
+    }
+  }
+  if (frequency) {
+    for (const auto& [id, count] : counts) {
+      logits[static_cast<std::size_t>(id)] -=
+          frequency_penalty * static_cast<float>(count);
+    }
+  }
+  if (presence) {
+    for (const auto& entry : counts) {  // one flat subtraction per distinct id
+      logits[static_cast<std::size_t>(entry.first)] -= presence_penalty;
+    }
   }
   return core::OkStatus();
 }

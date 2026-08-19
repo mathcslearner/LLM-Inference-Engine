@@ -17,8 +17,8 @@
 // its greedy selection branch. Portable C++ — no ISA concern, no SCALAR_PASS.
 // Covers: greedy argmax over a logits row (with lowest-index tie-break),
 // NaN/empty-row error posture, and the Create-time Unimplemented guards for
-// every not-yet-landed stage (temperature > 0, filters, penalties, stop
-// conditions, logprobs).
+// every not-yet-landed stage (stop conditions, logprobs). Penalties (T03) are
+// implemented, so this suite also covers their effect on greedy selection.
 
 namespace {
 
@@ -32,6 +32,13 @@ using engine::sampling::SamplingParams;
 
 [[nodiscard]] Sampler GreedySampler() {
   StatusOr<Sampler> sampler = Sampler::Create(SamplingParams::Greedy(8));
+  EXPECT_TRUE(sampler.ok()) << sampler.status().ToString();
+  return *std::move(sampler);
+}
+
+// Build a sampler from arbitrary params, asserting Create succeeds.
+[[nodiscard]] Sampler MakeSampler(SamplingParams params) {
+  StatusOr<Sampler> sampler = Sampler::Create(std::move(params));
   EXPECT_TRUE(sampler.ok()) << sampler.status().ToString();
   return *std::move(sampler);
 }
@@ -121,24 +128,63 @@ TEST(SamplerTest, AcceptsTopP) {
   EXPECT_TRUE(Sampler::Create(p).ok());
 }
 
-// Each still-unimplemented knob is rejected at Create with Unimplemented, so no
-// requested behaviour is ever silently dropped.
-TEST(SamplerTest, RejectsRepetitionPenalty) {
+// The penalty knobs are implemented (T03): Create accepts non-default values,
+// where before it rejected them with Unimplemented.
+TEST(SamplerTest, AcceptsPenalties) {
   SamplingParams p = SamplingParams::Greedy(8);
-  p.repetition_penalty = 1.1F;
-  EXPECT_TRUE(IsUnimplemented(Sampler::Create(p).status()));
-}
-
-TEST(SamplerTest, RejectsPresencePenalty) {
-  SamplingParams p = SamplingParams::Greedy(8);
+  p.repetition_penalty = 1.3F;
   p.presence_penalty = 0.5F;
-  EXPECT_TRUE(IsUnimplemented(Sampler::Create(p).status()));
+  p.frequency_penalty = 0.5F;
+  EXPECT_TRUE(Sampler::Create(p).ok());
 }
 
-TEST(SamplerTest, RejectsFrequencyPenalty) {
+// Penalties feed the greedy argmax: repetition demotes a previously generated
+// token below an un-generated one, flipping the selection. logits {3.0, 4.0}
+// argmax to 1; with token 1 in the history and r=2 it becomes 4.0/2=2.0 < 3.0,
+// so the argmax moves to 0.
+TEST(SamplerTest, GreedyArgmaxShiftsUnderRepetitionPenalty) {
+  const std::vector<float> logits = {3.0F, 4.0F};
+  const std::vector<std::int32_t> generated = {1};
+  const SampleContext ctx{.prompt_ids = {}, .generated_ids = generated};
+
+  const Sampler plain = GreedySampler();
+  StatusOr<std::int32_t> without = plain.Sample(logits, ctx);
+  ASSERT_TRUE(without.ok()) << without.status().ToString();
+  EXPECT_EQ(*without, 1);  // no penalty: raw argmax
+
+  SamplingParams p = SamplingParams::Greedy(8);
+  p.repetition_penalty = 2.0F;
+  const Sampler penalized = MakeSampler(std::move(p));
+  StatusOr<std::int32_t> with = penalized.Sample(logits, ctx);
+  ASSERT_TRUE(with.ok()) << with.status().ToString();
+  EXPECT_EQ(*with, 0);  // penalty demotes token 1 below token 0
+}
+
+// A greedy sample with a default-only history is bit-identical whether or not
+// penalties are configured, and the penalized path leaves the argmax unmoved
+// when the history is empty.
+TEST(SamplerTest, GreedyPenaltyNoOpWithEmptyHistory) {
+  const std::vector<float> logits = {0.1F, 3.5F, -2.0F, 3.4F};
+  SamplingParams p = SamplingParams::Greedy(8);
+  p.repetition_penalty = 2.0F;
+  p.presence_penalty = 1.0F;
+  p.frequency_penalty = 1.0F;
+  const Sampler penalized = MakeSampler(std::move(p));
+  StatusOr<std::int32_t> id = penalized.Sample(logits, kNoContext);
+  ASSERT_TRUE(id.ok()) << id.status().ToString();
+  EXPECT_EQ(*id, 1);  // unchanged from the un-penalized GreedyPicksArgmax case
+}
+
+// An out-of-range history id surfaces as InvalidArgument through Sample (the
+// penalty stage validates before touching logits).
+TEST(SamplerTest, GreedyPenaltyRejectsOutOfRangeHistory) {
+  const std::vector<float> logits = {1.0F, 2.0F, 3.0F};
+  const std::vector<std::int32_t> generated = {9};  // >= vocab
+  const SampleContext ctx{.prompt_ids = {}, .generated_ids = generated};
   SamplingParams p = SamplingParams::Greedy(8);
   p.frequency_penalty = 0.5F;
-  EXPECT_TRUE(IsUnimplemented(Sampler::Create(p).status()));
+  const Sampler penalized = MakeSampler(std::move(p));
+  EXPECT_TRUE(IsInvalidArgument(penalized.Sample(logits, ctx).status()));
 }
 
 TEST(SamplerTest, RejectsStopTokenIds) {
@@ -167,12 +213,6 @@ TEST(SamplerTest, RejectsInvalidParamsWithInvalidArgument) {
 }
 
 // ------------------------------------------------- stochastic sampling --
-
-[[nodiscard]] Sampler MakeSampler(SamplingParams params) {
-  StatusOr<Sampler> sampler = Sampler::Create(std::move(params));
-  EXPECT_TRUE(sampler.ok()) << sampler.status().ToString();
-  return *std::move(sampler);
-}
 
 // A stochastic sampler with an explicit seed and otherwise-default knobs.
 [[nodiscard]] Sampler SeededSampler(std::uint64_t seed,

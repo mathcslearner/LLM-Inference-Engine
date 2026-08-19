@@ -14,12 +14,14 @@
 // draw). It is the single-sequence *reference* sampler; the batched optimized
 // sampler (T06) must match it token-for-token given identical RNG counters.
 //
-// M7-T02 adds the stochastic branch: temperature scaling, top-k and top-p
-// filtering, and a counter-based Philox draw keyed on `(seed, step)`. Any
-// parameter whose behaviour is still not implemented (non-default penalties,
-// logprobs, stop strings/ids) is rejected up front by `Sampler::Create` with
-// `Unimplemented`, so no requested knob is ever silently ignored — each later
-// ticket removes its guard as it lands the stage.
+// M7-T02 added the stochastic branch (temperature scaling, top-k/top-p
+// filtering, a counter-based Philox draw keyed on `(seed, step)`); M7-T03 adds
+// stage 1, the history-based repetition/frequency/presence penalties, applied
+// before temperature and ahead of the greedy argmax alike. Any parameter whose
+// behaviour is still not implemented (logprobs, stop strings/ids) is rejected
+// up front by `Sampler::Create` with `Unimplemented`, so no requested knob is
+// ever silently ignored — each later ticket removes its guard as it lands the
+// stage.
 
 namespace engine::sampling {
 
@@ -46,10 +48,10 @@ class Sampler {
  public:
   // Build a sampler from `params`. Returns `InvalidArgument` if the params fail
   // `ValidateSamplingParams`, or `Unimplemented` (naming the field) for a
-  // parameter whose stage is not yet implemented (penalties, logprobs, stop
-  // conditions). On success the returned sampler's `Sample` is guaranteed to be
-  // within the implemented subset. When `params.seed` is `nullopt` a
-  // nondeterministic seed is drawn once here and exposed via `seed()`.
+  // parameter whose stage is not yet implemented (logprobs, stop conditions).
+  // On success the returned sampler's `Sample` is guaranteed to be within the
+  // implemented subset. When `params.seed` is `nullopt` a nondeterministic seed
+  // is drawn once here and exposed via `seed()`.
   [[nodiscard]] static core::StatusOr<Sampler> Create(SamplingParams params);
 
   // Select the next token id from one position's `[V]` fp32 logits row.

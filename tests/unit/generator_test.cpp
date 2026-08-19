@@ -353,17 +353,53 @@ TEST(GeneratorTest, NotYetImplementedSamplingIsRejectedBeforeGenerating) {
   const std::unique_ptr<Model> model = BuildTiny();
   SimpleKvCache cache = FreshCache();
   const std::vector<std::int32_t> prompt = {1, 5, 9};
-  // A still-unimplemented knob (penalties land in M7-T03): the sampler's Create
+  // A still-unimplemented knob (logprobs land in M7-T05): the sampler's Create
   // rejects it with Unimplemented, front-loaded so nothing is generated and the
   // cache is untouched.
   SamplingParams sampling = SamplingParams::Greedy(8);
-  sampling.repetition_penalty = 1.1F;
+  sampling.logprobs = 1;
   const GenerateOptions options{.sampling = sampling, .eos_ids = {}};
   const auto got = Generate(*model, cache, prompt, options);
   ASSERT_FALSE(got.ok());
   EXPECT_TRUE(engine::core::IsUnimplemented(got.status()))
       << got.status().ToString();
   EXPECT_EQ(cache.length(), 0);
+}
+
+// End-to-end: a repetition penalty is threaded through the generation loop's
+// per-step history (prompt + tokens generated so far) and can change the greedy
+// trajectory. A strong penalty (r=100) makes generation avoid re-emitting any
+// token it has already produced, so the output has no immediate repeats where
+// the unpenalized run does — proving the loop hands the sampler the right,
+// growing history each step (not just the prompt).
+TEST(GeneratorTest, RepetitionPenaltyAltersGreedyTrajectory) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  const std::vector<std::int32_t> prompt = {1, 5, 9};
+  constexpr std::int64_t kNew = 24;
+
+  SimpleKvCache plain_cache = FreshCache();
+  const std::vector<std::int32_t> plain =
+      Unwrap(Generate(*model, plain_cache, prompt,
+                      GenerateOptions{.sampling = SamplingParams::Greedy(kNew),
+                                      .eos_ids = {}}));
+
+  SamplingParams penalized = SamplingParams::Greedy(kNew);
+  penalized.repetition_penalty = 100.0F;
+  SimpleKvCache pen_cache = FreshCache();
+  const std::vector<std::int32_t> pen =
+      Unwrap(Generate(*model, pen_cache, prompt,
+                      GenerateOptions{.sampling = penalized, .eos_ids = {}}));
+
+  ASSERT_EQ(plain.size(), static_cast<std::size_t>(kNew));
+  ASSERT_EQ(pen.size(), static_cast<std::size_t>(kNew));
+  // The penalty changes the trajectory at some step.
+  EXPECT_NE(plain, pen);
+  // And it is deterministic: the same penalized run reproduces exactly.
+  SimpleKvCache pen_cache2 = FreshCache();
+  const std::vector<std::int32_t> pen2 =
+      Unwrap(Generate(*model, pen_cache2, prompt,
+                      GenerateOptions{.sampling = penalized, .eos_ids = {}}));
+  EXPECT_EQ(pen, pen2);
 }
 
 // ------------------------------------------------ stochastic generation --

@@ -1771,3 +1771,68 @@ different-seed-different / nullopt-seed-runs on tiny-llama; the
 penalty knob). The greedy `generate.json` goldens across
 `generator_test`/`qwen2_family_test`/`optimized_model_test` pass unchanged — the
 regression guarantee. Full ctest green; format + scoped tidy clean.
+
+### M7-T03 — Repetition, presence & frequency penalties (2026-08-19)
+
+Landed the sampling pipeline's stage 1 — the three history-based penalties —
+applied to the raw logits *before* temperature and ahead of the greedy argmax
+alike, so a penalty can change the selected token in both the greedy and the
+stochastic modes. `engine generate --repetition-penalty 1.3` (etc.) now steers a
+real model away from immediate repetition.
+
+- **`src/sampling/stages.{h,cpp}`** — new `detail::ApplyPenalties(logits,
+  prompt_ids, generated_ids, repetition, presence, frequency)`. Documented
+  history convention (matching HF + vLLM): `repetition_penalty` penalizes every
+  token in the prompt **or** the generated output, once per distinct token
+  (`x < 0 ? x·r : x/r`, not compounded on recurrence); `frequency`/`presence`
+  count **generated** tokens only (a prompt-only token is untouched) — frequency
+  subtracts `f · occurrences`, presence a flat `p` once. Applied in the order
+  repetition → frequency → presence. History collected into an
+  `unordered_map` count + `unordered_set` seen (O(history), not O(V)) and fully
+  validated (`[0, V)`) **before** any logit is mutated, so a bad id leaves the
+  logits untouched (`InvalidArgument` naming index + value). Exact no-op — a
+  fast path that returns before scanning — when all three are at defaults, so the
+  default pipeline stays bitwise identical to pre-T03. `-inf` stays `-inf`.
+- **`src/sampling/sampler.{h,cpp}`** — `CheckImplementedSubset` drops the three
+  penalty `Unimplemented` guards (stop-ids/stop-strings/logprobs still guarded).
+  `Sample` runs penalties in both branches: the greedy branch keeps its
+  allocation-free `ArgmaxRow` fast path when no penalty is active (the regression
+  guarantee) and otherwise penalizes a logits copy before argmax; `SampleStochastic`
+  gained a `SampleContext` parameter and applies penalties on the working copy
+  after `CheckFinite`, before temperature. A `PenaltiesActive` helper gates the
+  greedy fast path.
+- **CLI**: `src/main.cpp` `engine generate` gains `--repetition-penalty`,
+  `--presence-penalty`, `--frequency-penalty`.
+
+**Non-obvious decisions.** (1) **History split is not uniform** — repetition
+reads prompt ∪ generated, frequency/presence read generated only. This matches
+HF (`RepetitionPenaltyLogitsProcessor` over `input_ids`) and OpenAI/vLLM
+(frequency/presence over sampled tokens), and is tested explicitly with a
+prompt-only token that repetition touches but the other two do not. (2) **Repetition
+applies once per distinct token** — HF's gather/scatter is idempotent per token
+(duplicate writes are identical); we dedup via the `seen` set so `x/r` is never
+compounded, tested with a token appearing three times in the prompt. (3)
+**Penalties apply to the greedy branch too** — the design places them at stage 1,
+before the greedy/stochastic split, so `temperature 0` requests still honour
+penalties (an argmax-flip test proves it). (4) The reference path allocates a
+per-call logits copy in both branches when penalties are active; allocation-freedom
+remains T06's concern.
+
+Docs: model-execution.md §15.2 stage 1 (the history convention, order, greedy
+applicability, no-op guarantee) and §15.5 (T03 marked done).
+
+Tests (+14 gtest cases → 967 green, 997 ctest entries), portable C++
+(`sampling`/`unit` labels, no SCALAR_PASS), deterministic: new
+`sampling_penalties_test` (12 — every case dyadic so post-penalty logits are
+asserted with **exact** equality: repetition/frequency/presence singly, r<1 and
+negative-presence boosts, all-three-compose-in-order, defaults-exact-no-op,
+masked −inf stays −inf, empty-history no-op, once-per-distinct-token, and the
+out-of-range/negative id `InvalidArgument` with logits untouched);
+`sampler_test` (3 reject→accept/behavioural flips: `AcceptsPenalties`, greedy
+argmax shifts under a repetition penalty, empty-history greedy no-op,
+out-of-range history through `Sample`); `generator_test` (+1, 1 rewrite: an
+end-to-end penalty run that alters the greedy trajectory and reproduces exactly,
+plus the `Unimplemented`-before-generating case moved onto `logprobs`). The
+greedy `generate.json` goldens across `generator_test`/`qwen2_family_test`/
+`optimized_model_test` pass unchanged. Full ctest green; format + scoped tidy
+clean.

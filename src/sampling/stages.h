@@ -14,10 +14,11 @@
 // operate on a single position's `[V]` fp32 logits row. The fixed order the
 // sampler runs them in is:
 //
-//   CheckFinite -> ApplyTemperature -> ApplyTopK -> Softmax -> ApplyTopP ->
-//   SelectByCdf
+//   CheckFinite -> ApplyPenalties -> ApplyTemperature -> ApplyTopK -> Softmax
+//   -> ApplyTopP -> SelectByCdf
 //
-// (Penalties are stage 1, added in T03; logprobs are stage 6, added in T05.)
+// (logprobs are stage 6, added in T05.) `ApplyPenalties` (stage 1, T03) runs
+// ahead of the greedy branch too, so a penalty can change the argmax.
 //
 // Numeric contract (documented so the T06 optimized path can match token-for-
 // token given the same RNG draw): softmax is max-subtracted with the
@@ -36,6 +37,29 @@ namespace engine::sampling::detail {
 // as long as at least one finite logit remains. An empty row is the caller's
 // (`InvalidArgument`) concern and is not checked here.
 [[nodiscard]] core::Status CheckFinite(std::span<const float> logits);
+
+// Stage 1 (T03): apply the three OpenAI/vLLM repetition penalties in place,
+// over the request's token history, in the fixed order repetition -> frequency
+// -> presence (matching vLLM's `apply_penalties`). Documented history choice:
+//   - `repetition_penalty` (HF): every token that appears in the prompt *or*
+//   the
+//     generated output is penalized once — `x < 0 ? x*r : x/r` (a token seen
+//     twice is not compounded).
+//   - `frequency_penalty` / `presence_penalty` (OpenAI): only *generated*
+//   tokens
+//     count (a token that occurs solely in the prompt is untouched). Frequency
+//     subtracts `f * occurrences`; presence subtracts a flat `p` once.
+// An exact no-op — the caller's logits are left bitwise unchanged — when all
+// three are at their defaults (`repetition_penalty == 1`, the others `== 0`),
+// so the default pipeline is byte-identical to the pre-T03 one. `-inf` logits
+// stay
+// `-inf` under every operation. A history id outside `[0, logits.size())` is an
+// `InvalidArgument` naming the offending index and value, front-loaded so a
+// rejected call leaves the logits untouched.
+[[nodiscard]] core::Status ApplyPenalties(
+    std::span<float> logits, std::span<const std::int32_t> prompt_ids,
+    std::span<const std::int32_t> generated_ids, float repetition_penalty,
+    float presence_penalty, float frequency_penalty);
 
 // Divide every logit by `temperature` in place. Precondition: `temperature > 0`
 // (the `== 0` greedy path never reaches this stage).

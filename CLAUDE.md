@@ -625,11 +625,29 @@ behind an existing subsystem):
   (philox 7 incl. Random123 KAT vectors `static_assert`-checked, stages 18 exact-
   mask, sampler +13 incl. chi-square over 20k draws, generator +3 stochastic) →
   953 green (983 ctest), all deterministic (fixed seeds); greedy goldens
-  unchanged. format + scoped tidy clean.
+  unchanged. format + scoped tidy clean. T03 repetition/presence/frequency
+  penalties (2026-08-19): new `detail::ApplyPenalties` (stages.{h,cpp}) — the
+  pipeline's stage 1, applied to raw logits *before* temperature and ahead of the
+  greedy argmax alike (a penalty can move the token in either mode). Documented
+  HF/vLLM history split: `repetition_penalty` penalizes prompt ∪ generated once
+  per distinct token (`x<0 ? x·r : x/r`, not compounded on recurrence);
+  `frequency`/`presence` count generated tokens only (prompt-only token
+  untouched), applied repetition→frequency→presence. History collected O(history)
+  (unordered_map count + set seen), validated `[0,V)` before any mutation
+  (`InvalidArgument`, logits untouched); exact no-op fast path at defaults
+  (bitwise-identical to pre-T03), `-inf` stays `-inf`. `Sampler::Create` drops
+  the three penalty `Unimplemented` guards; `Sample` penalizes in both branches
+  (greedy keeps its allocation-free `ArgmaxRow` when no penalty active),
+  `SampleStochastic` gained a `SampleContext` arg. CLI: `--repetition-penalty/
+  --presence-penalty/--frequency-penalty`. design §15.2/§15.5 updated. +14 gtest
+  (new `sampling_penalties_test` 12 exact dyadic-logit cases; sampler
+  reject→accept/behavioural flips; generator +1 e2e penalty-trajectory, the
+  Unimplemented-before-generating case moved onto `logprobs`) → 967 green (997
+  ctest), deterministic; greedy `generate.json` goldens unchanged. format +
+  scoped tidy clean.
 
-Next up: **M7-T03** (repetition, presence & frequency penalties: apply penalties
-over the request's token history (prompt + generated, OpenAI/vLLM semantics)
-*before* temperature — the stage-1 seam in the pipeline; exact hand-computed
-logit-adjustment tests per penalty type and combinations, no-op-at-default exact
-equality; drops the three penalty `Unimplemented` guards in
-`Sampler::Create`/`CheckImplementedSubset`).
+Next up: **M7-T04** (stop conditions & finish reasons: EOS set, request
+`stop_token_ids` / `stop_strings` matched on the incrementally detokenized stream
+across token boundaries, and `max_tokens`, producing a `finish_reason`
+(`stop`/`length`); the machinery lives in the generation loop, not the sampler —
+drops the two stop `Unimplemented` guards in `CheckImplementedSubset`).

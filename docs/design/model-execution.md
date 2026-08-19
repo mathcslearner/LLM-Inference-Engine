@@ -1058,9 +1058,21 @@ The sampler runs these stages over a single position's `[V]` fp32 logits row
 (the last row of the `kLast` forward output — §5.2); the order is fixed and
 matches vLLM / OpenAI so results are comparable:
 
-1. **Penalties** (T03) — repetition / presence / frequency, computed over the
-   request's token history (prompt + generated). Applied to raw logits, *before*
-   temperature (documented choice, matching vLLM).
+1. **Penalties** (T03) — repetition / presence / frequency, applied to the raw
+   logits *before* temperature (documented choice, matching vLLM), and ahead of
+   the greedy argmax as well as the stochastic draw — so a penalty can move the
+   selected token in both modes. **History convention** (matching HF + vLLM,
+   documented so it is not mistaken for uniform): `repetition_penalty` penalizes
+   every token appearing in the prompt **or** the generated output, once per
+   distinct token (`x < 0 ? x·r : x/r`, not compounded when a token recurs);
+   `frequency_penalty` / `presence_penalty` count **generated** tokens only (a
+   token appearing solely in the prompt is untouched) — frequency subtracts
+   `f · occurrences`, presence a flat `p` once. The three are applied in the
+   order repetition → frequency → presence. `-inf` (a mask value from a prior
+   step) stays `-inf`; an out-of-range history id is `InvalidArgument`. A
+   default request (`repetition_penalty == 1`, the others `== 0`) is an exact
+   no-op, leaving the logits bitwise unchanged — implemented in
+   `sampling/stages.{h,cpp}` `ApplyPenalties`.
 2. **Temperature** (T02) — divide logits by `temperature`. Skipped entirely when
    `temperature == 0` (the greedy branch, which bypasses stages 2–4 and the
    categorical draw).
@@ -1163,7 +1175,10 @@ regression the M5/M6 `generate.json` goldens (both backends) assert unchanged.
   `temperature > 0` branch of `Sample`, `src/sampling/philox.h` (Philox4x32-10)
   and `src/sampling/stages.{h,cpp}`; chi-square and exact-mask tests. See §15.2/
   §15.3.
-- **T03** penalties over history; exact hand-computed logit-adjustment tests.
+- **T03** penalties over history — **done** (2026-08-19): `detail::ApplyPenalties`
+  (stage 1) wired into both branches of `Sample`; the HF/vLLM history convention
+  above; exact hand-computed logit-adjustment tests (`sampling_penalties_test`)
+  and an end-to-end greedy-trajectory test. See §15.2 stage 1.
 - **T04** stop conditions & `finish_reason` in the loop; stop-string matching
   across token boundaries.
 - **T05** logprobs from the sampler's post-processing logits.

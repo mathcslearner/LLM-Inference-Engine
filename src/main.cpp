@@ -60,6 +60,9 @@ struct Args {
   float temperature = 0.0F;
   std::int32_t top_k = 0;
   float top_p = 1.0F;
+  float repetition_penalty = 1.0F;
+  float presence_penalty = 0.0F;
+  float frequency_penalty = 0.0F;
   std::optional<std::uint64_t> seed;
 };
 
@@ -103,6 +106,18 @@ struct Args {
       std::string n;
       RETURN_IF_ERROR(next(n));
       out.top_p = std::stof(n);
+    } else if (a == "--repetition-penalty") {
+      std::string n;
+      RETURN_IF_ERROR(next(n));
+      out.repetition_penalty = std::stof(n);
+    } else if (a == "--presence-penalty") {
+      std::string n;
+      RETURN_IF_ERROR(next(n));
+      out.presence_penalty = std::stof(n);
+    } else if (a == "--frequency-penalty") {
+      std::string n;
+      RETURN_IF_ERROR(next(n));
+      out.frequency_penalty = std::stof(n);
     } else if (a == "--seed") {
       std::string n;
       RETURN_IF_ERROR(next(n));
@@ -146,6 +161,9 @@ struct Args {
   sampling.temperature = args.temperature;
   sampling.top_k = args.top_k;
   sampling.top_p = args.top_p;
+  sampling.repetition_penalty = args.repetition_penalty;
+  sampling.presence_penalty = args.presence_penalty;
+  sampling.frequency_penalty = args.frequency_penalty;
   sampling.seed = args.seed;
   const GenerateOptions options{.sampling = sampling,
                                 .eos_ids = model->config().eos_token_ids};
@@ -224,7 +242,8 @@ int main(int argc, char** argv) {
                  "usage: engine generate --model DIR [--prompt STR] "
                  "[--backend reference|optimized] [--max-new-tokens N] "
                  "[--cache-capacity N] [--no-bos] [--temperature T] "
-                 "[--top-k K] [--top-p P] [--seed S]\n");
+                 "[--top-k K] [--top-p P] [--repetition-penalty R] "
+                 "[--presence-penalty P] [--frequency-penalty F] [--seed S]\n");
       return 2;
     }
     const Status status = RunGenerate(args);
