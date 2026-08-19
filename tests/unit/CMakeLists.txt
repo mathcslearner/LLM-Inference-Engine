@@ -143,8 +143,11 @@ engine_add_tests(TREE unit SOURCES
 # the penalties (T03), the logprobs stages (T05), and the single-sequence
 # reference Sampler (greedy in T01, temperature/top-k/top-p in T02, penalties in
 # T03, logprobs in T05). Ordinary portable C++ — depends only on engine::sampling
-# (→ engine::core), no ISA concern, no SCALAR_PASS. `ctest -L sampling` selects
-# the suite alone.
+# (→ engine::core). As of M7-T06 the softmax/log-softmax stages call the
+# dispatched kernels::ExpF32; these suites still assert with tolerances that
+# hold on any ISA, so they need no SCALAR_PASS — but batched_sampler_test below
+# does (its bit-exact-vs-reference identity must hold under forced-scalar too).
+# `ctest -L sampling` selects the whole set.
 engine_add_tests(TREE unit SOURCES
   sampling_params_test.cpp
   philox_test.cpp
@@ -154,6 +157,19 @@ engine_add_tests(TREE unit SOURCES
   sampler_test.cpp
   DEPS engine::sampling
   LABELS sampling)
+
+# batched_sampler_test (M7-T06): the BatchedSampler vs the single-sequence
+# reference Sampler — bit-for-bit token + logprob identity across shapes,
+# per-row params, seeds, and thread counts; batch-composition independence; the
+# error posture; and allocation-free steady state. The shared per-row pipeline
+# runs the dispatched kernels::ExpF32, so SCALAR_PASS runs it under forced-scalar
+# too (design §9): the reference==batched identity holds on every ISA because
+# both call the same selected variant in-process.
+engine_add_tests(TREE unit SOURCES
+  batched_sampler_test.cpp
+  DEPS engine::sampling
+  LABELS sampling
+  SCALAR_PASS)
 
 # generator_test (M5-T09): the greedy generation loop — token-for-token vs the
 # HF generate.json golden (>=32 tokens), determinism, EOS/max-new-tokens

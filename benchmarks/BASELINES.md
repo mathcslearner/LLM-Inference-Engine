@@ -308,3 +308,59 @@ wide):
 
 **Artifacts** (not committed; ~2 GB, kept for the M12 sweep — safe to delete):
 `~/llama.cpp` (the pinned CPU build) and `~/models/qwen2-0.5b-instruct.{bf16,f16}.gguf`.
+
+---
+
+## M7-T06 — Batched sampling (2026-08-19)
+
+**What:** `BatchedSampler::Sample` over a synthetic `[batch, vocab]` fp32 logits
+block (no model load — the sampling hot path in isolation), median ms per step
+vs the equivalent serial loop over the single-sequence reference `Sampler`. The
+acceptance target is advisory: 64 sequences × 128k vocab under 5 ms on the dev
+machine.
+
+**Harness:** `benchmarks/bench_sampling.cpp` —
+`bench_sampling --batch 64 --vocab 131072 --runs 30 --threads T --config C`. One
+warmup step (sizes scratch + pool), then the median of `--runs` steps; synthetic
+deterministic logits (~[-8, 8), tokenizer-free). All rows use the same config
+here (the batched path supports heterogeneous per-row params; this measures the
+common case). `--threads T` sets `ENGINE_NUM_THREADS` before the pool is sized.
+
+**Machine:** same M2 dev machine / Homebrew LLVM 20 Release / NEON as the other
+entries (loaded interactively, so treat as ballpark, not a scoreboard).
+
+64 × 131072, batched median ms/step (serial reference loop in parens), speedup:
+
+| config | 1 thread | 4 threads | 8 threads | verdict (8t, ≤5 ms) |
+|---|---:|---:|---:|:--|
+| greedy | 9.96 (9.80, 0.98×) | 2.66 (10.1, 3.79×) | **2.01** (9.82, 4.86×) | **PASS** |
+| temp (T=1) | 42.3 (41.4, 0.98×) | 12.2 (41.4, 3.40×) | 10.4 (41.4, 3.98×) | over |
+| top-k 50 + top-p 0.9 | 94.8 (94.7, 1.00×) | 27.0 (94.2, 3.49×) | 21.4 (94.7, 4.42×) | over |
+| top-p 0.95 (full vocab) | — | — | 114.8 (639, 5.57×) | over |
+| logprobs (T=1, N=5) | — | — | 22.4 (83.8, 3.74×) | over |
+
+Reading it:
+
+- **Threading is the win; the batched harness adds ~nothing.** At 1 thread the
+  batched path equals the serial reference (0.98–1.00×) — confirming both run the
+  identical shared `detail::SampleRow`. Threading scales ~3.5× at 4 cores, ~4–5×
+  at 8 (the 4 M2 efficiency cores give diminishing returns on these
+  memory-bandwidth-bound steps, as in the M6-T08 decode note).
+- **Greedy meets the target (2.0 ms).** The sampling configs do not: `temp` alone
+  is ~10 ms because it makes several full-vocabulary passes over 128k × 64
+  (copy → CheckFinite → temperature → `x−max` → `ExpF32` → double-sum → normalize)
+  and is DRAM-bandwidth-bound, not compute-bound. A fused-pass rewrite and/or an
+  E-core-aware pool are M12 levers; the target is advisory and the number is
+  recorded honestly here.
+- **The `ApplyTopP` positive-only sort is a real win for the realistic config.**
+  top-k 50 + top-p 0.9 dropped from **~44 ms → ~21 ms** (8t) once `ApplyTopP`
+  stopped full-sorting all 131072 entries and sorted only the ~50 that survive
+  top-k (the rest are exactly 0 from `exp(-inf)`). Pure top-p over the full
+  vocabulary (every prob positive) still sorts them all — no regression vs the
+  old full sort, no win either; on this near-uniform synthetic distribution its
+  nucleus is large (a real, peaked model distribution would sort far fewer).
+- **Bit-exactness is free.** The batched path calls the same `detail::SampleRow`
+  as the reference, so it picks identical tokens/logprobs by construction
+  (`batched_sampler_test`, host ISA + forced-scalar) — the "optimization" is
+  purely threading + scratch reuse + the shared filter improvements, never a
+  different arithmetic.

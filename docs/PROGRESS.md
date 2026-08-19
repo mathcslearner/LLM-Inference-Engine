@@ -1996,3 +1996,70 @@ golden tokens unchanged), `TokenEvent.logprobs` matches the stored entry,
 logprobs-off leaves the result empty and the event pointer null, stochastic
 tokens unchanged with logprobs on. 1042 ctest green; greedy `generate.json`
 goldens on both backends unchanged; format + scoped tidy clean.
+
+### M7-T06 — Batched sampling optimization (2026-08-19)
+
+Closed M7 with the batched sampler: `src/sampling/batched_sampler.{h,cpp}`
+(`BatchedSampler` + `BatchRow`) samples one token per sequence from a
+`[batch, vocab]` logits block, in parallel across sequences, for M9's
+continuous-batching loop to consume. The load-bearing acceptance criterion —
+**picks identical tokens (and logprobs) to the single-sequence reference sampler
+given identical RNG counters, bit-for-bit** — is met **by construction**, not by
+test: the per-row pipeline was factored into one shared `detail::SampleRow`
+(sampler.h) that both the reference `Sampler` and the batched sampler call, so
+there is a single arithmetic implementation.
+
+**The design tension and how it was resolved.** The ticket asks for both
+"vectorized softmax reusing the M3/M6 kernels" *and* bit-exact token identity
+with the reference. Those force a shared exp — the reference computed softmax
+with `std::exp(double)`, which no vector kernel reproduces bit-for-bit. Chosen
+resolution (recorded in design §15.6): promote the M6-T03 polynomial to a public
+**unthreaded** `kernels::ExpF32` (`src/kernels/exp.{h,cpp}`; runs on the calling
+thread so it can be invoked inside a caller's own `parallel_for` body) and switch
+the reference's `detail::Softmax`/`LogSoftmax` to it. Consequences: `sampling →
+kernels` (PRIVATE) is a layer-2 → layer-1 edge ADR-002 already permits (as
+`model → kernels` is — no amendment; the stale "sampling cannot link kernels"
+notes were corrected across stages.h/logprobs.h and design §15.2); sampled
+sequences become libm-independent for a fixed ISA (a step toward M17-T04) but
+stay Class T across ISAs, so `batched_sampler_test` registers `SCALAR_PASS`; and
+five T05 logprob assertions that pinned `std::exp(double)` values were
+re-toleranced to fp32-exp class (~2.4e-7 rel.). Greedy `generate.json` goldens
+are argmax-only and unchanged.
+
+**The optimizations, all shared with the reference (so identity is free):**
+(1) **vectorized softmax/log-softmax** via `kernels::ExpF32` (weights summed in
+`double` ascending; `x < kExpLo → +0.0` keeps the `-inf → 0` mask exact);
+(2) **partial-sort filtering** — `ApplyTopK` already used `nth_element`;
+`ApplyTopP` now sorts **only the positive-probability tokens** (a zero can never
+enter the nucleus), so a post-top-k row sorts its ~`k` survivors instead of the
+whole vocabulary — bit-identical to a full sort + walk (the order is total, the
+positive prefix unique), and never worse than the old full sort for an
+all-positive row; (3) **`parallel_for` across the batch** at grain 1, where row
+`b` only ever touches scratch slot `b`, so **`src/parallel/` is untouched** (the
+deferred §6.4 worker-index overload was not needed) and a steady-state step is
+**allocation-free** (`BatchedSampler` owns one `RowScratch` per slot, grown on
+demand). Shape validation is front-loaded before the region; per-row recoverable
+errors (bad history id → `InvalidArgument`, non-finite row → `Internal`) are
+captured into a per-row status slot and the lowest-index one returned after the
+region (matching a sequential loop). `rows.empty()` is a no-op success.
+
+**Bench (BASELINES.md M7-T06):** new `benchmarks/bench_sampling.cpp` +
+two smoke `add_test`s. 64 × 128k on the M2, 8-thread NEON — **greedy ~2.0 ms
+(PASS the advisory ≤5 ms)**; temp ~10 ms, top-k 50 + top-p 0.9 ~21 ms (down from
+~44 ms once `ApplyTopP` stopped full-sorting the 128k mostly-zero row), logprobs
+~22 ms. The sampling configs are DRAM-bandwidth-bound on the several full-vocab
+passes over 128k × 64 (and the E-cores throttle them, as in M6-T08 decode); a
+fused-pass / E-core-aware pool is an M12 lever, recorded honestly. Threading ~3.5×
+at 4t, ~4–5× at 8t; the 1-thread batched path equals the serial reference.
+
+**Tests (+7 gtest cases, ×2 for SCALAR_PASS = +14 registrations, +2 bench smoke
+→ 1058 ctest green):** new **`batched_sampler_test`** (SCALAR_PASS) —
+bit-for-bit token + logprob identity vs the reference across a grid of batch
+sizes {1,3,17,64} × vocab {1,7,50,1000,32000} × rotating per-row params (greedy /
+temperatures / top-k / top-p / penalties / logprobs 0–20) with injected `-inf`
+masks and ties; batch-composition independence (a row in a batch == sampled
+alone); invariance across pools of 1/2/3/8 threads; error posture (shape
+mismatches, null sampler, `B=0`, NaN row → Internal, bad history id →
+InvalidArgument); allocation-free steady state (`scratch_bytes()` stable across
+same-shape steps). Five `sampling_logprobs_test` tolerances relaxed to fp32-exp
+class. Format + scoped tidy clean.

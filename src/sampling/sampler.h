@@ -8,6 +8,7 @@
 #include <optional>
 #include <span>
 #include <utility>
+#include <vector>
 
 // The sampling pipeline entry point (M7; design: docs/design/model-execution.md
 // §15). `Sampler` turns a single position's raw logits into a chosen token id,
@@ -113,5 +114,40 @@ class Sampler {
   SamplingParams params_;
   std::uint64_t seed_;
 };
+
+namespace detail {
+
+// Reusable per-row scratch for `SampleRow` (M7-T06). Holding these buffers on
+// the caller lets the batched sampler run allocation-free in steady state: it
+// owns one `RowScratch` per batch slot and reuses it across decode steps
+// (grow-on-demand — `std::vector::assign` keeps capacity). The reference
+// `Sampler` allocates a throwaway `RowScratch` per call.
+struct RowScratch {
+  std::vector<float> logits;       // mutable copy of the row (penalties/temp)
+  std::vector<double> probs;       // softmax distribution (draw)
+  std::vector<double> lp;          // log-softmax (logprobs)
+  std::vector<float> exp_scratch;  // fp32 staging for the vector exp
+  std::vector<std::int32_t> top_p_order;  // top-p sort order (positives only)
+};
+
+// The single per-row sampling pipeline shared by the reference `Sampler` and
+// the T06 `BatchedSampler` — one arithmetic implementation, so the batched
+// path picks identical tokens by construction (the acceptance criterion).
+// Dispatches on `params.temperature`: `== 0` is greedy argmax over the
+// (penalized) row, `> 0` is penalties → temperature → top-k → softmax → top-p
+// → a Philox inverse-CDF draw keyed on `(seed, step)` where the step index is
+// `context.generated_ids.size()`. When `want_logprobs`, the returned
+// `SampleResult::logprobs` carries the full-vocabulary log-softmax (§15.2
+// stage 6), taken before top-k/top-p masking; the RNG draw is unaffected, so
+// the chosen token matches the no-logprobs path. Same error posture as
+// `Sampler::Sample` (empty row → InvalidArgument; NaN/+inf → Internal; a bad
+// history id → InvalidArgument, inputs untouched). `scratch` supplies the
+// working buffers.
+[[nodiscard]] core::StatusOr<SampleResult> SampleRow(
+    std::span<const float> logits, const SampleContext& context,
+    const SamplingParams& params, std::uint64_t seed, bool want_logprobs,
+    RowScratch& scratch);
+
+}  // namespace detail
 
 }  // namespace engine::sampling

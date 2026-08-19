@@ -1,6 +1,7 @@
 #include "sampling/stages.h"
 
 #include "core/status.h"
+#include "kernels/exp.h"
 #include "sampling/logprobs.h"
 
 #include <algorithm>
@@ -129,18 +130,27 @@ void ApplyTopK(std::span<float> logits, std::int32_t k) {
   }
 }
 
-void Softmax(std::span<const float> logits, std::vector<double>& probs) {
-  probs.assign(logits.size(), 0.0);
+void Softmax(std::span<const float> logits, std::vector<double>& probs,
+             std::vector<float>& exp_scratch) {
+  const std::size_t n = logits.size();
+  probs.assign(n, 0.0);
+  exp_scratch.assign(n, 0.0F);
   float max_logit = -std::numeric_limits<float>::infinity();
   for (const float x : logits) {
     max_logit = std::max(max_logit, x);
   }
   // `max_logit` is finite (a precondition), so `x - max_logit` is `-inf` only
-  // for masked (`-inf`) logits, and `exp(-inf) == 0` exactly.
-  double sum = 0.0;
-  for (std::size_t v = 0; v < logits.size(); ++v) {
-    const double w = std::exp(static_cast<double>(logits[v]) -
-                              static_cast<double>(max_logit));
+  // for masked (`-inf`) logits, which `ExpF32` flushes to exactly `0.0` (the
+  // top-k mask contract). The exponential is the shared vector polynomial so
+  // the reference and batched samplers agree bit-for-bit (stages.h).
+  for (std::size_t v = 0; v < n; ++v) {
+    exp_scratch[v] = logits[v] - max_logit;
+  }
+  kernels::ExpF32(exp_scratch.data(), exp_scratch.data(),
+                  static_cast<std::int64_t>(n));
+  double sum = 0.0;  // ascending-index `double` accumulation (stages.h)
+  for (std::size_t v = 0; v < n; ++v) {
+    const auto w = static_cast<double>(exp_scratch[v]);
     probs[v] = w;
     sum += w;
   }
@@ -150,24 +160,44 @@ void Softmax(std::span<const float> logits, std::vector<double>& probs) {
   }
 }
 
-void ApplyTopP(std::vector<double>& probs, float top_p) {
+void Softmax(std::span<const float> logits, std::vector<double>& probs) {
+  std::vector<float> exp_scratch;
+  Softmax(logits, probs, exp_scratch);
+}
+
+void ApplyTopP(std::vector<double>& probs, float top_p,
+               std::vector<std::int32_t>& order) {
   if (top_p >= 1.0F) {
     return;  // nucleus keeps everything; skip to avoid any rounding drop
   }
-  // Order tokens by descending probability, breaking ties by ascending index so
-  // the kept set is deterministic.
-  std::vector<std::int32_t> order(probs.size());
-  std::iota(order.begin(), order.end(), 0);
-  std::ranges::sort(order, [&](std::int32_t a, std::int32_t b) {
-    if (probs[static_cast<std::size_t>(a)] !=
-        probs[static_cast<std::size_t>(b)]) {
-      return probs[static_cast<std::size_t>(a)] >
-             probs[static_cast<std::size_t>(b)];
+  const std::size_t n = probs.size();
+  // Sort only the positive-probability tokens: a zero contributes nothing to
+  // the cumulative mass and is already zeroed, so it can never enter the
+  // nucleus. After top-k this collapses the sort from the whole vocabulary to
+  // just the `k` survivors (the rest are exactly `0` from `exp(-inf)`) — the
+  // "partial sort, not full sort" win for the common top-k+top-p path. A row
+  // with no top-k (every prob positive) simply sorts them all, matching the old
+  // full-sort cost exactly — never worse. Bit-identical to sorting the full
+  // vocabulary and walking it: the ordering is a *total* order (ties broken by
+  // ascending id), so the positive prefix is unique, and the trailing zeros a
+  // full sort would append are all zeroed anyway.
+  order.clear();
+  for (std::size_t v = 0; v < n; ++v) {
+    if (probs[v] > 0.0) {
+      order.push_back(static_cast<std::int32_t>(v));
+    }
+  }
+  std::ranges::sort(order, [&probs](std::int32_t a, std::int32_t b) {
+    const double pa = probs[static_cast<std::size_t>(a)];
+    const double pb = probs[static_cast<std::size_t>(b)];
+    if (pa != pb) {
+      return pa > pb;
     }
     return a < b;
   });
-  // Walk the sorted order accumulating mass; the token that reaches `top_p` is
-  // the last one kept. Everything after it is zeroed.
+  // Walk the sorted positives accumulating mass; the token that reaches `top_p`
+  // is the last one kept. Everything after it (positive but below the nucleus)
+  // is zeroed; the already-zero tokens stay zero.
   const auto threshold = static_cast<double>(top_p);
   double cumulative = 0.0;
   std::size_t kept = 0;
@@ -181,6 +211,11 @@ void ApplyTopP(std::vector<double>& probs, float top_p) {
   for (std::size_t rank = kept; rank < order.size(); ++rank) {
     probs[static_cast<std::size_t>(order[rank])] = 0.0;
   }
+}
+
+void ApplyTopP(std::vector<double>& probs, float top_p) {
+  std::vector<std::int32_t> order;
+  ApplyTopP(probs, top_p, order);
 }
 
 std::int32_t SelectByCdf(const std::vector<double>& probs, double u) {
@@ -204,21 +239,30 @@ std::int32_t SelectByCdf(const std::vector<double>& probs, double u) {
   return last_positive;
 }
 
-void LogSoftmax(std::span<const float> logits, std::vector<double>& lp) {
-  lp.assign(logits.size(), -std::numeric_limits<double>::infinity());
+void LogSoftmax(std::span<const float> logits, std::vector<double>& lp,
+                std::vector<float>& exp_scratch) {
+  const std::size_t n = logits.size();
+  lp.assign(n, -std::numeric_limits<double>::infinity());
+  exp_scratch.assign(n, 0.0F);
   float max_logit = -std::numeric_limits<float>::infinity();
   for (const float x : logits) {
     max_logit = std::max(max_logit, x);
   }
   // `max_logit` is finite (precondition), so `x - max_logit` is `-inf` only for
-  // masked (`-inf`) logits, and `exp(-inf) == 0` exactly — the log-sum-exp is
-  // taken over the finite tokens.
-  double sum = 0.0;
-  for (const float x : logits) {
-    sum += std::exp(static_cast<double>(x) - static_cast<double>(max_logit));
+  // masked (`-inf`) logits, which `ExpF32` flushes to exactly `0.0` — the
+  // log-sum-exp is taken over the finite tokens. The exponential matches the
+  // draw's softmax (shared vector polynomial, stages.h).
+  for (std::size_t v = 0; v < n; ++v) {
+    exp_scratch[v] = logits[v] - max_logit;
+  }
+  kernels::ExpF32(exp_scratch.data(), exp_scratch.data(),
+                  static_cast<std::int64_t>(n));
+  double sum = 0.0;  // ascending-index `double` accumulation (stages.h)
+  for (std::size_t v = 0; v < n; ++v) {
+    sum += static_cast<double>(exp_scratch[v]);
   }
   const double log_z = std::log(sum);
-  for (std::size_t v = 0; v < logits.size(); ++v) {
+  for (std::size_t v = 0; v < n; ++v) {
     // A `-inf` logit stays `-inf` (its shifted value is `-inf`); every finite
     // logit gets `(x - max) - log_z`.
     if (std::isfinite(logits[v])) {
@@ -227,6 +271,11 @@ void LogSoftmax(std::span<const float> logits, std::vector<double>& lp) {
           log_z;
     }
   }
+}
+
+void LogSoftmax(std::span<const float> logits, std::vector<double>& lp) {
+  std::vector<float> exp_scratch;
+  LogSoftmax(logits, lp, exp_scratch);
 }
 
 StepLogprobs ExtractLogprobs(const std::vector<double>& lp, std::int32_t chosen,

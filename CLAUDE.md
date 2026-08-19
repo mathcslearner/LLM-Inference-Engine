@@ -577,7 +577,7 @@ behind an existing subsystem):
   `src/` change; `tools/.venv` restored to its pins after conversion; 907 ctest
   green; format + scoped tidy clean.
 
-- **M7 (sampling & generation controls) — in progress**: T01 SamplingParams &
+- **M7 (sampling & generation controls) — complete** (2026-08-18/19): T01 SamplingParams &
   pipeline skeleton (2026-08-18): new `sampling` module content (was
   anchor-only) — `src/sampling/params.{h,cpp}` (`SamplingParams`:
   temperature/top_k/top_p/repetition·presence·frequency penalties/seed/
@@ -687,10 +687,38 @@ behind an existing subsystem):
   `sampling_logprobs_test` 14; `sampler_test` +7 incl.
   `RejectsLogprobs`→`AcceptsLogprobs`; `generator_test` +4/−1 e2e) → 1042 ctest
   green; greedy `generate.json` goldens on both backends unchanged; format +
-  scoped tidy clean.
+  scoped tidy clean. T06 batched sampling optimization (2026-08-19): new
+  `src/sampling/batched_sampler.{h,cpp}` (`BatchedSampler` + `BatchRow`) samples
+  one token per sequence from a `[batch, vocab]` block, `parallel_for` across
+  sequences (grain 1 — row `b` only touches scratch slot `b`, so **`src/parallel/`
+  untouched**, the §6.4 worker-index overload NOT needed; steady-state
+  allocation-free via one owned `RowScratch` per slot grown on demand). **Picks
+  bit-identical tokens+logprobs to the reference by construction**: the per-row
+  pipeline is one shared `detail::SampleRow` (sampler.h) both call — not two
+  paths that must match. Resolving the ticket's "vectorized softmax reusing M3/M6
+  kernels" ∧ "bit-exact with reference" tension: promoted the M6-T03 polynomial
+  to a **public unthreaded `kernels::ExpF32`** (`src/kernels/exp.{h,cpp}`; runs on
+  the caller's thread so it's callable inside a `parallel_for` body) and switched
+  the reference `detail::Softmax`/`LogSoftmax` to it → **`sampling → kernels`
+  PRIVATE** (a layer-2→1 edge ADR-002 already permits, as `model → kernels`; the
+  stale "sampling cannot link kernels" notes corrected). Sampled sequences now
+  libm-independent per-ISA (toward M17-T04) but Class T across ISAs, so
+  `batched_sampler_test` is **SCALAR_PASS**; 5 T05 logprob tolerances relaxed to
+  fp32-exp class (~2.4e-7); greedy `generate.json` goldens argmax-only, unchanged.
+  `ApplyTopP` now sorts **only positive-prob tokens** (post-top-k → sorts ~`k`
+  survivors not the whole vocab; bit-identical to full-sort, never worse). Front-
+  loaded shape validation; per-row errors captured + lowest-index returned after
+  the region. Bench (BASELINES.md M7-T06; new `benchmarks/bench_sampling.cpp` + 2
+  smoke tests): 64×128k 8t NEON — **greedy ~2.0 ms PASS** (advisory ≤5 ms), temp
+  ~10 ms, top-k+top-p ~21 ms (was ~44 ms pre-`ApplyTopP` fix), logprobs ~22 ms;
+  sampling configs DRAM-bandwidth-bound (fused-pass/E-core-aware pool = M12
+  lever); threading ~3.5×@4t, ~4–5×@8t. +7 gtest (×2 SCALAR_PASS) +2 smoke →
+  **1058 ctest green**; design §15.2/§15.5/§15.6 + optimized-cpu-execution.md §2
+  updated; format + scoped tidy clean.
 
-Next up: **M7-T06** (batched sampling optimization: vectorized softmax/filtering
-reusing M3/M6 kernels, partial-sort top-k, `parallel_for` across sequences,
-per-request params + Philox states; the single-sequence `Sampler` here is the
-reference the batched path must match token-for-token given identical RNG
-counters).
+Next up: **M8-T01** (design doc `docs/design/paged-kv-cache.md`: physical block
+layout + K/V-per-block justification, block size (16 tokens default), the
+blocks-per-pool capacity formula from a `--kv-cache-memory` budget, block tables,
+slot mapping, reference counting, and the preemption + future prefix-caching
+interactions — the memory architecture that makes continuous batching and prefix
+caching possible; docs-only, first ticket of Milestone 8).

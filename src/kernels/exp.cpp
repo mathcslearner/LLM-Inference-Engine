@@ -1,10 +1,18 @@
+#include "kernels/exp.h"
+
 #include "kernels/dispatch.h"
 #include "kernels/internal/exp_impl.h"
 
-// Dispatch glue for the array-form vector exp (M6-T03). `exp` ships no public
-// entry point — softmax/SiLU embed the lane helpers directly — so this TU
-// carries only the KernelTable and the `detail::ExpF32Variant` test seam the
-// ulp sweep uses to reach each ISA's variant on one host.
+#include <cstdint>
+
+// Dispatch glue for the vector exp (M6-T03 polynomial). Through M6 `exp`
+// shipped no public entry point — softmax/SiLU embedded the lane helpers
+// directly — so this TU carried only the KernelTable and the
+// `detail::ExpF32Variant` test seam the ulp sweep uses to reach each ISA's
+// variant on one host. M7-T06 adds the public unthreaded `ExpF32` entry
+// (kernels/exp.h): the `sampling` module's reference softmax/log-softmax reuse
+// the polynomial directly, one exp per sequence row inside the caller's own
+// parallel region (so this entry deliberately does no threading of its own).
 
 namespace engine::kernels {
 
@@ -23,6 +31,14 @@ constexpr KernelTable<ExpFn> kExpF32Table = {
 };
 
 }  // namespace
+
+void ExpF32(const float* in, float* out, std::int64_t n) {
+  // One indirect call after the first dispatch (memoized), then the whole
+  // array runs on the calling thread — no pool, so a caller may invoke this
+  // from inside its own parallel_for body (kernels/exp.h).
+  static const ExpFn fn = Select(kExpF32Table);
+  fn(in, out, n);
+}
 
 namespace detail {
 

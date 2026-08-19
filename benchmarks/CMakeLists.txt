@@ -77,3 +77,21 @@ if(ENGINE_BUILD_TESTS)
       --model "${CMAKE_SOURCE_DIR}/tests/fixtures/models/tiny-llama"
       --prompt-len 8 --new-tokens 4 --runs 2 --backend reference)
 endif()
+
+# bench_sampling (M7-T06): the batched sampler's hot path over a synthetic
+# [batch, vocab] logits block (no model load), median ms/step vs the serial
+# reference loop. The 64×128k-under-5ms target is advisory; numbers recorded in
+# BASELINES.md. The smoke run keeps it a tiny correctness check in CI.
+add_executable(bench_sampling bench_sampling.cpp)
+target_link_libraries(bench_sampling PRIVATE
+  engine::sampling
+  engine::parallel
+  fmt::fmt
+  engine_warnings)
+
+if(ENGINE_BUILD_TESTS)
+  add_test(NAME bench_sampling_smoke
+    COMMAND bench_sampling --batch 4 --vocab 256 --runs 2 --config topk_topp)
+  add_test(NAME bench_sampling_smoke_logprobs
+    COMMAND bench_sampling --batch 4 --vocab 256 --runs 2 --config logprobs)
+endif()

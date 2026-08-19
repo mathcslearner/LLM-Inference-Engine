@@ -1126,16 +1126,21 @@ matches vLLM / OpenAI so results are comparable:
    keyed on `(seed, step_index)` with the counter derived from
    `context.generated_ids.size()` — so a draw is reproducible per `(seed, step)`,
    independent of batch composition, and needs no mutable RNG stream (the sampler
-   stays `const`). The softmax uses fp32 max-subtraction with the exponential sum
-   accumulated in `double` in ascending order, and `-inf` logits (the top-k mask
-   value) map to exactly `0.0`. **Portability caveat:** because `std::exp`
-   differs by ulps between libm implementations, sampled *token sequences* are
-   reproducible on a given machine but not bit-identical across platforms; the
-   cross-platform determinism contract is M17-T04's, and `sampling` cannot link
-   the `kernels` module's shared exp polynomial (ADR-002). The stochastic stages
-   are factored into `src/sampling/stages.{h,cpp}` (`engine::sampling::detail`)
-   for exact-mask unit testing and as the token-for-token reference the T06
-   batched sampler must match given the same RNG draw.
+   stays `const`). The softmax uses fp32 max-subtraction, exponentiates with the
+   shared **`kernels::ExpF32`** vector polynomial (M7-T06 promoted it to a public
+   unthreaded entry — §15.6), and sums the weights in `double` in ascending
+   order; `-inf` logits (the top-k mask value) map to exactly `0.0` (the
+   polynomial flushes `x < kExpLo` to `+0.0`). **Portability note:** using the
+   shared polynomial rather than `std::exp` makes a draw bit-identical across
+   libm implementations *for a fixed ISA*, but it is still Class T across ISAs
+   (scalar vs NEON vs AVX2 differ ≤2 ulp), so sampled *token sequences* remain
+   same-machine/same-ISA reproducible only; the full cross-platform determinism
+   contract is M17-T04's. (`sampling → kernels` is a layer-2 → layer-1 edge
+   ADR-002 already permits — the earlier "sampling cannot link kernels" claim was
+   mistaken.) The stochastic stages are factored into `src/sampling/stages.{h,cpp}`
+   (`engine::sampling::detail`) for exact-mask unit testing and, together with the
+   shared `detail::SampleRow`, are the token-for-token reference the T06 batched
+   sampler matches by construction (§15.6).
 6. **Logprobs** (T05 — **done** 2026-08-19) — the chosen-token logprob and
    top-N `(id, logprob)` pairs, returned by `Sampler::SampleWithLogprobs`.
    **Which logits (the documented choice):** the natural-log softmax of the
@@ -1156,9 +1161,10 @@ matches vLLM / OpenAI so results are comparable:
    `-inf` entries excluded from `top`). Computing logprobs never perturbs
    selection — the RNG draw is identical — so `Sample` and `SampleWithLogprobs`
    pick the same token. `chosen_logprob` is always finite (selection never
-   returns a masked token). Values are `double`-computed, narrowed to `float`;
-   like the draw, they are same-machine reproducible only (`std::exp` ulps,
-   M17-T04). The per-step `StepLogprobs` (in `sampling/logprobs.h`) is carried
+   returns a masked token). The log-sum-exp uses the shared `kernels::ExpF32`
+   weights (M7-T06, §15.6) with a `double` `std::log` normalizer; values are
+   narrowed to `float` and, like the draw, are same-machine/same-ISA reproducible
+   only (M17-T04). The per-step `StepLogprobs` (in `sampling/logprobs.h`) is carried
    on `GenerateResult::logprobs` (index-aligned with `tokens`) and on the
    streaming `TokenEvent::logprobs`.
 
@@ -1288,8 +1294,82 @@ regression the M5/M6 `generate.json` goldens (both backends) assert unchanged.
   natural-log softmax of the post-penalty/post-temperature logits before top-k/
   top-p (§15.2 stage 6). The last `Unimplemented` guard is removed — every
   `SamplingParams` field is implemented.
-- **T06** batched sampler (vectorized softmax/filter reusing M3/M6 kernels,
-  partial-sort top-k, `parallel_for` across sequences, per-request Philox) —
-  **must pick identical tokens to this reference sampler given identical RNG
-  counters** (the acceptance criterion). The single-sequence `Sampler` here is
-  that reference.
+- **T06** batched sampler — **done** (2026-08-19): `src/sampling/batched_sampler.{h,cpp}`
+  (`BatchedSampler` + `BatchRow`), the vectorized softmax (`kernels::ExpF32`, the
+  shared vector polynomial now called from `detail::Softmax`/`LogSoftmax`), the
+  positive-only `ApplyTopP` sort, and `parallel_for` across sequences. **Picks
+  identical tokens to this reference sampler given identical RNG counters** (the
+  acceptance criterion) by construction — both call the single shared
+  `detail::SampleRow`. See §15.6.
+
+### 15.6 Batched sampling (M7-T06)
+
+The single-sequence `Sampler` (§15.3) is the *reference*; M9's continuous-batching
+loop needs to sample a **batch** of sequences per step — one token each from a
+`[batch, vocab]` logits block. `src/sampling/batched_sampler.{h,cpp}` provides
+`BatchedSampler`, whose one requirement is the acceptance criterion: **it must
+pick the same token (and logprobs) the reference would, bit-for-bit, given the
+same RNG counter** — tie-breaks and filtered distributions included.
+
+**One arithmetic implementation, not two.** Rather than reimplement the pipeline
+and prove two code paths agree, the per-row pipeline is factored into
+`detail::SampleRow(logits, context, params, seed, want_logprobs, RowScratch&)`
+(sampler.h). The reference `Sampler` calls it with a throwaway `RowScratch`; the
+batched sampler calls the *same* function per row. Identity is therefore by
+construction, not by test — the bit-exact test grid (`batched_sampler_test`) is a
+regression guard, not the proof. `BatchRow` bundles a borrowed `const Sampler*`
+(its params + resolved seed) with that sequence's `SampleContext`, so a batch may
+freely mix greedy/stochastic requests, temperatures, penalties, filters, and
+logprob counts.
+
+**Where the optimization lives.** Three pieces, all reused by the reference too:
+
+1. **Vectorized softmax/log-softmax.** `detail::Softmax`/`LogSoftmax` now
+   exponentiate with the shared **`kernels::ExpF32`** polynomial (M6-T03),
+   promoted to a public *unthreaded* entry (`kernels/exp.h`) for exactly this —
+   it runs on the calling thread so a caller may invoke it inside its own
+   `parallel_for` body without violating the no-nesting rule. This is the
+   "vectorized softmax reusing the M3/M6 kernel infrastructure" the ticket calls
+   for. Consequence: `sampling → kernels` (PRIVATE) is a layer-2 → layer-1 edge
+   ADR-002 already permits (as `model → kernels` is; no amendment); the earlier
+   "sampling cannot link kernels" notes were mistaken and are corrected. Sampled
+   sequences change vs T05 (no golden pins them) and become **libm-independent
+   for a fixed ISA** (a step toward M17-T04), though still Class T across ISAs
+   (scalar vs NEON differ ≤2 ulp) — hence `batched_sampler_test` registers
+   `SCALAR_PASS`. The exp weights are still summed in `double` ascending, and
+   `x < kExpLo → +0.0` keeps the top-k `-inf → 0` mask contract exact.
+2. **Partial-sort filtering.** `ApplyTopK` already used `nth_element` (partial),
+   the "partial-sort top-k, not full sort" the ticket asks for. `ApplyTopP` now
+   sorts **only the positive-probability tokens**: a zero can never enter the
+   nucleus and is already zeroed, so a post-top-k row sorts just its `k`
+   survivors instead of the whole vocabulary — bit-identical to a full sort +
+   walk (the ordering is total, so the positive prefix is unique). A row with no
+   top-k (every prob positive) sorts them all, matching the old cost exactly —
+   never worse.
+3. **Threading + scratch reuse.** `parallel_for` over the batch, grain 1 (one
+   sequence per chunk); row `b` only ever touches scratch slot `b` (unique per
+   body invocation), so no per-worker index is needed and `src/parallel/` is
+   untouched. `BatchedSampler` owns one `RowScratch` per batch slot and grows it
+   on demand, so a steady-state step allocates nothing. Shape validation is
+   front-loaded before the region; per-row recoverable errors (bad history id,
+   non-finite row) are captured into a per-row status slot and the lowest-index
+   one is returned after the region (matching a sequential loop). `rows.empty()`
+   is a no-op success.
+
+**Numerics note (why token identity survives the exp change).** Because the
+reference and batched paths call the *same selected* `ExpF32` variant in one
+process, they produce the same weights bit-for-bit regardless of ISA — the
+identity holds on the host ISA and under forced-scalar alike. The T05 logprob
+tests that pinned `std::exp(double)` values were re-toleranced to fp32-exp class
+(~2.4e-7 relative); the greedy `generate.json` goldens are argmax-only and
+unaffected.
+
+**Performance (BASELINES.md M7-T06).** 64 sequences × 128k vocab on the M2 dev
+machine, 8-thread NEON: greedy **~2.0 ms** (PASS the advisory ≤5 ms); plain
+temperature ~10 ms, top-k+top-p ~21 ms (~2× the pre-`ApplyTopP` sort at ~44 ms),
+logprobs ~22 ms — the filtered/full-vocab configs are memory-bandwidth-bound on
+the 128k×64 exp + several full-vocab passes, and (like M6-T08 decode) the M2
+efficiency cores throttle these memory-bound steps; a fused-pass / E-core-aware
+pass is an M12 tuning lever. Threading gives ~3.5× at 4 threads, ~4–5× at 8; the
+single-thread batched path matches the serial reference (the batched harness adds
+no measurable overhead).

@@ -990,7 +990,7 @@ semantics).
 **Acceptance criteria:**
 - Unit tests: logprobs sum ≈ 1 in prob space over full vocab on a small-vocab fixture; top-N ordering matches reference computation; greedy chosen-token logprob equals max.
 
-### M7-T06 · Batched sampling optimization
+### M7-T06 · Batched sampling optimization — ✅ DONE (2026-08-19)
 Optimize the hot path for batch-of-sequences sampling: vectorized softmax/filtering
 (reusing the M3/M6 kernel infrastructure), partial-sort top-k instead of full sort,
 `parallel_for` across sequences, per-request params and Philox states; the simple

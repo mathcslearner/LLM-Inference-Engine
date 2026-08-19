@@ -25,13 +25,20 @@
 // too, so a penalty can change the argmax.
 //
 // Numeric contract (documented so the T06 optimized path can match token-for-
-// token given the same RNG draw): softmax is max-subtracted with the
-// exponential sum accumulated in `double` in ascending vocab order; `-inf`
-// logits (the top-k mask value) map to exactly `0.0`. Sampled *token sequences*
-// are therefore reproducible on a given machine but not bit-identical across
-// platforms, since `std::exp` differs by ulps between libm implementations —
-// the cross-platform determinism contract is M17-T04's, and `sampling` cannot
-// link the `kernels` module's shared exp polynomial (ADR-002).
+// token given the same RNG draw): the exponential is the shared vector
+// `kernels::ExpF32` polynomial (M7-T06 promoted it to a public unthreaded
+// entry; kernels/exp.h) applied to the fp32 `logits - max`, and the resulting
+// weights are summed in `double` in ascending vocab order; `-inf` logits (the
+// top-k mask value) map to exactly `0.0` (the polynomial flushes `x < kExpLo`
+// to `+0.0`). Both the single-sequence reference `Sampler` and the T06 batched
+// sampler call these same functions, so they pick identical tokens by
+// construction. Using the shared polynomial (rather than `std::exp`) makes a
+// draw bit-identical across libm implementations *for a fixed ISA*; it is still
+// Class T across ISAs (scalar vs NEON vs AVX2 differ by ≤2 ulp), so the full
+// cross-platform determinism contract remains M17-T04's. `sampling → kernels`
+// is a layer-2 → layer-1 edge ADR-002 already permits (as `model → kernels`
+// is) — the earlier "sampling cannot link kernels" note this file carried was
+// mistaken.
 
 namespace engine::sampling::detail {
 
@@ -78,9 +85,14 @@ void ApplyTopK(std::span<float> logits, std::int32_t k);
 
 // Numerically stable softmax of `logits` into `probs` (resized to match):
 // `probs[v] = exp(logits[v] - max) / Z`, with `-inf` logits mapping to exactly
-// `0.0`. `Z` is accumulated in `double` in ascending index order. Precondition:
-// at least one finite logit (guaranteed by `CheckFinite` + top-k keeping the
-// max).
+// `0.0`. The exponential is `kernels::ExpF32` over the fp32 `logits - max`
+// (staged through `exp_scratch`, resized to match); `Z` is accumulated in
+// `double` in ascending index order. Precondition: at least one finite logit
+// (guaranteed by `CheckFinite` + top-k keeping the max). The `exp_scratch`
+// overload lets the batched sampler reuse one buffer across steps
+// (allocation-free); the two-argument form allocates a local scratch.
+void Softmax(std::span<const float> logits, std::vector<double>& probs,
+             std::vector<float>& exp_scratch);
 void Softmax(std::span<const float> logits, std::vector<double>& probs);
 
 // Top-p (nucleus) filter over a probability vector: keep the smallest set of
@@ -88,7 +100,12 @@ void Softmax(std::span<const float> logits, std::vector<double>& probs);
 // zeroing the rest. Ties are ordered by ascending vocab index; the token that
 // crosses the threshold is included, and at least one token is always kept.
 // No-op when `top_p >= 1.0` (keeps everything — and avoids any rounding that
-// could drop a tail token).
+// could drop a tail token). Only the positive-probability tokens are sorted
+// (zeros can never enter the nucleus), so a post-top-k row sorts just its `k`
+// survivors rather than the whole vocabulary; `order` is reusable scratch (the
+// batched path passes an owned buffer, the two-argument form allocates one).
+void ApplyTopP(std::vector<double>& probs, float top_p,
+               std::vector<std::int32_t>& order);
 void ApplyTopP(std::vector<double>& probs, float top_p);
 
 // Inverse-CDF categorical draw from a (not necessarily normalized) probability
@@ -106,8 +123,13 @@ void ApplyTopP(std::vector<double>& probs, float top_p);
 // so `exp(logits[v] - max)` is well defined. Fed the same post-penalty/
 // post-temperature logits the draw uses, but taken before top-k/top-p masking
 // so the reported distribution covers the whole vocabulary and `Σ_v exp(lp[v])`
-// is `1` (the acceptance criterion). `std::exp`/`std::log` are used directly —
-// `sampling` cannot link the kernels exp polynomial (ADR-002).
+// is `1` (the acceptance criterion). The exponentials use the shared
+// `kernels::ExpF32` polynomial (staged through `exp_scratch`), matching the
+// draw's softmax; `std::log` computes the normalizer. The `exp_scratch`
+// overload is allocation-free for the batched path; the two-argument form
+// allocates locally.
+void LogSoftmax(std::span<const float> logits, std::vector<double>& lp,
+                std::vector<float>& exp_scratch);
 void LogSoftmax(std::span<const float> logits, std::vector<double>& lp);
 
 // Stage 6b (T05): assemble a `StepLogprobs` from precomputed log-probs `lp`
