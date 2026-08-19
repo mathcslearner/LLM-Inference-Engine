@@ -2341,3 +2341,81 @@ caches sharing one pool disjointly. One case added to `simple_cache_test`
 §8 gained an "as built" notes block, §9.1 an as-built note; format + scoped tidy
 clean (kv_cache.h is a header edit, so its full includer set — model/engine/main
 + tests — was tidy-swept).
+
+### M8-T05 — Paged decode attention kernel (2026-08-19)
+
+**What landed.** `kernels::PagedDecodeAttentionF32` — decode attention (one
+query per head over the whole cache) reading K/V **through a block table** over
+the paged slabs, the zero-copy decode fast path that `PagedKvCache::paged_view`
+(M8-T04) feeds. New files: `src/kernels/paged_attention.{h,cpp}` (public entry +
+`KernelTable` dispatch + `parallel_for` over `kv_heads` + the
+`detail::PagedDecodeAttentionVariant` test seam) and
+`src/kernels/internal/paged_attention_common.h` (the `PagedDecodeUnitsImpl` /
+`PagedDecodeGroupSlice` templates + `PagedDecodeArgs`). The per-ISA variants are
+one-line instantiations added to the **existing** `{scalar,neon,avx2}/
+attention.cpp` TUs. Design: paged-kv-cache.md §9.2 (+ an "as built" block).
+
+**Bit-identity by construction (the acceptance).** Because `bs | kAttnKb = 64`
+(§4, pool-enforced), one 64-key online-softmax unit is exactly `kAttnKb/bs`
+whole physical blocks. The recurrence is M6-T05's `DecodeUnitsImpl` with the
+contiguous `k_head + s·d` walk replaced by a block-table walk: per unit it
+scores **block-by-block** (`DotScoreRow(q, k_tile, n_b, d, scale, scores +
+b·bs)` per physical block, folding per-block maxes with `>`), runs the identical
+`ExpRowSum`/`ScaleRow` over the same contiguous 64-wide `scores` row, and axpys
+V in ascending key order (only the row *address* changes). So the fp32
+accumulation order per output element is unchanged → **bitwise** equal to
+`DecodeAttentionF32` on the same logical K/V, and bit-identical across thread
+counts (each kv head's recurrence in one call).
+
+**Non-obvious decisions.**
+- *Per-ISA variants reuse the existing attention TUs, not new
+  `{isa}/paged_attention.cpp` files.* The four `Ops` primitives are TU-local
+  (anonymous namespace); reusing them **literally** is the bit-identity
+  guarantee. A separate TU would force duplicating the Ops (a second thing to
+  keep byte-identical) or hoisting them into per-ISA headers (churn, no benefit).
+  So `paged_attention.cpp` carries only dispatch, and each attention TU gains a
+  one-liner. Recorded in the kernels CMake comment + design §9.2.
+- *`internal/paged_attention_common.h` is a new header, not additions to
+  `attention_common.h`.* Keeps M6's header byte-untouched so its includer set
+  isn't re-tidied on this ticket.
+- *`bs | kAttnKb` is CHECKed at the public entry* (not merely a doc
+  precondition): a violating block size silently breaks the "matches the
+  contiguous kernel exactly" promise, so it is ADR-003 CHECK territory
+  (death-tested). `num_blocks` stays a caller-side bound (`ceil(length/bs) ≤
+  num_blocks`), never read past.
+- *No consumer wiring here.* `OptimizedModel::forward` swapping to `paged_view`
+  (with a `view()`+contiguous-kernel fallback for `SimpleKvCache`) is M8-T07 by
+  the roadmap. `src/parallel/` untouched (no per-worker scratch — the online
+  accumulator is `out` itself, as in M6). No new link edge (`kvcache → kernels`
+  already exists from M8-T04; the kernel lib already links `parallel`).
+
+**Tests** (`tests/unit/paged_decode_attention_kernel_test.cpp`, `kernels` label,
+**SCALAR_PASS**; +engine::kvcache/engine::memory for the end-to-end case): 8
+cases — **bitwise** (`allclose atol=rtol=0`) equality to `DecodeAttentionF32`
+across `bs ∈ {8,16,32,64}` × many-block/exact-boundary lengths (`1..4096`, incl.
+exact multiples of bs), GQA `{(4,4),(4,2),(8,1),(24,2: g=12>chunk)}` × d
+{18,24,64,128}, large-magnitude rescale (+ Class T vs the `cpu::attention`
+oracle, max ~8.6e-6), thread-count invariance (threaded == serial ==
+manual-chunked), the HF attention goldens (max ≤1.2e-7), an **end-to-end pass
+through a real `PagedKvCache`/`BlockPool`** (append token-by-token, feed
+`paged_view` to the kernel — bit-exact vs contiguous, proving the `PagedKvView`
+field semantics), and a death test for `bs ∤ 64`. The paged layout is
+materialized test-locally (independent of `KvScatterF32`) with a
+**reverse-permuted** block table and **poisoned** unused blocks + tail slots, so
+a contiguous-fallback or an over-read would fail. **1133 → 1149 ctest green**
+(+16 = 8 cases ×2 SCALAR_PASS).
+
+**Bench** (`benchmarks/kernels/attention_bench.cpp` new `paged` mode;
+BASELINES.md M8-T05): 2k-context decode step, 8-thread NEON — the isolated paged
+kernel is **0.89×** the contiguous decode kernel (274.7 vs 245.8 µs), 0.87× at
+1 thread — the block-indirection cost. But the paged kernel **replaces the
+`view()` gather** the contiguous path needs in the engine (~12% decode
+memory-traffic overhead, optimized-cpu-execution.md §8), so the whole-step
+comparison is M8-T07's `bench_generate` regression check, not this
+microbenchmark.
+
+**Docs.** paged-kv-cache.md §9.2 "as built" block; optimized-cpu-execution.md §8
+"M8-T05 landed" note (consumer swap deferred to M8-T07). Format + scoped tidy
+clean (attention_impl.h is a header edit → its includer set — the attention TUs,
+attention_kernel/decode_attention_kernel tests, the bench — was tidy-swept;
+avx2/attention.cpp is not in the arm64 compile DB, its one-liner hand-reviewed).

@@ -97,4 +97,9 @@ void DecodeUnits(const internal::DecodeArgs& a, std::int64_t unit_begin,
   internal::DecodeUnitsImpl<NeonOps>(a, unit_begin, unit_end);
 }
 
+void PagedDecodeUnits(const internal::PagedDecodeArgs& a,
+                      std::int64_t unit_begin, std::int64_t unit_end) {
+  internal::PagedDecodeUnitsImpl<NeonOps>(a, unit_begin, unit_end);
+}
+
 }  // namespace engine::kernels::neon

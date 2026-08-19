@@ -2,6 +2,7 @@
 #include "cpu/ops.h"
 #include "kernels/attention.h"
 #include "kernels/dispatch.h"
+#include "kernels/paged_attention.h"
 #include "tensor/dtype.h"
 #include "tensor/ops.h"
 #include "tensor/shape.h"
@@ -15,6 +16,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 // Attention benchmark (M6-T04 prefill, M6-T05 decode; design:
 // optimized-cpu-execution.md §8, §10). Times the optimized kernels vs the M5
@@ -71,18 +73,25 @@ int RunPrefill(std::int64_t t_dim, std::int64_t heads, std::int64_t kv_heads,
                std::int64_t d, int iterations);
 int RunDecode(std::int64_t l_dim, std::int64_t heads, std::int64_t kv_heads,
               std::int64_t d, int iterations);
+int RunPaged(std::int64_t l_dim, std::int64_t heads, std::int64_t kv_heads,
+             std::int64_t d, int iterations);
 
 }  // namespace
 
 int main(int argc, char** argv) {
-  // Optional leading mode: "prefill" (default) or "decode". If present, the
-  // numeric args shift by one.
+  // Optional leading mode: "prefill" (default), "decode", or "paged" (M8-T05
+  // paged decode vs contiguous decode). If present, the numeric args shift by
+  // one.
   int arg = 1;
   bool decode = false;
+  bool paged = false;
   if (argc > 1) {
     const std::string mode = argv[1];
     if (mode == "decode") {
       decode = true;
+      arg = 2;
+    } else if (mode == "paged") {
+      paged = true;
       arg = 2;
     } else if (mode == "prefill") {
       arg = 2;
@@ -91,15 +100,18 @@ int main(int argc, char** argv) {
   const auto opt = [&](int i, std::int64_t dflt) -> std::int64_t {
     return argc > i ? std::atoll(argv[i]) : dflt;
   };
-  const std::int64_t first = opt(arg, 2048);  // decode: L; prefill: T
+  const std::int64_t first = opt(arg, 2048);  // decode/paged: L; prefill: T
   const std::int64_t heads = opt(arg + 1, 32);
   const std::int64_t kv_heads = opt(arg + 2, 8);
   const std::int64_t d = opt(arg + 3, 64);
-  const int default_iterations = decode ? 200 : 5;
+  const int default_iterations = decode || paged ? 200 : 5;
   const int iterations =
       argc > arg + 4 ? std::atoi(argv[arg + 4]) : default_iterations;
   if (decode) {
     return RunDecode(first, heads, kv_heads, d, iterations);
+  }
+  if (paged) {
+    return RunPaged(first, heads, kv_heads, d, iterations);
   }
   return RunPrefill(first, heads, kv_heads, d, iterations);
 }
@@ -208,6 +220,88 @@ int RunDecode(std::int64_t l_dim, std::int64_t heads, std::int64_t kv_heads,
              prefill * 1e6, ref / prefill);
   fmt::print("{:<28} {:>10.3f} us {:>8.2f}x\n", "DecodeAttentionF32", dec * 1e6,
              ref / dec);
+  return 0;
+}
+
+// Paged decode (M8-T05): PagedDecodeAttentionF32 reading K/V through a block
+// table vs the contiguous DecodeAttentionF32 — the per-call cost of the block
+// indirection. The logical K/V are materialized into paged slabs
+// [num_blocks, Hkv, bs, d] with a sequential block table (blocks laid out in
+// order — the common decode-time layout). Both are bit-identical; this is the
+// overhead measurement the M8-T07 ≤10% decode-regression bound reads against.
+int RunPaged(std::int64_t l_dim, std::int64_t heads, std::int64_t kv_heads,
+             std::int64_t d, int iterations) {
+  constexpr int kBatch = 100;
+  constexpr std::int64_t kBs = 16;  // divides kAttnKb = 64
+  const auto scale =
+      static_cast<float>(1.0 / std::sqrt(static_cast<double>(d)));
+
+  fmt::print(
+      "Paged decode L={} H={} Hkv={} d={} bs={} (T=1), best per-call of "
+      "{}×{}, ISA: {}\n\n",
+      l_dim, heads, kv_heads, d, kBs, iterations, kBatch,
+      k::IsaName(k::SelectedIsa()));
+
+  Tensor q = Unwrap(ops::zeros(Shape{1, heads, d}, DataType::kFloat32));
+  (void)ops::fill_normal(q, 0.0, 1.0, 1);
+  Tensor key =
+      Unwrap(ops::zeros(Shape{kv_heads, l_dim, d}, DataType::kFloat32));
+  (void)ops::fill_normal(key, 0.0, 1.0, 2);
+  Tensor value =
+      Unwrap(ops::zeros(Shape{kv_heads, l_dim, d}, DataType::kFloat32));
+  (void)ops::fill_normal(value, 0.0, 1.0, 3);
+  Tensor out = Unwrap(ops::zeros(Shape{1, heads, d}, DataType::kFloat32));
+
+  // Materialize the logical K/V into paged slabs with a sequential block table.
+  const std::int64_t num_blocks = (l_dim + kBs - 1) / kBs;
+  const std::int64_t block_stride = kv_heads * kBs * d;
+  std::vector<float> k_slab(
+      static_cast<std::size_t>(num_blocks * block_stride));
+  std::vector<float> v_slab(
+      static_cast<std::size_t>(num_blocks * block_stride));
+  std::vector<std::int32_t> table(static_cast<std::size_t>(num_blocks));
+  for (std::int64_t b = 0; b < num_blocks; ++b) {
+    table[static_cast<std::size_t>(b)] = static_cast<std::int32_t>(b);
+  }
+  for (std::int64_t h = 0; h < kv_heads; ++h) {
+    for (std::int64_t s = 0; s < l_dim; ++s) {
+      const std::int64_t off =
+          ((s / kBs) * block_stride) + (h * kBs * d) + ((s % kBs) * d);
+      const float* ks = key.data_ptr<float>() + ((h * l_dim + s) * d);
+      const float* vs = value.data_ptr<float>() + ((h * l_dim + s) * d);
+      std::copy(ks, ks + d, k_slab.begin() + static_cast<std::ptrdiff_t>(off));
+      std::copy(vs, vs + d, v_slab.begin() + static_cast<std::ptrdiff_t>(off));
+    }
+  }
+
+  const double dec = BestSeconds(
+                         [&] {
+                           for (int b = 0; b < kBatch; ++b) {
+                             k::DecodeAttentionF32(
+                                 q.data_ptr<float>(), key.data_ptr<float>(),
+                                 value.data_ptr<float>(), out.data_ptr<float>(),
+                                 heads, kv_heads, d, l_dim, scale);
+                           }
+                         },
+                         iterations) /
+                     kBatch;
+  const double pag =
+      BestSeconds(
+          [&] {
+            for (int b = 0; b < kBatch; ++b) {
+              k::PagedDecodeAttentionF32(
+                  q.data_ptr<float>(), k_slab.data(), v_slab.data(),
+                  table.data(), num_blocks, l_dim, heads, kv_heads, d, kBs,
+                  block_stride, scale, out.data_ptr<float>());
+            }
+          },
+          iterations) /
+      kBatch;
+
+  fmt::print("{:<28} {:>10.3f} us {:>8.2f}x\n", "DecodeAttentionF32 (contig)",
+             dec * 1e6, 1.0);
+  fmt::print("{:<28} {:>10.3f} us {:>8.2f}x\n", "PagedDecodeAttentionF32",
+             pag * 1e6, dec / pag);
   return 0;
 }
 

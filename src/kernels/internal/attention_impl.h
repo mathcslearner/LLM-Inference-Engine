@@ -2,6 +2,7 @@
 
 #include "kernels/dispatch.h"
 #include "kernels/internal/attention_common.h"
+#include "kernels/internal/paged_attention_common.h"
 
 #include <cstdint>
 
@@ -21,6 +22,8 @@ void PrefillUnits(const internal::PrefillArgs& a, std::int64_t unit_begin,
                   std::int64_t unit_end);
 void DecodeUnits(const internal::DecodeArgs& a, std::int64_t unit_begin,
                  std::int64_t unit_end);
+void PagedDecodeUnits(const internal::PagedDecodeArgs& a,
+                      std::int64_t unit_begin, std::int64_t unit_end);
 }  // namespace scalar
 
 #if defined(ENGINE_ARCH_ARM64)
@@ -29,6 +32,8 @@ void PrefillUnits(const internal::PrefillArgs& a, std::int64_t unit_begin,
                   std::int64_t unit_end);
 void DecodeUnits(const internal::DecodeArgs& a, std::int64_t unit_begin,
                  std::int64_t unit_end);
+void PagedDecodeUnits(const internal::PagedDecodeArgs& a,
+                      std::int64_t unit_begin, std::int64_t unit_end);
 }  // namespace neon
 #endif
 
@@ -40,6 +45,8 @@ void PrefillUnits(const internal::PrefillArgs& a, std::int64_t unit_begin,
                   std::int64_t unit_end);
 void DecodeUnits(const internal::DecodeArgs& a, std::int64_t unit_begin,
                  std::int64_t unit_end);
+void PagedDecodeUnits(const internal::PagedDecodeArgs& a,
+                      std::int64_t unit_begin, std::int64_t unit_end);
 }  // namespace avx2
 #endif
 
@@ -54,6 +61,11 @@ using PrefillUnitsFn = void (*)(const internal::PrefillArgs&, std::int64_t,
 using DecodeUnitsFn = void (*)(const internal::DecodeArgs&, std::int64_t,
                                std::int64_t);
 [[nodiscard]] DecodeUnitsFn DecodeAttentionVariant(Isa isa);
+
+// Test seam: the PagedDecodeUnits variant Select would return for `isa`.
+using PagedDecodeUnitsFn = void (*)(const internal::PagedDecodeArgs&,
+                                    std::int64_t, std::int64_t);
+[[nodiscard]] PagedDecodeUnitsFn PagedDecodeAttentionVariant(Isa isa);
 
 }  // namespace detail
 

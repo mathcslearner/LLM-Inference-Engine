@@ -364,3 +364,40 @@ Reading it:
   (`batched_sampler_test`, host ISA + forced-scalar) — the "optimization" is
   purely threading + scratch reuse + the shared filter improvements, never a
   different arithmetic.
+
+## M8-T05 — paged decode attention (2026-08-19)
+
+**Host:** Apple M2 (8 physical cores), macOS, dev machine.
+**Toolchain:** Homebrew clang 20, `-O3` Release.
+**Command:** `build/benchmarks/attention_bench paged` (defaults `L=2048, H=32,
+Hkv=8, d=64, bs=16`, T=1 — the same Llama-3.2-1B-shaped 2k-context decode step
+as M6-T05; best per-call of 200 samples × 100-call batches). Compares the
+M6-T05 contiguous `DecodeAttentionF32` against the M8-T05
+`PagedDecodeAttentionF32` reading K/V through a block table (sequential mapping,
+the common decode-time layout). The two are **bit-identical** (asserted in
+`paged_decode_attention_kernel_test`); this measures only the block-indirection
+cost. No perf target ("time vs the contiguous kernel").
+
+| Config | contiguous decode | paged decode | paged vs contig |
+|---|---:|---:|---:|
+| NEON, 8 threads (default) | 245.8 µs | 274.7 µs | **0.89×** |
+| NEON, 1 thread | 892.8 µs | 1024.8 µs | 0.87× |
+
+Reading them:
+
+- **The isolated paged kernel is ~11–13% slower per call** than the contiguous
+  one. The recurrence is identical arithmetic; the overhead is the block-table
+  walk — splitting each 64-key unit's `DotScoreRow` into `kAttnKb/bs = 4`
+  per-block calls (each with its own horizontal-reduction setup) plus the
+  per-block pointer recompute and table load.
+- **This is not the number that matters for M8.** In the engine the contiguous
+  path must first **gather** K/V out of the paged cache via `KvCache::view`
+  (~12% decode memory-traffic overhead, optimized-cpu-execution.md §8); the
+  paged kernel reads the slabs in place and pays no gather. The whole-decode-step
+  comparison — where the gather is charged to the contiguous path — is M8-T07's
+  `bench_generate` regression check (≤10% vs the M6 baseline), not this
+  microbenchmark. Recorded here so M8-T07's numbers are read with the isolated
+  kernel cost in view.
+- **Parallel width is `Hkv` (= 8 here)**, identical to M6-T05 decode — the
+  E-core throttling and `Hkv`-only width (M12-T03 flash-decoding motivator)
+  apply unchanged.

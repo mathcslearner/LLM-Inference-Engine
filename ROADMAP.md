@@ -1047,7 +1047,7 @@ Kernel writing a batch of new K/V vectors into paged storage given a slot mappin
 **Acceptance criteria:**
 - Tests: scattered writes land in the exact expected block/offset (readback comparison vs an independently-simulated paged layout), across boundary-straddling prefills and single-token decodes.
 
-### M8-T05 · Paged decode attention kernel
+### M8-T05 · Paged decode attention kernel — ✅ DONE (2026-08-19)
 Decode attention reading K/V through the block table (block-table pointer array per
 sequence), GQA, fp32 accumulation.
 **Depends on:** M8-T04.

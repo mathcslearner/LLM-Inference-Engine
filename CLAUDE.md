@@ -820,18 +820,52 @@ behind an existing subsystem):
   loaded validation, the layer protocol, layer-0 exhaustion + recovery,
   truncate/reset, RAII, pool sharing; +1 `simple_cache_test` default-`paged_view`)
   → **1133 green**. design §8/§9.1 gained "as built" notes; format + scoped tidy
-  clean (kv_cache.h header edit → full includer set swept).
+  clean (kv_cache.h header edit → full includer set swept). T05 paged decode
+  attention kernel: `src/kernels/paged_attention.{h,cpp}`
+  (`PagedDecodeAttentionF32`) + `internal/paged_attention_common.h`
+  (`PagedDecodeUnitsImpl`/`PagedDecodeGroupSlice`/`PagedDecodeArgs`) — decode
+  attention (one query/head over the whole cache) reading K/V **through the
+  block table** over the paged slabs, the zero-copy fast path
+  `PagedKvCache::paged_view` (T04) feeds. Reuses M6-T05's `DecodeUnitsImpl`
+  recurrence with the contiguous `k_head + s·d` walk replaced by a block-table
+  walk: because `bs | kAttnKb=64` (§4, pool-enforced), a 64-key online-softmax
+  unit is exactly `64/bs` whole physical blocks, so per unit it scores
+  **block-by-block** (`DotScoreRow` per block into `scores + b·bs`, `>`-folded
+  max), runs the identical `ExpRowSum`/`ScaleRow` over the same 64-wide `scores`
+  row, and axpys V in ascending key order (only the row *address* changes) →
+  **bit-identical to `DecodeAttentionF32`** on the same logical K/V (asserted
+  bitwise), bit-identical across thread counts, threaded over `Hkv` kv heads.
+  Per-ISA variants are **one-liners in the existing `{scalar,neon,avx2}/
+  attention.cpp` TUs** reusing the *same* anonymous-namespace `Ops` (the literal
+  reuse **is** the bit-identity guarantee — no separate `{isa}/
+  paged_attention.cpp`); `paged_attention.cpp` holds only `KernelTable` dispatch
+  + `parallel_for` + the `detail::PagedDecodeAttentionVariant` seam. `bs | kAttnKb`
+  **CHECKed at the entry** (death-tested); `num_blocks` a caller-side bound only.
+  No consumer wiring (the `OptimizedModel` swap is T07); `src/parallel/`
+  untouched (accumulator is `out`); no new link edge. New
+  `paged_decode_attention_kernel_test` (kernels, **SCALAR_PASS**, +engine::kvcache/
+  memory): bitwise vs the contiguous kernel across `bs ∈ {8,16,32,64}` ×
+  many-block/exact-boundary lengths, GQA (incl. `g=12>chunk`), d∈{18,24,64,128},
+  thread-count invariance, HF goldens (Class T vs oracle), an **end-to-end pass
+  through a real `PagedKvCache`/`BlockPool`** (append token-by-token → `paged_view`
+  → kernel, bit-exact), and a `bs∤64` death test — the paged layout materialized
+  test-locally (independent of `KvScatterF32`) with a **reverse-permuted** table +
+  **poisoned** unused/tail slots. Bench (`attention_bench paged`; BASELINES.md
+  M8-T05): isolated paged kernel **0.89×** the contiguous decode (274.7 vs
+  245.8 µs, 8t NEON) — the block-indirection cost — but it **replaces the `view()`
+  gather** the contiguous engine path needs (~12% decode traffic, §8), so the
+  whole-step comparison is T07's job. **1133 → 1149 green** (+16). design
+  paged-kv-cache.md §9.2 "as built" + optimized-cpu-execution.md §8 landed-note;
+  format + scoped tidy clean (attention_impl.h header edit → attention TUs/tests/
+  bench swept; avx2 one-liner hand-reviewed, CI-proven).
 
-Next up: **M8-T05** (`src/kernels/paged_attention.{h,cpp}` +
-`PagedDecodeAttentionF32`, per-ISA TUs): decode attention reading K/V through
-the block table. Reuses M6-T05's `DecodeUnitsImpl`/`DecodeGroupSlice`
-recurrence (the four `Ops` primitives) but walks the block table instead of a
-contiguous `k_head + s·d`; because `bs | kAttnKb=64` (§4), a 64-key online-
-softmax unit spans `64/bs` whole blocks, so per fixed query head the arithmetic
-order is identical to `DecodeAttentionF32` → **bit-identical by construction**
-(the M8-T05 acceptance: matches the M6-T05 contiguous kernel exactly for cache
-lengths crossing many blocks, incl. length exactly at a block boundary), and
-threaded across `Hkv` kv heads. Consumed via `PagedKvCache::paged_view` (the
-zero-copy fast path landed in T04) with a `view()`+contiguous-kernel fallback
-for `SimpleKvCache`. Per paged-kv-cache.md §9.2; `SCALAR_PASS`, AVX2 blind +
-CI-proven.
+Next up: **M8-T06** (`paged_gather` + paged prefill path): implement
+`PagedKvCache::view(layer)` (Unimplemented since T04) as the contiguous gather
+that walks the block table and copies each block's `[Hkv, bs, d]` tile (clipping
+the last block to `length % bs`) into a fresh `[Hkv, length, d]` head-major
+tensor — the shape the **unchanged** M6 `PrefillAttentionF32` reads. Prefill
+(T > 1, incl. prefill-continuation with `P > 0` cached tokens) gathers once per
+layer and calls the M6 blocked prefill kernel; a block-walking prefill kernel is
+deferred to M12. Per paged-kv-cache.md §9.3. Acceptance: the gather independently
+unit-tested vs a simulated layout, and prefill-with-existing-paged-cache matches
+the reference backend (prefill-continuation).

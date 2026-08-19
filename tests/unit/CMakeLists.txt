@@ -345,6 +345,22 @@ engine_add_tests(TREE unit SOURCES
   LABELS kernels
   SCALAR_PASS)
 
+# paged_decode_attention_kernel_test (M8-T05): PagedDecodeAttentionF32 — decode
+# attention reading K/V through a block table — asserted **bit-identical** to the
+# M6-T05 contiguous DecodeAttentionF32 on the same logical K/V materialized both
+# ways (a test-local paged layout with a permuted block table + poisoned unused
+# slots, independent of KvScatterF32), across block sizes {8,16,32,64}, many-block
+# and exact-boundary cache lengths, GQA ratios, and thread counts; plus the HF
+# attention goldens vs the oracle and an end-to-end pass through a real
+# PagedKvCache/BlockPool. Reuses the same per-ISA Ops as the contiguous kernel, so
+# SCALAR_PASS exercises the shipped bytes. Adds engine::kvcache/engine::memory for
+# the end-to-end case. `kernels` label.
+engine_add_tests(TREE unit SOURCES
+  paged_decode_attention_kernel_test.cpp
+  DEPS engine::kernels engine::cpu engine::model engine::kvcache engine::memory
+  LABELS kernels
+  SCALAR_PASS)
+
 # embedding_kernel_test (M6-T06): the embedding-lookup kernels (row-major and
 # packed-lm_head layouts) vs a single-threaded reference gather and the
 # cpu::embedding_lookup oracle — bit-exact (pure gather + exact widen, §7/§10).

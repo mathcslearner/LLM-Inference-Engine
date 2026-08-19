@@ -726,6 +726,14 @@ table directly (§11). The doc records the number so M6-T08's baseline is
 interpreted with it in view, and so M8's improvement is measured against a known
 starting point.
 
+> **M8-T05 landed** (`kernels::PagedDecodeAttentionF32`, paged-kv-cache.md
+> §9.2): decode reads K/V directly through the block table, so the paged decode
+> path pays no `view()` gather. The kernel is **bit-identical** to
+> `DecodeAttentionF32` on the same logical K/V (asserted bitwise). The consumer
+> swap — `OptimizedModel::forward` trying `paged_view` first and falling back to
+> `view()` + the contiguous kernel — is M8-T07, not the kernel ticket; until
+> then nothing above the `KvCache` interface changes.
+
 ---
 
 ## 9. Backend selection & test wiring

@@ -25,6 +25,13 @@ add_library(engine_kernels STATIC
   norm.cpp
   rope.cpp
   attention.cpp
+  # paged_attention.cpp reuses the existing per-ISA attention TUs (M8-T05): its
+  # PagedDecodeUnits variants instantiate internal::PagedDecodeUnitsImpl with the
+  # SAME anonymous-namespace `Ops` structs as PrefillUnits/DecodeUnits (in
+  # scalar/neon/avx2/attention.cpp) — reusing those primitives *literally* is the
+  # bit-identity-vs-contiguous-decode guarantee (paged-kv-cache.md §9.2), so there
+  # is no separate {isa}/paged_attention.cpp.
+  paged_attention.cpp
   # embedding.cpp has no per-ISA TU (M6-T06): its only per-element work is the
   # fp16/bf16->fp32 widen, dispatched through the existing convert variants; the
   # gather itself is inherently scalar (optimized-cpu-execution.md §2, §7).
