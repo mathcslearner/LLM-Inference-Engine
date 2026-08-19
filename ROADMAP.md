@@ -1013,7 +1013,7 @@ with reference counting so M11 (prefix caching) is an extension, not a rewrite.
 
 **Architecture documents:** `docs/design/paged-kv-cache.md` (M8-T01).
 
-### M8-T01 · Design doc: paged KV cache
+### M8-T01 · Design doc: paged KV cache — ✅ DONE (2026-08-19)
 Write `docs/design/paged-kv-cache.md`: physical layout
 (`[num_blocks, 2, layer… ] `— choose and justify K/V layout per block for kernel
 access patterns), block size choice (16 tokens default, rationale), capacity

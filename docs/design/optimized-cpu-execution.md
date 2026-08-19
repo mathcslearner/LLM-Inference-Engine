@@ -693,7 +693,14 @@ model-execution.md §4.2; only the attention *math* is replaced.
   blocks across the group's other query heads never touches this head's
   accumulator. This bitwise equivalence is what M8-T05's paged decode kernel
   ("matches the M6-T05 contiguous decode kernel results exactly") will be
-  validated against. **Parallel width is `Hkv`** (not `H·qblocks` as in prefill):
+  validated against. **This bit-identity constrains the paged block size**
+  (`docs/design/paged-kv-cache.md` §4): a `kAttnKb = 64`-key online-softmax unit
+  must be an integer number of whole physical blocks, so the paged kernel gathers
+  a unit's blocks into the same 64-wide score row and runs the identical
+  max/expsum/scale/axpy — hence `bs | kAttnKb`, i.e. `bs ∈ {8, 16, 32, 64}`
+  (default 16), enforced at pool construction. The paged kernel reuses the same
+  four `Ops` primitives with block-table indirection replacing the `k_head +
+  s·d` contiguous walk. **Parallel width is `Hkv`** (not `H·qblocks` as in prefill):
   decode threads over kv heads only, so a model with `Hkv < cores` leaves cores
   idle on the decode step — the concrete motivator for M12-T03's flash-decoding
   cache split (§11, §12). Observed vs `cpu::attention` (NEON): max **8.6e-6**

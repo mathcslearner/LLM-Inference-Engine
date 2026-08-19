@@ -579,7 +579,28 @@ states this so M11/M12 inherit it rather than re-deriving it.
 ### 6.4 What M8 (paged) changes — and what it does not
 
 M5-T01's acceptance criterion demands this note explicitly. The v0 interface
-above is the seam M8 keeps; the implementation is what changes.
+above is the seam M8 keeps; the implementation is what changes. **M8-T01 now
+has its own doc — `docs/design/paged-kv-cache.md` — which discharges this
+section in full** (physical block layout, capacity formula, refcount lifecycle,
+kernels); the summary below is the interface-level contract, and the paged doc
+is authoritative for the mechanism. Two clarifications M8-T01 settled and folded
+back here:
+
+- **`capacity()` becomes advisory under paging.** With a shared block pool,
+  `capacity()` reports what *this* sequence could grow into given the pool's
+  currently-free blocks — a hint, not a hard bound, since another sequence may
+  take those blocks first. `append`'s `ResourceExhausted` is the binding check
+  (M8-T08), and `Generate`'s up-front worst-case capacity check (M5-T09) becomes
+  a best-effort early rejection. (`SimpleKvCache`'s `capacity()` stays a hard
+  fixed bound.)
+- **One additive accessor, `paged_view(layer)`, joins the interface** (M8-T04) —
+  a default-`Unimplemented` virtual that `PagedKvCache` overrides to hand back
+  slab pointers + the sequence's block table with zero copy, for the decode hot
+  path (a full-history `view()` copy per step would blow M8-T07's ≤10%
+  regression bound). `SimpleKvCache` inherits the default; the optimized decode
+  path tries `paged_view` and falls back to `view()`. This is the *only* change
+  to code above the interface; `view()` itself keeps its "may copy" contract for
+  the reference and prefill paths.
 
 **Unchanged (the abstract `KvCache` surface):** `geometry`, `length`,
 `capacity`, `append`, `truncate`, and the per-sequence ownership model. M8-T07

@@ -716,9 +716,34 @@ behind an existing subsystem):
   **1058 ctest green**; design §15.2/§15.5/§15.6 + optimized-cpu-execution.md §2
   updated; format + scoped tidy clean.
 
-Next up: **M8-T01** (design doc `docs/design/paged-kv-cache.md`: physical block
-layout + K/V-per-block justification, block size (16 tokens default), the
-blocks-per-pool capacity formula from a `--kv-cache-memory` budget, block tables,
-slot mapping, reference counting, and the preemption + future prefix-caching
-interactions — the memory architecture that makes continuous batching and prefix
-caching possible; docs-only, first ticket of Milestone 8).
+- **M8 (paged KV cache & block manager) — in progress** (2026-08-19–): T01
+  `docs/design/paged-kv-cache.md` — the contract M8-T02…T08 (+ the
+  M9/M11/M12/M13/M15 interactions) build on. **Docs-only.** Fixes: the
+  **physical layout** (two per-layer K/V slabs `[num_blocks, Hkv, bs, d]` fp32,
+  innermost `[bs,d]` tile contiguous = the head-major stream the M6 kernels read;
+  resolves the roadmap's literal `[num_blocks,2,layer…]` — `2` = K/V axis as two
+  slabs, per-layer for prefetch/TLB — with worked byte offsets for tiny-llama /
+  Qwen2-0.5B); **block size 16** constrained to `bs ∈ {8,16,32,64}` by the
+  **load-bearing `bs | kAttnKb=64` constraint** (a paged decode kernel bit-exact
+  to M6-T05 needs a 64-key online-softmax unit to span whole blocks); the
+  **capacity formula** (`num_blocks = ⌊kv_budget / (2·L·Hkv·bs·d·itemsize)⌋`,
+  `--kv-cache-memory` absolute-or-fraction-of-host-RAM, `--kv-block-size`);
+  **block-pool refcounting** + lifecycle diagram (FREE→OWNED→SHARED, double-free
+  `CHECK`, dashed M11 `CACHED`) and the **immutability invariant** M11 rests on;
+  **block table** slot mapping (`slot = blocks_[pos/bs]·bs + pos%bs`,
+  all-or-nothing append, hand-worked mappings); **`PagedKvCache` keeps the M5
+  `KvCache` interface** with one additive `paged_view(layer)` virtual
+  (default-`Unimplemented`, the zero-copy decode fast path — a per-step full
+  `view()` gather would blow M8-T07's ≤10% regression bound) and an **advisory
+  `capacity()`**; **kernels** `KvScatterF32`/`PagedDecodeAttentionF32`/`paged_gather`
+  as layout-agnostic raw-pointer entries over the new **`kvcache → kernels`**
+  downward edge (ADR-002-permitted like `model → kernels`, no amendment).
+  Cross-doc: model-execution.md §6.4 + optimized-cpu-execution.md §8 updated. No
+  `src/` change (1058 tests unchanged).
+
+Next up: **M8-T02** (`src/kvcache/block_pool.{h,cpp}`: the block pool sized from
+the capacity formula — free-list allocate/free of block ids, per-block
+refcounts, `used/free/total` stats — pure bookkeeping over slabs drawn from the
+M2 `CachingAllocator`, fully unit-testable; per paged-kv-cache.md §6:
+`ResourceExhausted` on exhaustion, `CHECK` on double-free, stats accurate
+through scripted alloc/free/share).

@@ -2063,3 +2063,76 @@ mismatches, null sampler, `B=0`, NaN row → Internal, bad history id →
 InvalidArgument); allocation-free steady state (`scratch_bytes()` stable across
 same-shape steps). Five `sampling_logprobs_test` tolerances relaxed to fp32-exp
 class. Format + scoped tidy clean.
+
+## Milestone 8 — Paged KV Cache & Block Manager
+
+### M8-T01 — Design doc: paged KV cache (2026-08-19)
+
+Docs-only. Wrote **`docs/design/paged-kv-cache.md`** — the working contract
+M8-T02…T08 (and the M9/M11/M12/M13/M15 interactions) build on: the memory
+architecture that replaces M5's per-sequence contiguous `SimpleKvCache` with a
+shared pool of fixed-size token blocks, indexed per sequence by a block table,
+with reference counting from day one so M11 prefix caching is an extension, not
+a rewrite.
+
+What the doc fixes (the non-obvious decisions):
+
+- **Physical layout — two per-layer K/V slabs of head-major block tiles.** The
+  pool is `2·num_layers` tensors, each `[num_blocks, Hkv, bs, d]` fp32; the
+  innermost `[bs, d]` tile is contiguous, exactly the head-major stream the M6
+  kernels read (`transpose(1,2)` of HF's cache). This resolves the roadmap's
+  literal `[num_blocks, 2, layer…]` sketch: the `2` is the K/V axis realized as
+  **two slabs** (K and V feed different kernel args, never addressed as a unit),
+  and **per-layer** slabs (not one giant `[num_blocks,2,L,…]` tensor) keep one
+  layer's working set in a dense address range for prefetch/TLB. Deviation from
+  the literal sketch recorded per `docs/design/README.md`. Worked byte-offset
+  examples for tiny-llama (d=16, 8 KiB/block) and Qwen2-0.5B (d=64, 384
+  KiB/block → 2730 blocks / 43,680 tokens at a 1 GiB budget).
+- **Block size 16, constrained to `bs ∈ {8,16,32,64}` — the load-bearing
+  `bs | kAttnKb` constraint.** M6-T05's decode recurrence rescales the online
+  softmax once per `kAttnKb = 64`-key unit (`DecodeGroupSlice`'s four `Ops`
+  primitives). For the paged decode kernel (M8-T05) to match the contiguous M6
+  kernel **bit-for-bit** (not just Class T), a 64-key unit must be an integer
+  number of whole physical blocks, so the paged kernel gathers a unit's blocks
+  into the same 64-wide score row and runs the identical max/expsum/scale/axpy.
+  Enforced at pool construction; cross-noted in optimized-cpu-execution.md §8.
+- **Capacity formula.** `bytes_per_block = 2·L·Hkv·bs·d·itemsize`; `num_blocks =
+  ⌊kv_budget / bytes_per_block⌋`. `--kv-cache-memory` is absolute bytes or a
+  fraction `f` of host RAM (`kv = f·host_ram − weights_resident − workspace`,
+  with `sysctl hw.memsize` / `sysconf` detection); `--kv-block-size` selects
+  `bs`. `num_blocks < 1` → `ResourceExhausted`.
+- **Block pool refcounting + lifecycle diagram** (M8-T02): free-list
+  allocate/free, `Share`/`Release`, FREE→OWNED→SHARED with the double-`Release`
+  and `Share`-on-free `CHECK`s, and the dashed M11 `CACHED` state between "rc hit
+  0" and "returned to free list." The **immutability invariant** (§6.4) — a
+  refcount≥1 block is never rewritten because sequences only append to their
+  exclusive refcount-1 tail, and M11 shares only full blocks — is stated now as
+  the property M11's correctness proof rests on.
+- **Block table + slot mapping** (M8-T03): `slot(pos) = blocks_[pos/bs]·bs +
+  pos%bs`, all-or-nothing block allocation on append (a rejected append leaves
+  table+pool untouched), hand-worked prefill/decode/boundary-straddle slot
+  mappings, truncate/free returning blocks to the pool (RAII).
+- **`PagedKvCache` keeps the M5 `KvCache` interface unchanged** — with **one
+  additive virtual, `paged_view(layer)`**, default-`Unimplemented`
+  (`SimpleKvCache` inherits it), overridden by the paged cache to hand back slab
+  pointers + block table with zero copy for the decode hot path (a per-step
+  full-history `view()` gather would blow M8-T07's ≤10% regression bound).
+  `capacity()` documented as **advisory** under a shared pool (`append`'s
+  `ResourceExhausted` is the binding check). This is the only change to code
+  above the interface; `view()` keeps its "may copy" contract for the reference
+  and prefill read paths.
+- **Kernels** (layout-agnostic raw-pointer entries, the `kvcache → kernels`
+  downward edge — permitted by ADR-002 like `model → kernels`, no amendment,
+  `kv_cache.h`'s comment updated when T04 lands): `KvScatterF32` (M8-T04, a
+  bit-exact single-TU copy replacing the contiguous append), `PagedDecodeAttentionF32`
+  (M8-T05, the M6-T05 recurrence with block-table indirection, bit-identical by
+  construction), and `paged_gather` → the unchanged M6 prefill kernel (M8-T06).
+- **Engine integration & exhaustion** (M8-T07/T08): pool owned by the
+  engine/runtime, outlives every cache; tiny-fixture greedy output identical to
+  pre-paging (the KV invariant under a new backend); graceful `ResourceExhausted`
+  on a dry pool with all blocks reclaimed (stats zero, no leaks).
+
+Cross-doc edits in the same change: model-execution.md §6.4 (points to the new
+doc; folds back the advisory-`capacity()` and `paged_view` clarifications),
+optimized-cpu-execution.md §8 (the `bs | kAttnKb` constraint on the paged decode
+kernel). No `src/` change; 1058 tests unchanged.
