@@ -81,6 +81,14 @@ class Workspace {
   // the instantiated tiny-llama figure and grows monotonically.
   [[nodiscard]] std::int64_t bytes() const;
 
+  // The same §6.2 formula for an arbitrary `t`, computed from a model's config
+  // dims without instantiating a workspace. The M8-T07 KV-budget resolver uses
+  // it as the `workspace_bytes` high-water estimate (paged-kv-cache.md §5.3)
+  // for the configured max forward width. `t == 0` returns 0.
+  [[nodiscard]] static std::int64_t BytesFor(std::int64_t e, int num_heads,
+                                             int num_kv_heads, int d,
+                                             std::int64_t i, std::int64_t t);
+
  private:
   Workspace(std::int64_t e, std::int64_t q_rows, std::int64_t kv_rows,
             std::int64_t i)

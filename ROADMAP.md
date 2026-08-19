@@ -1063,7 +1063,7 @@ correctly.
 **Acceptance criteria:**
 - Tests vs the reference backend: prefill with existing paged cache content matches; the gather routine independently tested.
 
-### M8-T07 · Engine integration
+### M8-T07 · Engine integration — ✅ DONE (2026-08-19)
 Swap the paged cache into the single-request generation path behind the M5 cache
 interface; wire capacity config (`--kv-cache-memory`); expose cache stats.
 **Depends on:** M8-T06.

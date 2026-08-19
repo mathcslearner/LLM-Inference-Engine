@@ -6,6 +6,7 @@
 #include "kernels/attention.h"
 #include "kernels/elementwise.h"
 #include "kernels/norm.h"
+#include "kernels/paged_attention.h"
 #include "kernels/rope.h"
 #include "kvcache/kv_cache.h"
 #include "model/config.h"
@@ -288,8 +289,7 @@ core::Status OptimizedModel::ForwardLayer(const ForwardRequest& request,
                         rope_.cos().data_ptr<float>(),
                         rope_.sin().data_ptr<float>());
 
-  // Append this call's K/V (token-major [T, Hkv, d]) and read the accumulated
-  // [Hkv, P+T, d] head-major view back (§8, the SimpleKvCache gather seam).
+  // Append this call's K/V (token-major [T, Hkv, d]).
   ASSIGN_OR_RETURN(
       const tensor::Tensor k3,
       k.reshape(tensor::Shape{t_dim, config_.num_kv_heads, config_.head_dim}));
@@ -297,21 +297,42 @@ core::Status OptimizedModel::ForwardLayer(const ForwardRequest& request,
       const tensor::Tensor v3,
       v.reshape(tensor::Shape{t_dim, config_.num_kv_heads, config_.head_dim}));
   RETURN_IF_ERROR(request.cache->append(layer_index, k3, v3));
-  ASSIGN_OR_RETURN(const kvcache::KvView kv, request.cache->view(layer_index));
-  const std::int64_t l_dim = kv.k.shape().dim(1);
 
-  // ctx [T, H, d] (contiguous with the [T, H·d] ctx slot). Decode (T == 1) uses
-  // the single-token specialization; prefill uses the blocked kernel.
+  // ctx [T, H, d] (contiguous with the [T, H·d] ctx slot). Decode (T == 1)
+  // prefers the zero-copy paged fast path (paged-kv-cache.md §8.3): reading K/V
+  // through the block table avoids the per-step full-history gather `view()`
+  // performs, which is what keeps M8-T07 under the ≤10% decode regression
+  // bound. On a non-paged cache (`SimpleKvCache` → `Unimplemented`) it falls
+  // back to `view()` + the contiguous decode kernel, so nothing changes for
+  // that path. Prefill always gathers `[Hkv, P+T, d]` head-major via `view()`
+  // (the M8-T06 read path; a block-walking paged prefill kernel is M12).
   if (t_dim == 1) {
-    kernels::DecodeAttentionF32(q.data_ptr<float>(), kv.k.data_ptr<float>(),
-                                kv.v.data_ptr<float>(), ctx.data_ptr<float>(),
-                                config_.num_heads, config_.num_kv_heads,
-                                config_.head_dim, l_dim, scale);
+    core::StatusOr<kvcache::PagedKvView> paged =
+        request.cache->paged_view(layer_index);
+    if (paged.ok()) {
+      const kvcache::PagedKvView& pv = *paged;
+      kernels::PagedDecodeAttentionF32(
+          q.data_ptr<float>(), pv.k_slab, pv.v_slab, pv.block_table,
+          pv.num_blocks, pv.length, config_.num_heads, config_.num_kv_heads,
+          config_.head_dim, pv.block_size, pv.block_stride, scale,
+          ctx.data_ptr<float>());
+    } else if (core::IsUnimplemented(paged.status())) {
+      ASSIGN_OR_RETURN(const kvcache::KvView kv,
+                       request.cache->view(layer_index));
+      kernels::DecodeAttentionF32(q.data_ptr<float>(), kv.k.data_ptr<float>(),
+                                  kv.v.data_ptr<float>(), ctx.data_ptr<float>(),
+                                  config_.num_heads, config_.num_kv_heads,
+                                  config_.head_dim, kv.k.shape().dim(1), scale);
+    } else {
+      return paged.status();
+    }
   } else {
+    ASSIGN_OR_RETURN(const kvcache::KvView kv,
+                     request.cache->view(layer_index));
     kernels::PrefillAttentionF32(q.data_ptr<float>(), kv.k.data_ptr<float>(),
                                  kv.v.data_ptr<float>(), ctx.data_ptr<float>(),
                                  t_dim, config_.num_heads, config_.num_kv_heads,
-                                 config_.head_dim, l_dim, scale);
+                                 config_.head_dim, kv.k.shape().dim(1), scale);
   }
   RETURN_IF_ERROR(layer.o_proj->forward(ctx, tmp));
 

@@ -92,12 +92,29 @@ tensor::Tensor Workspace::gate(std::int64_t t) const {
 }
 tensor::Tensor Workspace::up(std::int64_t t) const { return Prefix(up_, t); }
 
-std::int64_t Workspace::bytes() const {
+namespace {
+// §6.2 byte count for one workspace of `t` rows, from the pre-derived row
+// widths (q_rows = H·d, kv_rows = Hkv·d). Shared by `bytes()` and `BytesFor`.
+std::int64_t WorkspaceBytes(std::int64_t e, std::int64_t q_rows,
+                            std::int64_t kv_rows, std::int64_t i,
+                            std::int64_t t) {
   constexpr std::int64_t kF32 = 4;
   // c_stream = 4 E-width buffers (x/h/tmp/r) + q + 2·kv (k,v) + ctx + 2·I.
   const std::int64_t elems_per_row =
-      (4 * e_) + q_rows_ + (2 * kv_rows_) + q_rows_ + (2 * i_);
-  return kF32 * capacity_ * elems_per_row;
+      (4 * e) + q_rows + (2 * kv_rows) + q_rows + (2 * i);
+  return kF32 * t * elems_per_row;
+}
+}  // namespace
+
+std::int64_t Workspace::bytes() const {
+  return WorkspaceBytes(e_, q_rows_, kv_rows_, i_, capacity_);
+}
+
+std::int64_t Workspace::BytesFor(std::int64_t e, int num_heads,
+                                 int num_kv_heads, int d, std::int64_t i,
+                                 std::int64_t t) {
+  return WorkspaceBytes(e, static_cast<std::int64_t>(num_heads) * d,
+                        static_cast<std::int64_t>(num_kv_heads) * d, i, t);
 }
 
 }  // namespace engine::model

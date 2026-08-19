@@ -284,6 +284,20 @@ accepts the pre-paging `--cache-capacity N` *tokens* spelling as a convenience,
 translated to `num_blocks = ⌈N / bs⌉`; the memory-budget flag is the primary
 knob and the one the M9 server uses.
 
+**M8-T07 as built (CLI default divergence).** `engine generate` defaults to a
+**token-sized pool** (`⌈(prompt + max_new_tokens) / bs⌉` blocks), *not* the
+`0.9` fraction, when neither `--kv-cache-memory` nor `--cache-capacity` is
+given. Rationale: the `0.9`-of-host-RAM default is for the M9 server, which
+holds an unknown number of concurrent sequences and wants to claim the machine;
+a single-request CLI generation needs only this request's worst case, and a
+`0.9` default would zero-fill ~13 GB of slabs on the 16 GB dev box (and in the
+ctest smoke runs) for a 5-token prompt. `--kv-cache-memory 0.9` still works and
+is honored exactly as specified — it is just not the CLI default. The M9 server
+carries the `0.9` default (§5.1 unchanged for it). The flag also gained a
+sibling `--kv-cache {paged,simple}` (default `paged`) selecting the backend —
+`simple` keeps the pre-paging `SimpleKvCache` as an escape hatch and the A/B
+baseline for `bench_generate` — and `--kv-block-size N` (default 16).
+
 ### 5.2 The blocks-per-pool formula
 
 ```
@@ -906,6 +920,28 @@ logged; and `bench_generate` shows **≤ 10%** decode-throughput regression vs t
 M6 baseline (the `paged_view` fast path — §8.3 — is what keeps it under, by
 avoiding a per-step full-history copy; number recorded in BASELINES.md).
 
+**M8-T07 as built.** The decode fast path is wired in
+`OptimizedModel::ForwardLayer` (the *only* consumer change, §8.3): decode
+(`T == 1`) calls `cache.paged_view(layer)` first and, on `Unimplemented`, falls
+back to `view()` + the contiguous decode kernel so `SimpleKvCache` is untouched;
+a non-`Unimplemented` status propagates (a real cache failure is not masked).
+Prefill always gathers via `view()`. The budget plumbing landed as pure,
+unit-tested helpers: `core::host_memory_bytes()` (the §5.3 host-RAM helper,
+macOS `sysctl` / Linux `sysconf`), `model::weight_resident_bytes(loaded)` (the
+`weights_bytes` term, computed from the checkpoint before `BuildModel` moves
+`loaded`; dedups the tied embedding), `Workspace::BytesFor(config, T)` (the
+`workspace_bytes` term), and `kvcache::{ParseKvCacheMemory, ResolveKvBudgetBytes,
+BlocksForTokens}` (`kv_budget.h` — flag parse → absolute budget → block count).
+The driver owns `unique_ptr<BlockPool> pool` (declared first) and
+`unique_ptr<KvCache> cache` (destroyed first), and logs
+`BlockPool::stats()` after generation. **Allocator:** the M8 single-request
+pool draws its slabs from the **default CPU allocator**, not the M2 caching
+allocator — a single-request pool allocates once and frees at teardown, so the
+caching allocator (built to amortize churn) buys nothing here; it wires in with
+the M9 runtime, where pools churn across requests. **Measured:** paged decode is
+1.6–4.2% below the same-machine `--kv-cache simple` baseline (BASELINES.md
+M8-T07), inside the ≤10% bound and inside the machine's own run-to-run noise.
+
 ### 10.2 Exhaustion (M8-T08)
 
 Until the M9 scheduler brings preemption, a pool that runs dry mid-generation is
@@ -1008,5 +1044,5 @@ CI (x86-64) and the arm64 dev machine.
   kernel is M12.
 - **Batched block-table tensor / batched decode kernel** — shape reserved
   (§9.4), built in M9-T07.
-- **Host-RAM detection helper** — a small per-platform utility (§5.3); lands with
-  M8-T07 (the first consumer of the fraction spelling).
+- **Host-RAM detection helper** — landed in M8-T07 as `core::host_memory_bytes()`
+  (§5.3, §10.1 as-built), the fraction spelling's first consumer.

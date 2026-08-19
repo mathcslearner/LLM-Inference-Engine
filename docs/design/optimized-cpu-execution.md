@@ -729,10 +729,18 @@ starting point.
 > **M8-T05 landed** (`kernels::PagedDecodeAttentionF32`, paged-kv-cache.md
 > §9.2): decode reads K/V directly through the block table, so the paged decode
 > path pays no `view()` gather. The kernel is **bit-identical** to
-> `DecodeAttentionF32` on the same logical K/V (asserted bitwise). The consumer
-> swap — `OptimizedModel::forward` trying `paged_view` first and falling back to
-> `view()` + the contiguous kernel — is M8-T07, not the kernel ticket; until
-> then nothing above the `KvCache` interface changes.
+> `DecodeAttentionF32` on the same logical K/V (asserted bitwise).
+>
+> **M8-T07 landed the consumer swap.** `OptimizedModel::ForwardLayer`'s decode
+> branch (`T == 1`) now calls `cache.paged_view(layer)` first and runs
+> `PagedDecodeAttentionF32` on the returned slabs/block-table (zero copy); on
+> `Unimplemented` it falls back to `view()` + `DecodeAttentionF32`, so
+> `SimpleKvCache` is untouched and a non-`Unimplemented` status propagates.
+> Prefill still gathers via `view()` (a block-walking paged prefill kernel is
+> M12). This is the *only* change above the `KvCache` interface — everything
+> else in the graph is oblivious to which cache it holds. The whole-decode-step
+> A/B (paged vs the pre-paging contiguous path, which pays the gather) is 1.6–
+> 4.2% — inside the ≤10% bound (BASELINES.md M8-T07).
 
 ---
 

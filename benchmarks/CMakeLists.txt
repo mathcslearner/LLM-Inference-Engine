@@ -68,6 +68,7 @@ target_link_libraries(bench_generate PRIVATE
 # it stays a correctness check, never a perf measurement. enable_testing() is
 # called at the root only under ENGINE_BUILD_TESTS, so guard on it.
 if(ENGINE_BUILD_TESTS)
+  # Default (paged) cache, both backends.
   add_test(NAME bench_generate_smoke
     COMMAND bench_generate
       --model "${CMAKE_SOURCE_DIR}/tests/fixtures/models/tiny-llama"
@@ -76,6 +77,12 @@ if(ENGINE_BUILD_TESTS)
     COMMAND bench_generate
       --model "${CMAKE_SOURCE_DIR}/tests/fixtures/models/tiny-llama"
       --prompt-len 8 --new-tokens 4 --runs 2 --backend reference)
+  # The pre-paging contiguous cache (the A/B baseline path stays exercised).
+  add_test(NAME bench_generate_smoke_simple
+    COMMAND bench_generate
+      --model "${CMAKE_SOURCE_DIR}/tests/fixtures/models/tiny-llama"
+      --prompt-len 8 --new-tokens 4 --runs 2 --backend optimized
+      --kv-cache simple)
 endif()
 
 # bench_sampling (M7-T06): the batched sampler's hot path over a synthetic

@@ -2,6 +2,10 @@
 #include "engine/backend.h"
 #include "engine/generator.h"
 #include "kernels/dispatch.h"
+#include "kvcache/block_pool.h"
+#include "kvcache/kv_budget.h"
+#include "kvcache/kv_cache.h"
+#include "kvcache/paged_cache.h"
 #include "kvcache/simple_cache.h"
 #include "model/config.h"
 #include "model/loader.h"
@@ -75,7 +79,10 @@ using engine::engine::BackendName;
 using engine::engine::Generate;
 using engine::engine::GenerateOptions;
 using engine::engine::ParseBackend;
+using engine::kvcache::BlockPool;
 using engine::kvcache::CacheGeometry;
+using engine::kvcache::KvCache;
+using engine::kvcache::PagedKvCache;
 using engine::kvcache::SimpleKvCache;
 using engine::model::BuildModel;
 using engine::model::BuildOptions;
@@ -108,6 +115,11 @@ struct Args {
   std::uint32_t seed = 1234;
   int threads = 0;  // 0 → leave ENGINE_NUM_THREADS untouched (env / default).
   bool markdown = false;
+  // KV cache backend (M8-T07): paged is the default (the shipping path);
+  // `--kv-cache simple` measures the pre-paging contiguous baseline for the
+  // A/B.
+  bool paged_cache = true;
+  int kv_block_size = 16;
 };
 
 [[nodiscard]] Status ParseArgs(std::span<const std::string> argv, Args& out) {
@@ -148,6 +160,21 @@ struct Args {
       out.threads = std::stoi(n);
     } else if (a == "--markdown") {
       out.markdown = true;
+    } else if (a == "--kv-cache") {
+      std::string k;
+      RETURN_IF_ERROR(next(k));
+      if (k == "paged") {
+        out.paged_cache = true;
+      } else if (k == "simple") {
+        out.paged_cache = false;
+      } else {
+        return engine::core::InvalidArgumentError(
+            "--kv-cache must be 'paged' or 'simple', got '{}'", k);
+      }
+    } else if (a == "--kv-block-size") {
+      std::string n;
+      RETURN_IF_ERROR(next(n));
+      out.kv_block_size = static_cast<int>(std::stol(n));
     } else {
       return engine::core::InvalidArgumentError("unknown flag '{}'", a);
     }
@@ -244,7 +271,7 @@ struct RunResult {
 // per-run number repeatable within the ±5% target. Prefill is a single forward
 // per run, so its headline is best-of-N across runs (matching the peak-of-N
 // convention of the sibling kernel benches).
-[[nodiscard]] RunResult DoRun(Model& model, SimpleKvCache& cache,
+[[nodiscard]] RunResult DoRun(Model& model, KvCache& cache,
                               std::span<const std::int32_t> prompt_ids,
                               std::int64_t new_tokens,
                               std::vector<double>& step_ms) {
@@ -322,8 +349,23 @@ struct RunResult {
   }
 
   const CacheGeometry geom = model->cache_geometry();
-  ASSIGN_OR_RETURN(SimpleKvCache cache,
-                   SimpleKvCache::Create(geom, total_positions));
+  // Build the requested cache backend. The pool (paged) outlives the cache it
+  // backs: `pool` declared first → destroyed last.
+  std::unique_ptr<BlockPool> pool;
+  std::unique_ptr<KvCache> cache;
+  if (!args.paged_cache) {
+    ASSIGN_OR_RETURN(SimpleKvCache simple,
+                     SimpleKvCache::Create(geom, total_positions));
+    cache = std::make_unique<SimpleKvCache>(std::move(simple));
+  } else {
+    const std::int64_t num_blocks =
+        engine::kvcache::BlocksForTokens(total_positions, args.kv_block_size);
+    ASSIGN_OR_RETURN(BlockPool created,
+                     BlockPool::Create(geom, args.kv_block_size, num_blocks,
+                                       /*allocator=*/nullptr));
+    pool = std::make_unique<BlockPool>(std::move(created));
+    cache = std::make_unique<PagedKvCache>(pool.get());
+  }
 
   // Fingerprint.
   fmt::print("== bench_generate ==\n");
@@ -341,12 +383,17 @@ struct RunResult {
   fmt::print("  vocab={} dtype={}\n", cfg.vocab_size,
              engine::tensor::to_string(cfg.torch_dtype));
   fmt::print("load:     {:.0f} ms\n", load_ms);
+  if (args.paged_cache) {
+    fmt::print("kv-cache: paged (block_size={})\n", args.kv_block_size);
+  } else {
+    fmt::print("kv-cache: simple (contiguous)\n");
+  }
   fmt::print("workload: prompt-len={} new-tokens={} runs={} seed={}\n\n",
              args.prompt_len, args.new_tokens, args.runs, args.seed);
 
   // One unrecorded warmup pass (first-touch faults, workspace grow-on-demand).
   std::vector<double> warmup_steps;
-  (void)DoRun(*model, cache, prompt_ids, args.new_tokens, warmup_steps);
+  (void)DoRun(*model, *cache, prompt_ids, args.new_tokens, warmup_steps);
 
   std::vector<double> prefill_series;
   std::vector<double> decode_series;
@@ -357,7 +404,7 @@ struct RunResult {
   fmt::print("{:>4}  {:>14}  {:>14}\n", "run", "prefill tok/s", "decode tok/s");
   for (int r = 0; r < args.runs; ++r) {
     const RunResult res =
-        DoRun(*model, cache, prompt_ids, args.new_tokens, all_step_ms);
+        DoRun(*model, *cache, prompt_ids, args.new_tokens, all_step_ms);
     prefill_series.push_back(res.prefill_tok_s);
     decode_series.push_back(res.decode_tok_s);
     fmt::print("{:>4}  {:>14.2f}  {:>14.2f}\n", r + 1, res.prefill_tok_s,
@@ -424,7 +471,8 @@ int main(int argc, char** argv) {
     fmt::print(stderr,
                "usage: bench_generate --model DIR [--backend "
                "optimized|reference] [--threads N] [--prompt-len P] "
-               "[--new-tokens N] [--runs R] [--seed S] [--markdown]\n");
+               "[--new-tokens N] [--runs R] [--seed S] [--markdown] "
+               "[--kv-cache paged|simple] [--kv-block-size N]\n");
     return 2;
   }
 

@@ -618,6 +618,123 @@ TEST(OptimizedModelTest, PagedGreedyMatchesSimpleCache) {
   }
 }
 
+// A single decode step through the zero-copy `paged_view` fast path (M8-T07)
+// is bit-exact to the same decode step through the contiguous `view()` path a
+// SimpleKvCache takes: prefill both caches with the identical prompt, then one
+// decode forward each, and the logits match to the bit. This locks down the
+// specific fast-path swap in OptimizedModel::ForwardLayer (paged-kv-cache.md
+// §8.3) — PagedDecodeAttentionF32 == DecodeAttentionF32 on the same K/V.
+TEST(OptimizedModelTest, PagedDecodeStepMatchesSimpleDecodeStep) {
+  for (const char* fixture : {kLlama, kQwen}) {
+    SCOPED_TRACE(fixture);
+    std::unique_ptr<Model> opt = Optimized(fixture);
+    const std::vector<std::int32_t> ids = PromptIds(fixture);
+
+    const auto decode_after_prefill = [&](KvCache& cache) {
+      (void)ForwardOnce(*opt, ids, LogitsMode::kLast, cache);  // prefill P
+      const std::array<std::int32_t, 1> one{ids.front()};
+      const std::array<std::int32_t, 1> pos{
+          static_cast<std::int32_t>(ids.size())};
+      const ForwardRequest req{.token_ids = one,
+                               .positions = pos,
+                               .cache = &cache,
+                               .logits_mode = LogitsMode::kLast,
+                               .hook = nullptr};
+      return Unwrap(opt->forward(req));  // decode T=1
+    };
+
+    BlockPool pool = FreshPool(*opt);
+    PagedKvCache paged(&pool);
+    const Tensor logits_paged = decode_after_prefill(paged);
+
+    SimpleKvCache simple = FreshCache(*opt, 256);
+    const Tensor logits_simple = decode_after_prefill(simple);
+
+    const ops::AllCloseResult r =
+        Unwrap(ops::allclose(logits_paged, logits_simple, 0.0, 0.0));
+    EXPECT_TRUE(r.allclose) << r.Summary();
+  }
+}
+
+// A KvCache decorator whose `paged_view` fails with a non-Unimplemented status.
+// The decode fast path must PROPAGATE such an error (only `Unimplemented`
+// triggers the `view()` fallback), so the forward returns it rather than
+// silently masking a real cache failure (paged-kv-cache.md §8.3).
+class PagedViewErrorCache final : public KvCache {
+ public:
+  explicit PagedViewErrorCache(PagedKvCache* inner) : inner_(inner) {}
+
+  [[nodiscard]] CacheGeometry geometry() const override {
+    return inner_->geometry();
+  }
+  [[nodiscard]] std::int64_t length() const override {
+    return inner_->length();
+  }
+  [[nodiscard]] std::int64_t capacity() const override {
+    return inner_->capacity();
+  }
+  [[nodiscard]] engine::core::Status append(int layer, const Tensor& k,
+                                            const Tensor& v) override {
+    return inner_->append(layer, k, v);
+  }
+  [[nodiscard]] StatusOr<engine::kvcache::KvView> view(
+      int layer) const override {
+    return inner_->view(layer);
+  }
+  [[nodiscard]] StatusOr<engine::kvcache::PagedKvView> paged_view(
+      int /*layer*/) const override {
+    return engine::core::InternalError("paged_view: injected failure");
+  }
+  [[nodiscard]] engine::core::Status truncate(
+      std::int64_t new_length) override {
+    return inner_->truncate(new_length);
+  }
+
+ private:
+  PagedKvCache* inner_;
+};
+
+TEST(OptimizedModelTest, PagedViewErrorPropagatesNotFallback) {
+  std::unique_ptr<Model> opt = Optimized(kLlama);
+  const std::vector<std::int32_t> ids = PromptIds(kLlama);
+  BlockPool pool = FreshPool(*opt);
+  PagedKvCache paged(&pool);
+  PagedViewErrorCache wrapper(&paged);
+
+  // Prefill (T>1) uses view(), which the wrapper delegates cleanly.
+  (void)ForwardOnce(*opt, ids, LogitsMode::kLast, wrapper);
+
+  // Decode (T=1) hits paged_view → injected Internal → must propagate.
+  const std::array<std::int32_t, 1> one{ids.front()};
+  const std::array<std::int32_t, 1> pos{static_cast<std::int32_t>(ids.size())};
+  const ForwardRequest req{.token_ids = one,
+                           .positions = pos,
+                           .cache = &wrapper,
+                           .logits_mode = LogitsMode::kLast,
+                           .hook = nullptr};
+  const StatusOr<Tensor> out = opt->forward(req);
+  EXPECT_FALSE(out.ok());
+  EXPECT_TRUE(engine::core::IsInternal(out.status()))
+      << out.status().ToString();
+}
+
+// weight_resident_bytes (M8-T07 §5.3): the fractional KV-budget's weight term.
+// Positive, and tied embeddings are counted once (the Qwen fixture shares
+// lm_head/embed storage), so the deduplicated figure is below the naive sum of
+// every map entry's bytes.
+TEST(OptimizedModelTest, WeightResidentBytesDeduplicatesTiedEmbedding) {
+  const LoadedModel qwen = Load(kQwen);  // tied embeddings
+  const std::int64_t deduped = engine::model::weight_resident_bytes(qwen);
+  EXPECT_GT(deduped, 0);
+
+  std::int64_t naive_sum = 0;
+  for (const auto& [name, w] : qwen.weights) {
+    naive_sum += w.numel() * engine::tensor::itemsize(w.dtype());
+  }
+  // The tied embedding table appears under two names; dedup drops one copy.
+  EXPECT_LT(deduped, naive_sum);
+}
+
 // ===========================================================================
 // Workspace: monotone growth, no reallocation when T <= capacity, sizing.
 // ===========================================================================
@@ -640,6 +757,17 @@ TEST(WorkspaceTest, MonotoneGrowthAndSizing) {
   Unwrap0(ws.EnsureCapacity(1));
   EXPECT_EQ(ws.capacity_tokens(), 16);  // unchanged (decode after prefill)
   EXPECT_EQ(ws.bytes(), 51200);
+}
+
+// BytesFor (M8-T07 §5.3): the static estimate matches an instantiated
+// workspace's bytes() at the same T — the KV-budget resolver relies on it to
+// size the workspace term without building a workspace.
+TEST(WorkspaceTest, BytesForMatchesInstantiated) {
+  Workspace ws = Workspace::Create(64, 4, 2, 16, 176);
+  Unwrap0(ws.EnsureCapacity(8));
+  EXPECT_EQ(Workspace::BytesFor(64, 4, 2, 16, 176, 8), ws.bytes());
+  EXPECT_EQ(Workspace::BytesFor(64, 4, 2, 16, 176, 8), 25600);
+  EXPECT_EQ(Workspace::BytesFor(64, 4, 2, 16, 176, 0), 0);
 }
 
 // A decode step after a prefill reuses the prefill-sized workspace (no growth):

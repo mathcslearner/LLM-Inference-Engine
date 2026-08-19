@@ -401,3 +401,44 @@ Reading them:
 - **Parallel width is `Hkv` (= 8 here)**, identical to M6-T05 decode — the
   E-core throttling and `Hkv`-only width (M12-T03 flash-decoding motivator)
   apply unchanged.
+
+## M8-T07 — paged cache engine integration (2026-08-19)
+
+**Host:** Apple M2 (4 performance + 4 efficiency cores, 8 physical; 16 GB),
+macOS, dev machine — *not fully quiesced* (per this file's preamble, pre-M12
+end-to-end entries are advisory; the median-step metric absorbs isolated
+spikes).
+**Toolchain:** Homebrew clang 20, `-O3` Release.
+**Model:** `Qwen2-0.5B-Instruct` (bf16, `Qwen2ForCausalLM`, 24 layers) — the
+M6-T08 acceptance model.
+**Command:** `build/benchmarks/bench_generate --model <dir> --prompt-len 128
+--new-tokens 128 --runs 5 --threads 8 --backend optimized --kv-cache
+{paged,simple}`. Same harness/methodology as M6-T08 (median per-step decode
+rate; prefill best-of-N). `--kv-cache simple` is the pre-paging contiguous
+baseline (`SimpleKvCache` + `view()` + the M6 contiguous decode kernel);
+`--kv-cache paged` is the shipping path (`PagedKvCache` + the zero-copy
+`paged_view` fast path + `PagedDecodeAttentionF32`).
+
+**The A/B (8-thread NEON, decode tok/s median):**
+
+| Run | simple (contig) | paged | paged regression |
+|---:|---:|---:|---:|
+| 1 | 30.73 | 29.43 | 4.2% |
+| 2 | 31.25 | 30.75 | 1.6% |
+
+**Decode regression 1.6–4.2%, well within the ≤10% acceptance bound** — and
+~1.6–5.1% vs the recorded M6-T08 baseline (31.0 tok/s). Reading it:
+
+- The **`paged_view` fast path is what keeps it under**: decode reads the paged
+  slabs in place through the block table (paged-kv-cache.md §8.3), so it never
+  pays the per-step full-history gather `view()` performs. The isolated paged
+  kernel is ~11% slower per call (M8-T05), but that is more than offset at the
+  whole-step level by not gathering — the two effects nearly cancel, leaving
+  low-single-digit-percent net.
+- Prefill is unchanged in path (both backends gather via `view()` into the M6
+  blocked prefill kernel; a block-walking paged prefill kernel is M12), so
+  prefill tok/s is within run-to-run noise between the two (≈122–139 tok/s).
+- The machine's decode ±% run-to-run was 4.0–5.8% across these runs (E-core
+  throttling on memory-bound decode, M6-T08's caveat); the ~1.6–4.2% paged gap
+  sits inside that band, so the two paths are effectively at parity. A quiesced
+  ±3% sweep is M12-T01.

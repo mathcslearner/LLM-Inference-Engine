@@ -882,18 +882,46 @@ behind an existing subsystem):
   reference; paged KV invariant; paged greedy), `model_test` (reference-backend
   paged continuation + KV invariant). No BASELINES entry (no perf claim; decode
   still routes through `view()` on a paged cache until T07 swaps in `paged_view`).
-  design §2 table + §9.3 "as built"; format + scoped tidy clean.
+  design §2 table + §9.3 "as built"; format + scoped tidy clean. T07 engine
+  integration: the paged cache is now the `engine generate` default behind the
+  unchanged M5 `KvCache` interface. **The one consumer change** —
+  `OptimizedModel::ForwardLayer`'s decode branch (`T==1`) calls
+  `cache.paged_view(layer)` first and runs `PagedDecodeAttentionF32` on the
+  zero-copy slabs+block-table (§8.3), falling back to `view()`+the contiguous
+  decode kernel on `Unimplemented` (so `SimpleKvCache` is untouched) and
+  **propagating** any other status; `view()`'s full gather is now confined to
+  prefill and the fallback, which is what keeps decode under the ≤10% bound.
+  Capacity config landed as pure unit-tested helpers: `core::host_memory_bytes()`
+  (§5.3 host-RAM helper, added to `engine_core`; removed from §13 deferred),
+  `kvcache::kv_budget.{h,cpp}` (`ParseKvCacheMemory` absolute-`2GiB`/fraction-`0.6`,
+  `ResolveKvBudgetBytes` = `f·host_ram−weights−workspace` with 3-term
+  `ResourceExhausted`, `BlocksForTokens`), `model::weight_resident_bytes(loaded)`
+  (tied-dedup checkpoint bytes, computed pre-`BuildModel`; chosen over a new
+  `Model` virtual since the checkpoint bytes serve both backends), and
+  `Workspace::BytesFor(config,T)`. `engine generate` gained
+  `--kv-cache{paged,simple}`/`--kv-cache-memory SPEC`/`--kv-block-size` and logs
+  `BlockPool::stats()`; `bench_generate` got the same, `DoRun` now takes
+  `KvCache&` (the A/B). **CLI default divergence** (paged-kv-cache.md §5.1
+  as-built): no-budget default = token-sized pool (not the M9 server's `0.9`
+  fraction, which would zero-fill ~13 GB on the 16 GB dev box); pool slabs from
+  the default CPU allocator (the M2 caching allocator wires in with M9's churning
+  runtime). Acceptance met: tiny greedy identical on both fixtures (existing paged
+  tests + unchanged `generate.json` goldens); Qwen2-0.5B byte-identical
+  paged/simple output ("…Paris…") with stats logged; `bench_generate` decode
+  **1.6–4.2%** below same-machine `--kv-cache simple` (≤10% bound, inside
+  run-to-run noise; BASELINES.md M8-T07). +~30 tests (new `kv_budget_test` 20;
+  `optimized_model_test` +4 ×SCALAR_PASS incl. decode-step bit-exactness +
+  paged_view-error-propagation) → **1195 green**. design paged-kv-cache.md
+  §5.1/§10.1/§13 + optimized-cpu-execution.md §8 "as built"; format + scoped tidy
+  clean.
 
-Next up: **M8-T07** (engine integration): swap the paged cache into the
-single-request generation path behind the M5 `KvCache` interface. The paged
-cache already drives both backends via `view` (T06); T07's job is (1) route the
-optimized decode step through the zero-copy `paged_view` fast path (§8.3) instead
-of `view()`'s full gather — trying `paged_view` first, falling back to `view()` +
-the contiguous decode kernel on `Unimplemented` so `SimpleKvCache` keeps working;
-(2) wire `--kv-cache-memory` capacity config (absolute-or-fraction-of-host-RAM,
-the §5 blocks-per-pool formula + a host-RAM detection helper) and
-`--kv-block-size` into `engine generate`; (3) expose cache stats (blocks
-used/free/utilization) and log them. Acceptance: tiny-fixture greedy output
-**identical** to the pre-paging engine on both fixtures; 1B-model generation
-works with memory stats logged; `bench_generate` decode throughput within 10% of
-the M6 baseline (recorded). Per paged-kv-cache.md §10.
+Next up: **M8-T08** (exhaustion behavior & metrics): define graceful behavior
+when the block pool runs dry mid-generation (error for now — preemption arrives
+with the M9 scheduler), and finalize the cache-usage metrics API (blocks
+used/free, utilization) that the scheduler (M9) and metrics endpoint (M16)
+consume. The plumbing already exists — `BlockPool::Allocate` →
+`ResourceExhausted` propagates through `BlockTable::AppendTokens` →
+`PagedKvCache::append` → `Generate` (§10.2), and `BlockPool::stats()` is the
+metrics surface. Acceptance: a generation exceeding capacity fails gracefully
+with `ResourceExhausted`, and pool stats return to zero afterward (no leaked
+blocks — RAII reclamation asserted via stats). Per paged-kv-cache.md §10.2.

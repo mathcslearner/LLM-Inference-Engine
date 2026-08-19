@@ -128,4 +128,26 @@ core::StatusOr<LoadedModel> load_model(const std::filesystem::path& dir) {
   return model;
 }
 
+std::int64_t weight_resident_bytes(const LoadedModel& loaded) {
+  std::int64_t total = 0;
+  // Dedup by storage pointer: tied embeddings hand back the same Tensor for
+  // "lm_head.weight" and "embed_tokens.weight", so the shared table is counted
+  // once. Distinct weights have distinct data pointers even when several are
+  // views into one mapped shard (each names a disjoint window), so summing
+  // per-tensor `numel × itemsize` yields the total weight-data footprint.
+  std::vector<const void*> seen;
+  seen.reserve(loaded.weights.size());
+  for (const auto& [name, weight] : loaded.weights) {
+    const void* ptr = weight.defined() ? weight.data() : nullptr;
+    if (ptr != nullptr && std::ranges::find(seen, ptr) != seen.end()) {
+      continue;
+    }
+    if (ptr != nullptr) {
+      seen.push_back(ptr);
+    }
+    total += weight.numel() * tensor::itemsize(weight.dtype());
+  }
+  return total;
+}
+
 }  // namespace engine::model

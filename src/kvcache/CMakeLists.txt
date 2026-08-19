@@ -19,7 +19,8 @@ add_library(engine_kvcache STATIC
   block_pool.cpp
   block_table.cpp
   paged_cache.cpp
-  paged_gather.cpp)
+  paged_gather.cpp
+  kv_budget.cpp)
 add_library(engine::kvcache ALIAS engine_kvcache)
 target_include_directories(engine_kvcache PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(engine_kvcache

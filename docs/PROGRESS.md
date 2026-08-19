@@ -2504,3 +2504,97 @@ Format + scoped tidy clean (paged_cache.h header edit → its includer set —
 paged_cache.cpp, paged_gather.cpp, paged_cache_test, paged_decode_attention_
 kernel_test, optimized_model_test, model_test — was tidy-swept; kv_cache.h
 untouched, so no full-tree sweep).
+
+### M8-T07 — Engine integration (2026-08-19)
+
+Swapped the paged cache into the single-request generation path behind the
+unchanged M5 `KvCache` interface, wired the `--kv-cache-memory` capacity config,
+and exposed cache stats. Per paged-kv-cache.md §5, §8.3, §10.
+
+**The decode fast path (the only consumer-code change).**
+`OptimizedModel::ForwardLayer`'s decode branch (`T == 1`) now calls
+`request.cache->paged_view(layer_index)` first and runs
+`kernels::PagedDecodeAttentionF32` on the returned slabs + block table (zero
+copy, §8.3); on `Unimplemented` it falls back to `view()` + the contiguous
+`DecodeAttentionF32`, so `SimpleKvCache` is untouched, and a non-`Unimplemented`
+status **propagates** (a real cache failure is not masked into a fallback).
+`view()` (a full-history gather) is now called only in the prefill branch
+(`T > 1`) and the decode fallback — the paged decode step pays no per-step
+gather, which is what keeps it under the ≤10% regression bound. Nothing else
+above the `KvCache` interface changed. `ReferenceModel`/`Attention` untouched
+(the oracle stays the oracle). `model → kernels` stays PRIVATE (added
+`kernels/paged_attention.h` to `optimized_model.cpp` only).
+
+**Capacity config (pure, unit-tested helpers).**
+- `src/core/sysinfo.{h,cpp}` — `host_memory_bytes()` (§5.3 host-RAM helper:
+  macOS `sysctl hw.memsize`, Linux `_SC_PHYS_PAGES · _SC_PAGE_SIZE`, else 0),
+  the fraction spelling's first consumer (removed from paged-kv-cache.md §13
+  deferred list). Added to `engine_core`.
+- `src/kvcache/kv_budget.{h,cpp}` — `ParseKvCacheMemory` (absolute `2GiB`/
+  `1500MiB`/`8000000000` with binary+decimal units, or a fractional `0.6`;
+  disambiguation: unit suffix ⇒ absolute, bare value with `.` ⇒ fraction, bare
+  integer ⇒ bytes; rejects out-of-range/garbage naming the input),
+  `ResolveKvBudgetBytes` (absolute passes through; fraction computes
+  `f·host_ram − weights − workspace`, host-RAM-unknown → `FailedPrecondition`,
+  non-positive → `ResourceExhausted` naming all three terms — §5.3), and
+  `BlocksForTokens` (`⌈tokens/bs⌉`, the `--cache-capacity` spelling). Added to
+  `engine_kvcache`; depends only on `core` (no `kvcache → kernels` needed).
+- `src/model/loader.{h,cpp}` — `weight_resident_bytes(loaded)` sums the distinct
+  weight tensors' `numel × itemsize`, deduplicating the tied embedding by
+  storage pointer (backend-independent, computed at the driver **before**
+  `BuildModel` moves `loaded`). Chosen over a new `Model::memory_footprint`
+  virtual: the checkpoint bytes are the authoritative weight footprint for both
+  backends and are available pre-build, so no interface widening was needed.
+- `src/model/workspace.{h,cpp}` — `Workspace::BytesFor(config dims, t)` static
+  (the §6.2 formula for the `workspace_bytes` term without instantiating a
+  workspace); `bytes()` refactored onto a shared file-local helper.
+
+**Driver & bench.** `engine generate` (`src/main.cpp`) gained `--kv-cache
+{paged,simple}` (default **paged**), `--kv-cache-memory SPEC`, and
+`--kv-block-size N` (default 16). It owns `unique_ptr<BlockPool> pool` (declared
+first) and `unique_ptr<KvCache> cache` (destroyed first, the §6.1 lifetime
+rule), sizes the pool via the helpers above, and logs `BlockPool::stats()`
+(blocks used/free/total, utilization) after generation — both `LOG_INFO` and a
+printed summary line. Flag-parsing and cache-construction were split into
+`ParseKvArg`/`ResolvePagedBlocks`/`BuildKvCache` helpers to keep each function
+under the clang-tidy cognitive-complexity threshold. `bench_generate` got the
+same `--kv-cache`/`--kv-block-size`; `DoRun` takes a `KvCache&`, so paged and
+simple run the identical harness (the A/B). New `bench_generate_smoke_simple`
+ctest keeps the contiguous path exercised.
+
+**CLI default divergence (documented, paged-kv-cache.md §5.1 as-built).** With
+neither `--kv-cache-memory` nor `--cache-capacity` given, the CLI sizes a
+**token-sized pool** (`⌈(prompt + max_new)/bs⌉` blocks), not the design's `0.9`
+fraction: a single-request generation needs only its own worst case, and a
+`0.9` default would zero-fill ~13 GB on the 16 GB dev box (and in smoke runs).
+`0.9` remains the M9 server's default. **Allocator:** the single-request pool
+draws slabs from the default CPU allocator, not the M2 caching allocator (which
+amortizes churn and buys nothing for one alloc/free) — the caching allocator
+wires in with the M9 runtime.
+
+**Acceptance.** (a) Tiny-fixture greedy **identical** to pre-paging on both
+fixtures — the existing `PagedGreedyMatchesSimpleCache` / paged-KV-invariant
+tests (now routing decode through `paged_view`) and the unchanged `generate.json`
+goldens all pass. (b) Qwen2-0.5B-Instruct generates coherent text on both cache
+kinds with **byte-identical** output (`The capital of France is … Paris …`) and
+cache stats logged. (c) `bench_generate` decode **1.6–4.2%** below the
+same-machine `--kv-cache simple` baseline (BASELINES.md M8-T07), inside the
+≤10% bound and inside the machine's run-to-run noise — the `paged_view` fast
+path offsets the ~11% isolated paged-kernel cost (M8-T05) by not gathering.
+
+**Tests (+~30).** New `kv_budget_test` (20 cases: parse units/fractions/
+rejections, resolution arithmetic incl. the three-term exhaustion message, the
+host-RAM-unknown `FailedPrecondition`, `BlocksForTokens`, and
+`core::host_memory_bytes() > 0`). New `optimized_model_test` cases (both
+fixtures, SCALAR_PASS): `PagedDecodeStepMatchesSimpleDecodeStep` (single decode
+step through `paged_view` bit-exact to the contiguous `view()` path),
+`PagedViewErrorPropagatesNotFallback` (a decorator injecting an `Internal`
+`paged_view` → forward propagates it), `WeightResidentBytesDeduplicatesTiedEmbedding`,
+and `WorkspaceTest.BytesForMatchesInstantiated`. 1195 ctest green.
+
+**Docs.** paged-kv-cache.md §5.1 (CLI default + allocator as-built), §10.1 (the
+consumer swap, the helpers, the allocator choice), §13 (host-RAM helper landed);
+optimized-cpu-execution.md §8 (the M8-T07 consumer-swap landed note);
+BASELINES.md M8-T07 (the A/B). Format clean; scoped tidy clean on all changed
+TUs (loader.h/workspace.h edits were additive declarations — no perturbation of
+existing call sites; the TUs consuming the new symbols were tidy-swept).

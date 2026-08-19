@@ -168,6 +168,15 @@ engine_add_tests(TREE unit SOURCES
   paged_cache_test.cpp
   DEPS engine::kvcache engine::tensor)
 
+# kv_budget_test (M8-T07): --kv-cache-memory parsing (absolute/units/fraction,
+# rejections), fractional-budget resolution (weights+workspace subtraction, the
+# host-RAM-unknown and exhausted-budget errors), BlocksForTokens ceiling, and
+# core::host_memory_bytes(). Pure arithmetic/parsing — no model or kernels, so
+# no SCALAR_PASS.
+engine_add_tests(TREE unit SOURCES
+  kv_budget_test.cpp
+  DEPS engine::kvcache)
+
 # model_test (M5-T07): the DecoderLayer/Mlp modules, ReferenceModel end-to-end
 # logits vs activations.safetensors, the per-layer activation hook, kLast/kAll
 # consistency, and the KV-cache invariant elevated to full-model logits. Uses

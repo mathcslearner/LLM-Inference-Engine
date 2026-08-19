@@ -1,11 +1,17 @@
+#include "core/logging.h"
 #include "core/status.h"
+#include "core/sysinfo.h"
 #include "engine/backend.h"
 #include "engine/generator.h"
+#include "kvcache/block_pool.h"
+#include "kvcache/kv_budget.h"
 #include "kvcache/kv_cache.h"
+#include "kvcache/paged_cache.h"
 #include "kvcache/simple_cache.h"
 #include "model/loader.h"
 #include "model/model.h"
 #include "model/registry.h"
+#include "model/workspace.h"
 #include "sampling/logprobs.h"
 #include "sampling/params.h"
 #include "tensor/dtype.h"
@@ -39,7 +45,10 @@ using engine::engine::Backend;
 using engine::engine::Generate;
 using engine::engine::GenerateOptions;
 using engine::engine::ParseBackend;
+using engine::kvcache::BlockPool;
 using engine::kvcache::CacheGeometry;
+using engine::kvcache::KvCache;
+using engine::kvcache::PagedKvCache;
 using engine::kvcache::SimpleKvCache;
 using engine::model::BuildModel;
 using engine::model::BuildOptions;
@@ -53,7 +62,13 @@ struct Args {
   std::string prompt = "Hello";
   Backend backend = Backend::kOptimized;
   std::int64_t max_new_tokens = 64;
-  std::int64_t cache_capacity = 0;  // 0 → prompt + max_new_tokens
+  std::int64_t cache_capacity = 0;  // 0 → prompt + max_new_tokens (tokens)
+  // KV cache backend & sizing (M8-T07). Default: a paged cache sized to this
+  // request's worst case. `--kv-cache-memory` overrides the sizing with an
+  // absolute/fractional memory budget (paged-kv-cache.md §5).
+  bool paged_cache = true;
+  int kv_block_size = 16;
+  std::string kv_cache_memory;  // empty → token-sized default
   bool add_bos = true;
   // Sampling controls (0 temperature ⇒ greedy, the default).
   float temperature = 0.0F;
@@ -68,6 +83,47 @@ struct Args {
   std::int32_t logprobs = 0;
 };
 
+// Parses the KV-cache flags (`--kv-cache`, `--kv-cache-memory`,
+// `--kv-block-size`) — split out of ParseArgs to keep each dispatcher's
+// cognitive complexity in bounds. Sets `matched` when `a` was one of them, and
+// advances `i` past the consumed value.
+[[nodiscard]] Status ParseKvArg(std::span<const std::string> argv,
+                                std::size_t& i, Args& out, bool& matched) {
+  const std::string& a = argv[i];
+  const auto next = [&](std::string& dst) -> Status {
+    if (i + 1 >= argv.size()) {
+      return engine::core::InvalidArgumentError("missing value for {}", a);
+    }
+    dst = argv[++i];
+    return engine::core::OkStatus();
+  };
+  matched = true;
+  if (a == "--kv-cache-memory") {
+    return next(out.kv_cache_memory);
+  }
+  if (a == "--kv-block-size") {
+    std::string n;
+    RETURN_IF_ERROR(next(n));
+    out.kv_block_size = static_cast<int>(std::stol(n));
+    return engine::core::OkStatus();
+  }
+  if (a == "--kv-cache") {
+    std::string k;
+    RETURN_IF_ERROR(next(k));
+    if (k == "paged") {
+      out.paged_cache = true;
+    } else if (k == "simple") {
+      out.paged_cache = false;
+    } else {
+      return engine::core::InvalidArgumentError(
+          "--kv-cache must be 'paged' or 'simple', got '{}'", k);
+    }
+    return engine::core::OkStatus();
+  }
+  matched = false;
+  return engine::core::OkStatus();
+}
+
 [[nodiscard]] Status ParseArgs(std::span<const std::string> argv, Args& out) {
   for (std::size_t i = 0; i < argv.size(); ++i) {
     const std::string& a = argv[i];
@@ -78,6 +134,11 @@ struct Args {
       dst = argv[++i];
       return engine::core::OkStatus();
     };
+    bool kv_matched = false;
+    RETURN_IF_ERROR(ParseKvArg(argv, i, out, kv_matched));
+    if (kv_matched) {
+      continue;
+    }
     if (a == "--model") {
       RETURN_IF_ERROR(next(out.model_dir));
     } else if (a == "--prompt") {
@@ -146,9 +207,76 @@ struct Args {
   return engine::core::OkStatus();
 }
 
+// Resolves the paged pool's block count from the `--kv-cache-memory` budget
+// (§5.2/§5.3) or a token count (`--cache-capacity` / worst-case default, §5.1).
+[[nodiscard]] Status ResolvePagedBlocks(const Args& args, const Model& model,
+                                        const CacheGeometry& geom,
+                                        std::int64_t weights_bytes,
+                                        std::int64_t worst_case_tokens,
+                                        std::int64_t& num_blocks_out) {
+  if (args.kv_cache_memory.empty()) {
+    const std::int64_t tokens =
+        args.cache_capacity > 0 ? args.cache_capacity : worst_case_tokens;
+    num_blocks_out =
+        engine::kvcache::BlocksForTokens(tokens, args.kv_block_size);
+    return engine::core::OkStatus();
+  }
+  ASSIGN_OR_RETURN(const engine::kvcache::KvCacheMemorySpec spec,
+                   engine::kvcache::ParseKvCacheMemory(args.kv_cache_memory));
+  const auto& cfg = model.config();
+  const engine::kvcache::KvBudgetInputs inputs{
+      .host_ram_bytes = engine::core::host_memory_bytes(),
+      .weights_bytes = weights_bytes,
+      .workspace_bytes = engine::model::Workspace::BytesFor(
+          cfg.hidden_size, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
+          cfg.intermediate_size, worst_case_tokens)};
+  ASSIGN_OR_RETURN(const std::int64_t budget,
+                   engine::kvcache::ResolveKvBudgetBytes(spec, inputs));
+  ASSIGN_OR_RETURN(num_blocks_out, BlockPool::NumBlocksForBudget(
+                                       geom, args.kv_block_size, budget));
+  return engine::core::OkStatus();
+}
+
+// Builds the requested KV cache backend (paged by default). On the paged path
+// `pool_out` is set and must outlive `cache_out` (declared-first,
+// destroyed-last — §6.1). Slabs come from the default CPU allocator: a
+// single-request pool allocates once at Create and frees at teardown, so the M2
+// caching allocator (§10.1) buys nothing here — it lands with the M9 runtime,
+// where pools churn across requests.
+[[nodiscard]] Status BuildKvCache(const Args& args, const Model& model,
+                                  std::int64_t weights_bytes,
+                                  std::int64_t worst_case_tokens,
+                                  std::unique_ptr<BlockPool>& pool_out,
+                                  std::unique_ptr<KvCache>& cache_out) {
+  const CacheGeometry geom = model.cache_geometry();
+  if (!args.paged_cache) {
+    // The pre-paging contiguous cache, kept as an escape hatch (and the A/B
+    // baseline for bench_generate). Sized in tokens.
+    const std::int64_t capacity =
+        args.cache_capacity > 0 ? args.cache_capacity : worst_case_tokens;
+    ASSIGN_OR_RETURN(SimpleKvCache simple,
+                     SimpleKvCache::Create(geom, capacity));
+    cache_out = std::make_unique<SimpleKvCache>(std::move(simple));
+    return engine::core::OkStatus();
+  }
+  std::int64_t num_blocks = 0;
+  RETURN_IF_ERROR(ResolvePagedBlocks(args, model, geom, weights_bytes,
+                                     worst_case_tokens, num_blocks));
+  ASSIGN_OR_RETURN(BlockPool created,
+                   BlockPool::Create(geom, args.kv_block_size, num_blocks,
+                                     /*allocator=*/nullptr));
+  pool_out = std::make_unique<BlockPool>(std::move(created));
+  cache_out = std::make_unique<PagedKvCache>(pool_out.get());
+  return engine::core::OkStatus();
+}
+
 [[nodiscard]] Status RunGenerate(const Args& args) {
   const auto t_load0 = std::chrono::steady_clock::now();
   ASSIGN_OR_RETURN(auto loaded, load_model(args.model_dir));
+  // Weight footprint for the fractional KV budget (§5.3), captured before
+  // `BuildModel` moves `loaded` away.
+  const std::int64_t weights_bytes =
+      engine::model::weight_resident_bytes(loaded);
   ASSIGN_OR_RETURN(
       std::unique_ptr<Model> model,
       BuildModel(std::move(loaded), BuildOptions{.backend = args.backend}));
@@ -163,12 +291,15 @@ struct Args {
     return engine::core::InvalidArgumentError("prompt encoded to zero tokens");
   }
 
-  const std::int64_t capacity =
-      args.cache_capacity > 0
-          ? args.cache_capacity
-          : static_cast<std::int64_t>(prompt_ids.size()) + args.max_new_tokens;
-  const CacheGeometry geom = model->cache_geometry();
-  ASSIGN_OR_RETURN(SimpleKvCache cache, SimpleKvCache::Create(geom, capacity));
+  const std::int64_t worst_case_tokens =
+      static_cast<std::int64_t>(prompt_ids.size()) + args.max_new_tokens;
+
+  // The pool (paged) outlives the cache that borrows it: `pool` is declared
+  // first, so it is destroyed last (after `cache`, §6.1 lifetime rule).
+  std::unique_ptr<BlockPool> pool;
+  std::unique_ptr<KvCache> cache;
+  RETURN_IF_ERROR(BuildKvCache(args, *model, weights_bytes, worst_case_tokens,
+                               pool, cache));
 
   SamplingParams sampling;
   sampling.max_tokens = args.max_new_tokens;
@@ -212,7 +343,7 @@ struct Args {
   };
 
   ASSIGN_OR_RETURN(const engine::engine::GenerateResult result,
-                   Generate(*model, cache, prompt_ids, options, on_token));
+                   Generate(*model, *cache, prompt_ids, options, on_token));
   const std::vector<std::int32_t>& generated = result.tokens;
   const auto t_gen1 = std::chrono::steady_clock::now();
 
@@ -231,6 +362,22 @@ struct Args {
   fmt::print("\n----\n");
   fmt::print("generated {} tokens (finish_reason: {})\n", generated.size(),
              engine::engine::FinishReasonName(result.finish_reason));
+
+  // Cache stats (M8-T07 acceptance: memory stats logged). Paged only — the
+  // contiguous cache has no block pool.
+  if (pool != nullptr) {
+    const engine::kvcache::BlockPoolStats st = pool->stats();
+    LOG_INFO("kvcache",
+             "paged KV: {}/{} blocks used ({:.1f}% util), {} free, block_size "
+             "{}, sequence {} tokens",
+             st.used, st.total, 100.0 * st.utilization, st.free,
+             args.kv_block_size, cache->length());
+    fmt::print(
+        "kv cache: {}/{} blocks used ({:.1f}% util), block_size {} → {} "
+        "tokens capacity\n",
+        st.used, st.total, 100.0 * st.utilization, args.kv_block_size,
+        st.total * args.kv_block_size);
+  }
   fmt::print("prefill: {:.1f} ms ({} prompt tokens, {:.1f} tok/s)\n",
              prefill_ms, prompt_ids.size(),
              prefill_ms > 0 ? static_cast<double>(prompt_ids.size()) /
@@ -280,10 +427,14 @@ int main(int argc, char** argv) {
       fmt::print(stderr,
                  "usage: engine generate --model DIR [--prompt STR] "
                  "[--backend reference|optimized] [--max-new-tokens N] "
-                 "[--cache-capacity N] [--no-bos] [--temperature T] "
-                 "[--top-k K] [--top-p P] [--repetition-penalty R] "
-                 "[--presence-penalty P] [--frequency-penalty F] [--seed S] "
-                 "[--stop STR]... [--stop-token-id N]... [--logprobs N]\n");
+                 "[--kv-cache paged|simple] [--kv-cache-memory SPEC] "
+                 "[--kv-block-size N] [--cache-capacity N] [--no-bos] "
+                 "[--temperature T] [--top-k K] [--top-p P] "
+                 "[--repetition-penalty R] [--presence-penalty P] "
+                 "[--frequency-penalty F] [--seed S] [--stop STR]... "
+                 "[--stop-token-id N]... [--logprobs N]\n"
+                 "  --kv-cache-memory SPEC: 2GiB / 1500MiB / 8000000000 "
+                 "(absolute) or 0.6 (fraction of host RAM)\n");
       return 2;
     }
     const Status status = RunGenerate(args);

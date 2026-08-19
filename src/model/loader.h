@@ -45,4 +45,14 @@ struct LoadedModel {
 [[nodiscard]] core::StatusOr<LoadedModel> load_model(
     const std::filesystem::path& dir);
 
+// Total bytes of the model's distinct weight tensors — the
+// `weights_resident_bytes` term of the fractional KV-budget formula
+// (paged-kv-cache.md §5.3). Sums `numel × itemsize` over `loaded.weights`,
+// counting each physical tensor once: with tied embeddings the two map entries
+// share one handle, so they are deduplicated by their storage pointer and the
+// `[V, E]` table is counted a single time. Backend-independent (the checkpoint
+// bytes, before any optimized repack), so the driver can compute the budget
+// before it builds the model and moves `loaded` away.
+[[nodiscard]] std::int64_t weight_resident_bytes(const LoadedModel& loaded);
+
 }  // namespace engine::model
