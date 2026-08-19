@@ -2207,3 +2207,65 @@ Qwen2-0.5B 384 KiB → 2730 blocks, Llama-3-8B 4 MiB → 10240); death tests for
 double-`Release`, `Share`-on-free, out-of-range ids/layers, and move-after-
 handout; and an 8-thread concurrency stress leaving the invariant intact.
 **1058 → 1085 ctest green** (+27). Format + scoped tidy clean.
+
+### M8-T03 — Block table & sequence cache handle (2026-08-19)
+
+New **`src/kvcache/block_table.{h,cpp}`** — `BlockTable`, the per-sequence
+logical→physical block map over the M8-T02 `BlockPool` (design:
+paged-kv-cache.md §7). One table drives all layers (a physical block id names
+the same slot region in every layer's slabs, §3.1); a `PagedKvCache` (M8-T04)
+owns exactly one. State is the §7.1 sketch verbatim — `BlockPool* pool_`
+(non-owning), `std::vector<int32_t> blocks_` (logical block i → physical id),
+`int64_t num_tokens_`.
+
+What landed:
+
+- **`AppendTokens(count) → StatusOr<vector<int64_t>>`** (§7.2). Grows the
+  sequence by `count` tokens at positions `[num_tokens_, num_tokens_ + count)`
+  and returns the `slot_mapping[count]` array (`slot(pos) = blocks_[pos/bs]·bs +
+  pos%bs`) the M8-T04 scatter kernel will consume. `need =
+  pool_->blocks_needed(num_tokens_, count)` new blocks are `Allocate`d into a
+  scratch vector **all-or-nothing**: on any `ResourceExhausted` the taken blocks
+  are `Release`d and the call returns `ResourceExhausted` with `blocks_`,
+  `num_tokens_`, and the pool left byte-identical. `count <= 0` →
+  `InvalidArgument` (a forward always appends ≥ 1 token — additive to the
+  sketch, which named only the exhaustion path).
+- **`Truncate(new_len)`** (§7.3): drops tokens past `new_len ∈ [0,
+  num_tokens_]`, `Release`s the wholly-empty blocks **tail-first** (so the
+  lowest logical block ends up on top of the pool's LIFO free list, reused
+  first) and keeps the partial surviving tail; out-of-range → `InvalidArgument`,
+  state untouched. **`FreeAll`** releases every block and resets; the destructor
+  calls it (RAII — a dropped cache returns its blocks, the basis for M8-T08 "no
+  leaks, stats zero at end").
+- **Surface for the kernels/consumers**: `slot(pos)` (CHECK-guarded to committed
+  positions), **`blocks()` returning `std::span<const int32_t>`** — the
+  contiguous, logical-order `const int32_t*` the M8-T05 `PagedDecodeAttentionF32`
+  reads (§8.3/§9.2), zero-copy, valid until the next append/truncate — plus
+  `num_tokens()`/`num_blocks()`/`block_size()`/`pool()`.
+- **Move-only, mirroring `BlockPool`**: move-construct leaves the source empty
+  (its destructor then releases nothing); move-assign deleted (a table is built
+  in place, never reseated). **Not thread-safe by design** — one table per
+  sequence on the engine thread; the pool's mutex covers cross-sequence
+  contention. In M8 every owned block has refcount exactly 1 (the §6.4
+  exclusive-tail invariant), so `Release` is the only pool verb used; `Share`
+  waits for M11.
+
+CMake: `engine_kvcache` gains `block_table.cpp`; **no new link edge** — the
+table calls only `BlockPool` (same module). The `kvcache → kernels` downward
+edge still arrives with the scatter/decode kernels in M8-T04.
+
+Tests: new **`tests/unit/block_table_test.cpp`** (23 cases, label `unit`, no
+`SCALAR_PASS` — pure bookkeeping): the §7.2 hand-verified prefill (T=12 → blocks
+`[5,2]`, slots `40..47,16..19`, straddle at pos 7→8), no-allocation decode (slot
+20), and boundary-crossing-decode-allocates cases — reproduced at **`bs = 8`**
+(the smallest `BlockPool`-valid size, since the doc's `bs = 4` is not
+allocatable, §4) with a primed LIFO free list; token-by-token == batch growth;
+`num_blocks == ⌈num_tokens/bs⌉` and all-slots-unique across a mixed append
+sweep; exact-boundary growth; `count <= 0` rejection; all-or-nothing exhaustion
+leaving table+pool byte-identical and recovering afterward; truncate
+(partial-tail-kept, re-append-reuses-tail, exact-boundary, to-zero, no-op,
+out-of-range); free-on-completion via `FreeAll`, destructor, and interleaved
+lifetimes; move (moved-from emptied, source destruction releases nothing); and
+death tests (null pool, `slot` out-of-range / on-empty). Design §7.2 updated to
+`bs = 8` with an "as built" notes block. **1085 → 1108 ctest green** (+23).
+Format + scoped tidy clean.

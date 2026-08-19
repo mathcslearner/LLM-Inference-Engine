@@ -521,18 +521,20 @@ for the `count` new tokens, at positions `[num_tokens_, num_tokens_ + count)`):
 3. Build `slot_mapping[count]` from `slot(pos)` for `pos` in the new range;
    advance `num_tokens_`.
 
-**Worked slot mappings** (`bs = 4` for a compact example):
+**Worked slot mappings** (`bs = 8` — the smallest size `BlockPool::Create`
+accepts, §4; the M8-T03 tests reproduce exactly these numbers by priming the
+pool's LIFO free list so `Allocate` returns `[5, 2]`):
 
-- **Prefill, `T = 6` from empty** (`num_tokens_ 0 → 6`): needs
-  `⌈6/4⌉ − 0 = 2` blocks. Say `Allocate` returns `[5, 2]` (LIFO free list) →
-  `blocks_ = [5, 2]`. Positions 0..5 → slots
-  `[5·4+0, 5·4+1, 5·4+2, 5·4+3, 2·4+0, 2·4+1] = [20, 21, 22, 23, 8, 9]`.
-  The block-boundary straddle (pos 3→4) crosses from block 5 to block 2.
-- **Decode, `T = 1`** at `num_tokens_ = 6` (→ 7): `⌈7/4⌉ − ⌈6/4⌉ = 2 − 2 = 0`
-  new blocks; pos 6 → slot `blocks_[1]·4 + 2 = 2·4+2 = 10`.
-- **Decode, `T = 1`** at `num_tokens_ = 8` (→ 9): `⌈9/4⌉ − ⌈8/4⌉ = 3 − 2 = 1`
-  new block; `Allocate` → say `7`, `blocks_ = [5,2,7]`; pos 8 → slot
-  `7·4+0 = 28`. This is the boundary-crossing decode that allocates.
+- **Prefill, `T = 12` from empty** (`num_tokens_ 0 → 12`): needs
+  `⌈12/8⌉ − 0 = 2` blocks. `Allocate` returns `[5, 2]` → `blocks_ = [5, 2]`.
+  Positions 0..7 → block 5 (slots `40..47`); positions 8..11 → block 2 (slots
+  `16..19`). The block-boundary straddle (pos 7→8) crosses from block 5 to
+  block 2.
+- **Decode, `T = 1`** at `num_tokens_ = 12` (→ 13): `⌈13/8⌉ − ⌈12/8⌉ = 2 − 2 = 0`
+  new blocks; pos 12 → slot `blocks_[1]·8 + 4 = 2·8+4 = 20`.
+- **Decode, `T = 1`** at `num_tokens_ = 16` (→ 17): `⌈17/8⌉ − ⌈16/8⌉ = 3 − 2 = 1`
+  new block; `Allocate` → say `b`, `blocks_ = [5,2,b]`; pos 16 → slot
+  `b·8+0`. This is the boundary-crossing decode that allocates.
 
 ### 7.3 `truncate` and `free`
 
@@ -548,6 +550,32 @@ for the `count` new tokens, at positions `[num_tokens_, num_tokens_ + count)`):
 
 M8-T03 acceptance: growth across boundaries, hand-verified prefill/decode slot
 mappings (§7.2), and blocks returned to the pool on free (stats-checked).
+
+**M8-T03 implementation notes** (as built, `src/kvcache/block_table.{h,cpp}` —
+additive clarifications of the §7.1–§7.3 sketch, no divergence):
+
+- **`AppendTokens(count)` rejects `count <= 0` with `InvalidArgument`** (a
+  forward always appends ≥ 1 token; the design named only the exhaustion path).
+  All-or-nothing rollback is as specced: the new blocks are `Allocate`d into a
+  scratch vector, and on any `ResourceExhausted` the taken blocks are `Release`d
+  before returning — `blocks_`/`num_tokens_` and the pool are left byte-identical
+  (a recovery test proves a smaller append then succeeds).
+- **The block list is exposed as `std::span<const std::int32_t> blocks()`** —
+  the contiguous, logical-order `const int32_t*` the M8-T05
+  `PagedDecodeAttentionF32` reads (§8.3/§9.2), zero-copy, valid until the next
+  append/truncate. A `slot(pos)` query (CHECK-guarded to committed positions)
+  and `num_blocks()`/`num_tokens()`/`block_size()`/`pool()` round out the
+  surface.
+- **Move-only, mirroring `BlockPool`** — move-construct (leaving the source
+  empty so its destructor releases nothing), move-assign deleted (a table is
+  built in place, never reseated). The destructor calls `FreeAll` (RAII).
+- **Not thread-safe by design** — one table per sequence on the engine thread;
+  the pool's mutex covers the cross-sequence contention. `Truncate` releases
+  wholly-empty blocks tail-first (the lowest logical block lands on top of the
+  pool's LIFO free list, reused first) and keeps the partial surviving tail.
+- **Tests use `bs = 8`** (the smallest `BlockPool`-valid size) with a primed
+  free list to reproduce the §7.2 `[5, 2]` ordering, since the original `bs = 4`
+  example is not an allocatable block size (§4). +23 tests.
 
 ---
 

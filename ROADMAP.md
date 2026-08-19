@@ -1032,7 +1032,7 @@ bookkeeping, fully unit-testable; block storage drawn from the M2 caching alloca
 **Acceptance criteria:**
 - Unit tests: exhaustion returns `ResourceExhausted` (no crash); refcount double-free detected; stats accurate through scripted alloc/free/share sequences.
 
-### M8-T03 · Block table & sequence cache handle
+### M8-T03 · Block table & sequence cache handle — ✅ DONE (2026-08-19)
 `src/kvcache/block_table.h`: per-sequence logical→physical mapping, append-token
 (allocating blocks on boundary crossings), slot-mapping computation for a batch of
 token positions, free-on-completion.

@@ -128,6 +128,15 @@ engine_add_tests(TREE unit SOURCES
   block_pool_test.cpp
   DEPS engine::kvcache engine::memory engine::tensor)
 
+# block_table_test (M8-T03): BlockTable append-with-boundary-crossing block
+# allocation, hand-verified prefill/decode slot mappings, all-or-nothing
+# exhaustion rollback, truncate (partial-tail-kept), blocks-returned-on-free,
+# move, and death tests. Pure bookkeeping over BlockPool, no model or kernels,
+# so no SCALAR_PASS.
+engine_add_tests(TREE unit SOURCES
+  block_table_test.cpp
+  DEPS engine::kvcache engine::tensor)
+
 # model_test (M5-T07): the DecoderLayer/Mlp modules, ReferenceModel end-to-end
 # logits vs activations.safetensors, the per-layer activation hook, kLast/kAll
 # consistency, and the KV-cache invariant elevated to full-model logits. Uses

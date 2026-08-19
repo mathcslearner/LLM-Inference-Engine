@@ -763,13 +763,42 @@ behind an existing subsystem):
   `unit`, no SCALAR_PASS — construction/validation, LIFO alloc/exhaustion/recovery,
   share refcounts, scripted stats invariant, hand-worked `blocks_needed`, §3.3
   capacity numbers, double-free/share-on-free/out-of-range/move-after-handout death
-  tests, 8-thread stress) → **1085 green**. Format + scoped tidy clean.
+  tests, 8-thread stress) → **1085 green**. Format + scoped tidy clean. T03
+  block table & sequence cache handle: `src/kvcache/block_table.{h,cpp}` —
+  `BlockTable`, the per-sequence logical→physical block map over the M8-T02
+  `BlockPool` (one table drives all layers, §3.1). `AppendTokens(count) →
+  StatusOr<vector<int64_t>>` grows the sequence and returns the `slot(pos) =
+  blocks_[pos/bs]·bs + pos%bs` mapping (the M8-T04 scatter kernel's addressing
+  unit), allocating `blocks_needed` blocks on boundary crossings
+  **all-or-nothing** (any `ResourceExhausted` releases the taken blocks and
+  leaves table+pool byte-identical); `count ≤ 0` → InvalidArgument. `Truncate`
+  releases wholly-empty blocks tail-first (lowest logical block back on top of
+  the pool's LIFO free list) keeping the partial tail; `FreeAll`/destructor
+  return every block (RAII — the M8-T08/M9 "no leaks" basis). Exposes
+  `blocks()` as `std::span<const int32_t>` — the zero-copy `const int32_t*` the
+  M8-T05 `PagedDecodeAttentionF32` reads (§8.3/§9.2). Move-only (moved-from
+  emptied, move-assign deleted); not thread-safe by design (one table per
+  sequence; the pool's mutex covers cross-sequence contention); every owned
+  block is refcount-1 (the §6.4 exclusive-tail invariant), so only `Release` is
+  used, `Share` waits for M11. **No new link edge** (`BlockTable` calls only
+  `BlockPool`; `kvcache → kernels` still lands with M8-T04). +23 tests (new
+  `block_table_test`, label `unit`, no SCALAR_PASS — hand-verified §7.2
+  prefill/decode slot mappings at `bs = 8` with a primed free list, all-or-
+  nothing exhaustion rollback, truncate/free/move, death tests) → **1108
+  green**. design §7.2 updated to `bs = 8` + an "as built" notes block.
+  Format + scoped tidy clean.
 
-Next up: **M8-T03** (`src/kvcache/block_table.{h,cpp}`: per-sequence
-logical→physical block map over the `BlockPool` — `AppendTokens(count)` growing
-blocks on boundary crossings (all-or-nothing: release on partial exhaustion,
-table+pool untouched) and returning the `slot(pos) = blocks_[pos/bs]·bs + pos%bs`
-mapping for the batch, `Truncate`/`FreeAll` returning blocks to the pool (RAII);
-per paged-kv-cache.md §7: growth across boundaries, hand-verified prefill/decode
-slot mappings incl. the straddle and boundary-crossing-decode-allocates cases,
-blocks returned to the pool on free — stats-checked).
+Next up: **M8-T04** (`src/kernels/kv_scatter.{h,cpp}` + `KvScatterF32`, and
+`src/kvcache/paged_cache.{h,cpp}` — `PagedKvCache : KvCache`): the paged append.
+`KvScatterF32(src_k, src_v, slot_mapping, T, Hkv, d, bs, k_slab, v_slab)` writes
+`[T,Hkv,d]` token-major K/V into the paged slabs at the block table's slot
+mapping — a pure `memcpy` of `d` floats per (token, head), Class E (bit-exact),
+single TU, no per-ISA variant (like the M6 embedding gather). `PagedKvCache`
+composes `BlockPool` + `BlockTable`: `append(layer,k,v)` grows the table on the
+`layer == 0` call and reuses the slot mapping for layers 1..L−1 (§8.2), then
+scatters; `view(layer)` gathers via `paged_gather` (M8-T06). Adds the
+**`kvcache → kernels`** downward edge (ADR-002-permitted, no amendment;
+`engine_kvcache … PRIVATE engine::kernels`) and updates the stale "never links
+kernels" comment in `kv_cache.h`. Per paged-kv-cache.md §8.2/§9.1: readback vs
+an independently-simulated paged layout across boundary-straddling prefills and
+single-token decodes, front-loaded append validation.
