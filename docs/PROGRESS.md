@@ -1230,3 +1230,71 @@ suites are the AVX2 proof (the accepted arm64-CI gap, CLAUDE.md). `regen_fixture
 not run (no fixture change). +64 test registrations (32 new cases × SCALAR_PASS;
 6 forced-scalar slot-guards `GTEST_SKIP`) → **823 green**. Format clean; scoped
 tidy clean on the new/edited TUs.
+
+M6-T04 done (2026-08-18: optimized prefill attention). Blocked, flash-style
+causal GQA attention with an online (running max/sum) softmax, replacing the M5
+reference's materialize-`[H·T, L]`-then-`cpu::softmax` math while honoring the
+exact `cpu::attention` op contract (q `[T,H,d]`, k/v `[Hkv,L,d]` head-major, L =
+P+T, scale on the completed dot, out `[T,H,d]`, GQA by `h/g` KV-head indexing).
+`src/kernels/attention.{h,cpp}` — public `PrefillAttentionF32(q,k,v,out, T,H,Hkv,
+d,L, scale)`, `KernelTable` dispatch (scalar/neon/avx2), `parallel_for` over
+`H·ceil(T/kAttnQb)` `(head, query-block)` units at grain 1, `detail::
+PrefillAttentionVariant` test seam. `src/kernels/internal/attention_common.h` —
+the online-softmax recurrence written **once** as `PrefillUnitsImpl<Ops>` (the
+GEMM-idiom split: shared control flow, ISA-only arithmetic), block constants
+`kAttnQb=32`/`kAttnKb=64`, the `PrefillArgs` struct. `internal/attention_impl.h`
+— per-ISA `PrefillUnits` decls + the variant seam. `scalar/neon/avx2/
+attention.cpp` — each an `Ops` policy of four primitives (dot+score, exp+sum,
+scale-row, axpy-row); NEON/AVX2 vectorize over `d` + the key row via the shared
+`neon::Exp`/`avx2::Exp` polynomial, scalar embeds `ExpF32Scalar` so forced-scalar
+runs the shipped numeric code.
+
+Non-obvious decisions: (1) **No per-worker scratch, and §6.4's worker-index
+`parallel_for` overload was NOT added** — the online accumulator IS `out`
+itself (each unit's output rows are disjoint, rescaled in place, divided by the
+denominator at the end), and the only working memory is a fixed `kAttnKb` stack
+score row + two scalars per query. This diverges from the M6-T01 draft (which
+planned per-worker attention scratch + the overload); rather than ship unused
+plumbing, `src/parallel/` was left untouched and the design updated in the same
+change — `optimized-cpu-execution.md` §6.1/§6.2/§6.4 (`W_worker = 0`) and
+`cpu-backend.md` §3.2 now record the deferral, with the overload's ready design
+retained for the first kernel that genuinely needs cross-`d` scratch (an M12
+fusion / a non-`parallel_reduce` decode split). (2) **Causal masking is a per-row
+`n_valid`, never a written `−inf`:** key blocks wholly past `limit = P+t` are
+never visited (the causal skip), the diagonal block iterates only its valid keys,
+and masked keys contribute exactly 0 — reproducing the reference's `−inf → 0`
+softmax contract without a mask value. (3) **Row-at-a-time**, so `kAttnQb`
+controls only K/V block reuse, not a `[kQb,kKb]` score tile (kept the score
+buffer a `kAttnKb` stack array). (4) The five `attention.safetensors` HF goldens
+are replayed through the kernel (ties the optimized path to the HF chain, not
+just the reference).
+
+Numerics (design §10): fp32 throughout; **bit-identical across thread counts**
+(each query's recurrence wholly in one variant call — asserted vs a single serial
+variant call and an arbitrary manual chunking, `EXPECT_EQ` bitwise); Class T
+across ISAs and vs the oracle (online rescale order + vector exp). Observed max
+vs `cpu::attention` (NEON): **1.3e-6** across the acceptance sweep
+(T∈{1,17,512,2048}, P∈{0,5}, the decode-shaped T=1/P=2047, GQA
+{(4,4),(4,2),(8,1)}×d∈{18,24,64,128}, and the `kAttnQb`/`kAttnKb` block-boundary
+straddles), well inside the stated `rtol 1e-4, atol 1e-5`. The large-logit stress
+uses q/k std 2 (logit std ≈4, observed ~1.4e-5, still in tolerance); pushing to
+logit std in the tens — no trained model's regime — is where the online rescale's
+incremental rounding exceeds the threshold where `|ref|` is small, recorded
+honestly rather than papered over.
+
+Bench (`attention_bench`, BASELINES.md M6-T04): 2k-context prefill
+(T=L=2048, H=32, Hkv=8, d=64, Llama-3.2-1B-shaped) vs the reference on the M2 —
+**9.72×** at 8-thread NEON (2.121 → 0.218 s), 12.89× single-thread NEON, 6.68×
+single-thread scalar. The reference is memory/materialization-bound (its scalar
+and NEON single-thread times are ~equal, dominated by the 537 MB score-matrix
+traffic), so most of the win is the algorithm (no score-matrix write) plus the
+`d`-vectorized dot/axpy. No perf *target* for T04 ("time vs the reference"); the
+delta is recorded per CLAUDE.md.
+
+AVX2 TU written blind (no x86-64 dev machine), mirroring the NEON structure 1:1,
+reviewed by hand against `.clang-format`/`.clang-tidy` (CI's x86-64
+warnings-as-errors build + all suites are its proof — the accepted arm64-CI gap).
+`regen_fixtures.sh` not run (no fixture change). `src/parallel/` untouched.
++14 test registrations (7 new cases × SCALAR_PASS; 1 forced-scalar slot-guard
+`GTEST_SKIP`) → **837 green**. Format clean; scoped tidy clean on the
+new/edited TUs.

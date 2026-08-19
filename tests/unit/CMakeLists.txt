@@ -238,6 +238,7 @@ engine_add_tests(TREE unit SOURCES
   activation_kernel_test.cpp
   softmax_kernel_test.cpp
   rope_kernel_test.cpp
+  attention_kernel_test.cpp
   DEPS engine::kernels engine::cpu engine::model
   LABELS kernels
   SCALAR_PASS)

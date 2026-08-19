@@ -459,11 +459,30 @@ behind an existing subsystem):
   M6-T03): NEON vs scalar — RMSNorm 2.10×, Softmax 3.08×; ExpF32/SiLU ~1.05×
   (streaming-bound / scalar auto-vectorizes); RoPE 0.70× recorded honestly (a
   M12 tuning item, correctness unaffected). AVX2 TUs written blind, hand-reviewed,
-  proven by CI's x86-64 build. +64 test registrations → **823 green**.
+  proven by CI's x86-64 build. +64 test registrations → **823 green**. T04
+  optimized prefill attention: `src/kernels/attention.{h,cpp}` +
+  `internal/attention_common.h`/`attention_impl.h` + `{scalar,neon,avx2}/
+  attention.cpp` — `PrefillAttentionF32`, blocked flash-style causal GQA
+  attention with an online (running max/sum) softmax honoring the exact
+  `cpu::attention` op contract; the recurrence written once as
+  `PrefillUnitsImpl<Ops>` (GEMM-idiom split: shared control flow, ISA-only
+  arithmetic — dot+score/exp+sum/scale/axpy), block constants `kAttnQb=32`/
+  `kAttnKb=64`, threaded over `(head, query-block)` units. **No per-worker
+  scratch and §6.4's worker-index `parallel_for` overload NOT added** — the
+  online accumulator is `out` itself, so `src/parallel/` is untouched and the
+  design (`optimized-cpu-execution.md` §6.1/§6.2/§6.4, `cpu-backend.md` §3.2)
+  updated to record the deferral. Causal masking is a per-row `n_valid` (no
+  written `−inf`); row-at-a-time score buffer. Class T vs the oracle, observed
+  1.3e-6 across the acceptance sweep (T∈{1,17,512,2048}, P∈{0,5}, GQA
+  {(4,4),(4,2),(8,1)}×d∈{18,24,64,128}, block-boundary straddles;
+  `rtol 1e-4, atol 1e-5`); bit-identical across thread counts. AVX2 TU written
+  blind, hand-reviewed, proven by CI. Bench (BASELINES.md M6-T04): **9.72×** the
+  reference at 8-thread NEON on a 2k-context prefill (2.121 → 0.218 s), 12.89×
+  single-thread. +14 test registrations → **837 green**.
 
-Next up: **M6-T04** (optimized prefill attention: blocked causal attention with
-flash-style online softmax — tiled QKᵀ/AV over key blocks with running
-max/sum renormalization, fp32 accumulation, GQA via KV-head indexing, threaded
-across (head, query-block), continuing from a non-empty cache; tested vs the M5
-reference attention across sequence lengths {1,17,512,2048} and GQA configs,
-with a 2k-context time recorded in BASELINES.md).
+Next up: **M6-T05** (optimized decode attention: the single-token decode path —
+one query per sequence attending the full cached K/V, vectorized dot-products
+and weighted V sums, threaded across kv heads with the `g = H/Hkv` query heads of
+a group sharing that head's streamed K/V; tested vs the M5 reference across cache
+lengths {1, 63, 64, 65, 2048} and GQA configs, and asserted to match the M6-T04
+prefill path's result for the same single token).

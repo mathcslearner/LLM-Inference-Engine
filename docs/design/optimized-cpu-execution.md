@@ -403,11 +403,18 @@ revisited with the M6-T08 benchmark, not here).
     fp32 (a small fixed count `c_stream ≈ 4` live at once, reused);
   - projections: `q [T, H·d]`, `k [T, Hkv·d]`, `v [T, Hkv·d]`, `ctx [T, H·d]`;
   - MLP: `gate [T, I]`, `up [T, I]`.
-- **Per-worker scratch** (one slice per pool thread, selected by worker index —
-  §6.4): the attention working set — for prefill, per `(head, q-block)`: a score
-  block `[kQb, kKb]`, running max/sum `[kQb]`, and an output accumulator
-  `[kQb, d]`; for decode, a per-head streaming accumulator `[d]` + scalar
-  max/sum. Sized to the largest kernel's per-worker need.
+- **Per-worker scratch** — *designed here, but as-built (M6-T04) the prefill
+  attention needs none, and §6.4's worker-index overload was therefore not
+  added.* The reason: the online-softmax accumulator **is `out` itself**. Each
+  `(head, query-block)` unit writes only its own `out[t, h, :]` rows (disjoint
+  from every other unit), so the running weighted-V accumulator is rescaled in
+  place there and divided by the denominator at the end — no external
+  `[kQb, d]` buffer. The only working memory is one query's `kAttnKb`-wide score
+  row, a fixed stack array in the variant. Running max/sum are two stack scalars
+  per query. Decode (M6-T05) is expected to accumulate in `out` the same way.
+  So `W_worker = 0` in practice; the mechanism (a per-thread scratch slice
+  selected by worker index) is kept in this section only as the shape a *future*
+  kernel that genuinely needs cross-`d` scratch would use — see §6.4.
 
 The **K/V for this call** are formed token-major (`[T, Hkv, d]`) in the `k`/`v`
 model-level buffers, appended via `cache.append` (interface unchanged), and the
@@ -428,21 +435,26 @@ W_model  = 4 · [ c_stream·T·E                      (residual stream)
                + T·H·d                              (ctx)
                + 2·T·I ]                            (gate, up)
 
-W_worker = 4 · nthr · [ kQb·kKb + kQb·(d + 2) ]     (prefill attn scratch;
-                                                     decode's is strictly smaller)
+W_worker = 0                                        (as built, M6-T04: the
+                                                     attention accumulator is
+                                                     `out`; §6.1)
 
-Workspace(T) = W_model + W_worker
+Workspace(T) = W_model
 ```
+
+(The `W_worker = 4·nthr·[kQb·kKb + kQb·(d+2)]` term the first draft carried is
+zero as built — §6.1 explains why the prefill/decode attention keeps no
+per-worker scratch. It is retained only as the sizing a future scratch-needing
+kernel would follow.)
 
 - **Instantiated, tiny-llama** (`T=8, E=64, H=4, Hkv=2, d=16, I=176`,
   `c_stream=4`): `W_model = 4·[2048 + 1024 + 512 + 2816] = 4·6400 ≈ 25.6 KB`;
   worker scratch negligible. The whole forward runs in ~26 KB of workspace.
 - **Instantiated, Llama-3.2-1B** (`T=512, E=2048, H=32, Hkv=8, d=64, I=8192`,
   `nthr=8`): `W_model = 4·[4.19M + 1.57M + 1.05M + 8.39M] ≈ 60.8 MB` at a
-  512-token prefill; decode (`T=1`) is ~120 KB. Worker scratch (say
-  `kQb=64, kKb=256`): `4·8·[16384 + 4224] ≈ 660 KB`. So a 1B-model prefill needs
-  ~61 MB of workspace, dwarfed by the ~2.5 GB of bf16 weights — comfortable on the
-  16 GB dev machine.
+  512-token prefill; decode (`T=1`) is ~120 KB. Worker scratch is zero as built
+  (§6.1). So a 1B-model prefill needs ~61 MB of workspace, dwarfed by the
+  ~2.5 GB of bf16 weights — comfortable on the 16 GB dev machine.
 
 The formula is what `Workspace::EnsureCapacity(T, geometry)` computes; `V`
 (vocab) and `L` (cache length) do **not** enter workspace size — logits are
@@ -476,9 +488,20 @@ optimization behind an unchanged default, not M6's contract.
 
 ### 6.4 The `parallel_for` worker-index overload
 
-Per-thread scratch needs each chunk body to know *which* worker's scratch slice
-to use. The current `parallel_for` body is `void(int64 begin, int64 end)` — no
-worker identity (`src/parallel/parallel_for.h`). M6 adds one overload:
+**Status (M6-T04): NOT added — deferred until a kernel actually needs it.** The
+draft planned this overload for the attention kernels' per-worker scratch, but
+§6.1 shows they keep none (the accumulator is `out`). Adding an unused
+`parallel_for` overload + threading a worker index through `ThreadPool::Run`
+just to leave it uncalled is speculative surface, so M6-T04 left
+`src/parallel/` untouched. The design below is retained as the ready mechanism
+for the first kernel that genuinely needs cross-`d` per-thread scratch (an M12
+fusion, or a decode split that does not use `parallel_reduce`); that ticket adds
+it. The `cpu-backend.md` §3.2 note is updated to match.
+
+The mechanism, when needed: per-thread scratch needs each chunk body to know
+*which* worker's scratch slice to use. The current `parallel_for` body is
+`void(int64 begin, int64 end)` — no worker identity
+(`src/parallel/parallel_for.h`). One overload delivers it:
 
 ```cpp
 // src/parallel/parallel_for.h  (added with M6-T04)
@@ -564,17 +587,32 @@ attends keys `[0, P+t]`). The `Attention`-level orchestration (project QKV →
 RoPE Q/K → `cache.append` → `cache.view` → attention → o_proj) is unchanged from
 model-execution.md §4.2; only the attention *math* is replaced.
 
-- **Prefill (M6-T04): blocked, flash-style online softmax.** Tile queries into
-  `kQb`-row blocks and keys into `kKb`-column blocks. For each `(head,
-  query-block)` (the parallel unit), stream key blocks left-to-right maintaining a
-  running row-max `m`, running denominator `l`, and running `kQb × d` output
-  accumulator, rescaling the accumulator by `exp(m_old − m_new)` when the max
-  advances — the standard CPU flash-attention recurrence, fp32 throughout. No
-  `[T, L]` score matrix is materialized (that is the reference's clarity-first
-  choice; the optimized path holds only `kQb × kKb` at a time). Causal masking
-  skips key blocks entirely past the query's position and masks within the
-  diagonal block. Supports prefill continuing from a non-empty cache (`P > 0`) —
-  it is a `(P, T)` choice of the same kernel (model-execution.md §6.3).
+- **Prefill (M6-T04): blocked, flash-style online softmax. *Landed
+  2026-08-18.*** Tile queries into `kQb`-row blocks and keys into `kKb`-column
+  blocks (`kAttnQb = 32`, `kAttnKb = 64`; named constants in
+  `internal/attention_common.h`, an M12-T02 tuning seam). For each `(head,
+  query-block)` (the parallel unit, grain 1), stream key blocks left-to-right
+  maintaining a running row-max `m`, running denominator `l`, and running output
+  accumulator, rescaling by `exp(m_old − m_new)` when the max advances — the
+  standard CPU flash-attention recurrence, fp32 throughout. No `[T, L]` score
+  matrix is materialized; the optimized path holds only one query's
+  `kAttnKb`-wide score row at a time (row-at-a-time, so `kAttnQb` controls only
+  how many queries reuse each streamed K/V block — the accumulator is `out`
+  itself, §6.1, so there is no `[kQb, d]` scratch). **Causal masking is
+  expressed as a per-row `n_valid`** rather than writing `−inf`: key blocks
+  wholly past the query's boundary are never visited (the causal skip), and the
+  diagonal block iterates only its valid keys — the masked keys contribute
+  exactly 0, reproducing the reference's `−inf → 0` softmax contract without an
+  explicit mask value. Supports prefill continuing from a non-empty cache
+  (`P > 0`) — `limit = P + t`, the same kernel (model-execution.md §6.3).
+  **Implementation shape (mirrors the GEMM idiom):** the online-softmax control
+  flow is written once as `internal::PrefillUnitsImpl<Ops>`
+  (`attention_common.h`); the scalar/NEON/AVX2 TUs supply only four arithmetic
+  primitives (dot+score, exp+sum, scale, axpy), so the blind-written AVX2 TU is
+  a pure ISA swap of those primitives. Observed vs `cpu::attention` (NEON): max
+  ~1.3e-6 at realistic magnitude across T∈{1,17,512,2048}, P∈{0,5}, GQA
+  {(4,4),(4,2),(8,1)}, d∈{18,24,64,128}, and the block-boundary sweep; ~1.4e-5
+  under a large-logit stress (std≈4) — all inside the §10 tolerance.
 - **Decode (M6-T05): one query per sequence over the full cache.** `q [H, d]` (a
   `T == 1` slice) attends the cached `k`/`v [Hkv, L, d]`; threaded across kv
   heads, the `g = H/Hkv` query heads of each group processed together so that kv
@@ -724,7 +762,14 @@ why:**
   model-execution.md §13 T05, so the reference is effectively exact and the
   optimized-vs-reference band is the online-softmax + vector-exp rounding);
   cache lengths `{1, 63, 64, 65, 2048}` and GQA configs (M6-T05), sequence lengths
-  `{1, 17, 512, 2048}` (M6-T04).
+  `{1, 17, 512, 2048}` (M6-T04). *Landed (M6-T04, NEON): observed max
+  **1.3e-6** across the acceptance sweep (T∈{1,17,512,2048}, P∈{0,5}, the
+  decode-shaped T=1/P=2047, GQA {(4,4),(4,2),(8,1)}×d∈{18,24,64,128}, and the
+  `kAttnQb`/`kAttnKb` block-boundary straddles), rising to ~1.4e-5 only under an
+  out-of-range large-logit stress (q/k std 2 ⇒ logit std ≈4). The stated
+  threshold holds; a logit std in the tens (no trained model's regime) is where
+  the online rescale's incremental rounding exceeds it — recorded, not
+  papered over.*
 - **End-to-end:** `OptimizedModel` logits vs `ReferenceModel` logits within a
   stated tolerance (observed recorded); greedy generation **token-for-token
   identical** on the tiny fixtures. The M5-T09/T10 prompt selection (min top-2

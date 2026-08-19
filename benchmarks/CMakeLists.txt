@@ -19,6 +19,17 @@ target_link_libraries(gemm_bench PRIVATE
   engine::tensor
   fmt::fmt)
 
+# attention_bench (M6-T04): optimized prefill attention vs the M5 reference
+# (cpu::attention) at 2k context, in BASELINES.md (no perf target — time vs
+# reference).
+add_executable(attention_bench kernels/attention_bench.cpp)
+target_link_libraries(attention_bench PRIVATE
+  engine::kernels
+  engine::cpu
+  engine::tensor
+  fmt::fmt
+  engine_warnings)
+
 option(ENGINE_BENCH_BLAS "Link a BLAS into gemm_bench for a context number" OFF)
 if(ENGINE_BENCH_BLAS)
   # Third-party BLAS SDK headers (Accelerate) predate our -Werror warning set,

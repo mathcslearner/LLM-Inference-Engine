@@ -206,18 +206,21 @@ of scheduling; the partitioning rules exist so that `parallel_reduce` — and
 any kernel whose *internal* blocking follows chunk boundaries — is bitwise
 reproducible.
 
-*M6-T01 note (2026-08-18): a worker-index `parallel_for` overload.* The M6
-optimized kernels need per-thread scratch (attention working sets, workspace
-slices — `optimized-cpu-execution.md` §6), so M6-T04 adds a second
-`parallel_for` overload whose body is `void(int worker, int64 begin, int64
-end)` with `worker ∈ [0, num_threads)` (the inline path passes `0`). This is
-**determinism-safe and needs no change to the rules above**: the worker index
-selects *which scratch buffer* a chunk uses, never *which chunk* a worker runs
-— chunk boundaries stay the pure `(n, grain)` function of rule 1, and outputs
-stay disjoint per chunk. It composes with any future scheduling change (§10):
-correctness never depends on which index a chunk runs under. The existing
-`void(begin, end)` overload stays for the majority of kernels (rows, tiles)
-that need no worker id.
+*M6-T01 note (2026-08-18), updated M6-T04.* The M6-T01 draft reserved a
+worker-index `parallel_for` overload (`void(int worker, int64 begin, int64
+end)`, `worker ∈ [0, num_threads)`) for the optimized kernels' per-thread
+scratch. **M6-T04 did not add it:** the prefill attention accumulates directly
+into its disjoint `out` rows and keeps only a fixed stack score row, so it needs
+no cross-`d` scratch (`optimized-cpu-execution.md` §6.1/§6.4); decode (M6-T05) is
+expected to do the same. `src/parallel/` is therefore unchanged through M6. When
+a kernel *does* need per-thread scratch (an M12 fusion, or a
+non-`parallel_reduce` decode split), that ticket adds the overload — the design
+is spelled out in `optimized-cpu-execution.md` §6.4 and is **determinism-safe**:
+the worker index would select *which scratch buffer* a chunk uses, never *which
+chunk* a worker runs (chunk boundaries stay the pure `(n, grain)` function of
+rule 1, outputs stay disjoint), so it composes with any future scheduling
+change. The existing `void(begin, end)` overload is what every M3–M6 kernel
+uses.
 
 ### 3.3 `parallel_reduce`: fixed combine tree
 

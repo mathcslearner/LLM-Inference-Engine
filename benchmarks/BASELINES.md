@@ -123,3 +123,41 @@ Cross-ISA note: these are NEON-only numbers (the dev machine). The AVX2 bodies
 mirror the NEON structure and are proven correct + warnings-clean by CI; their
 throughput is not measured here (no x86-64 dev machine), consistent with the
 prior kernel baselines.
+
+## M6-T04 — optimized prefill attention (2026-08-18)
+
+**Host:** Apple M2 (8 physical cores), macOS, dev machine.
+**Toolchain:** Homebrew clang 20, `-O3` Release.
+**Command:** `build/benchmarks/attention_bench` (defaults `T=L=2048, H=32,
+Hkv=8, d=64`, P=0 — a Llama-3.2-1B-shaped 2k-context prefill; best of 5).
+Optimized = `PrefillAttentionF32` (blocked online softmax); baseline = the M5
+reference `cpu::attention` (materializes the `[H·T, L]` score matrix). Both
+threaded through the same `DefaultPool`. The M6-T04 obligation is "time vs the
+reference at 2k context" — no perf target.
+
+| Config | reference | PrefillAttentionF32 | speedup |
+|---|---:|---:|---:|
+| NEON, 8 threads (default) | 2.121 s | 0.218 s | **9.72×** |
+| NEON, 1 thread | 11.893 s | 0.923 s | 12.89× |
+| scalar, 1 thread | 11.658 s | 1.746 s | 6.68× |
+
+Reading them:
+
+- **9.72× at the default 8-thread NEON** is the headline: the blocked kernel
+  holds only a `kAttnKb`-wide score row per query (no `537 MB` `[H·T, L]`
+  score-matrix write the reference pays), and its dot/axpy vectorize over `d`.
+- **Single-thread NEON 12.89×** isolates the algorithmic + ISA win from
+  threading. The reference is memory/materialization-bound, so its scalar and
+  NEON single-thread times are nearly equal (11.66 vs 11.89 s) — the vector
+  reference gains little because it is dominated by the score-matrix traffic and
+  the `cpu::softmax` pass over it. NEON→scalar on the *optimized* path is
+  0.923 → 1.746 s (1.9×), the dot/axpy vectorization.
+- **8-thread vs 1-thread NEON on the optimized path** is 0.923 → 0.218 s
+  (4.2× over 8 cores) — the `(head, query-block)` units parallelize cleanly;
+  the sub-linear scaling is the shared-K/V memory bandwidth, expected and an
+  M12 item, not an M6 obligation.
+
+Correctness is unaffected (Class T within the §10 tolerance rtol 1e-4 atol 1e-5;
+bit-identical across thread counts). AVX2 body mirrors the NEON structure and is
+proven correct + warnings-clean by CI; not measured here (no x86-64 dev
+machine).

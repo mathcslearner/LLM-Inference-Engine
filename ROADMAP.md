@@ -891,7 +891,7 @@ positions, supporting later batched/paged use) — all behind the M3-T05 dispatc
 **Acceptance criteria:**
 - Tests vs scalar reference per kernel: hidden sizes {odd, 1024, 4096}, large-magnitude softmax inputs, RoPE positions {0, 1, large} and GQA head counts; tolerances documented per kernel.
 
-### M6-T04 · Optimized prefill attention
+### M6-T04 · Optimized prefill attention — ✅ DONE (2026-08-18)
 Blocked causal attention with online softmax (flash-style, CPU): tiled QKᵀ and AV
 over key blocks with running max/sum renormalization, fp32 accumulation, GQA via KV
 head indexing (no materialized repeat), threaded across (head, query-block) pairs.
