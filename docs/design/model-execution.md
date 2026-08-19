@@ -787,28 +787,50 @@ core::Status RegisterArchitecture(std::string_view hf_arch_name,
 ## 10. Generation loop (M5-T09) — landed 2026-08-18
 
 ```cpp
-// src/engine/generator.h  (M7-T01: max_new_tokens folded into sampling)
+// src/engine/generator.h  (M7-T04: stop conditions, finish reasons, streaming text)
 struct GenerateOptions {
   sampling::SamplingParams sampling;               // §15; max_tokens > 0 required
-  std::vector<std::int32_t> eos_ids;               // stop when any is produced
+  std::vector<std::int32_t> eos_ids;               // model EOS: stop when any is produced
+  const tokenizer::Tokenizer* tokenizer = nullptr; // detok/text; required iff stop_strings set
+  bool skip_special_tokens = true;                 // for the text/stop stream
 };
 
-// Called with each new id as it is produced — the streaming seam (M10 uses it).
-using TokenCallback = std::function<void(std::int32_t)>;
+// One produced token and the text that became safe to emit with it. `text` is
+// "" without a tokenizer, or while bytes are held for an incomplete UTF-8
+// sequence / pending stop-string prefix; concatenated deltas == result.text.
+struct TokenEvent { std::int32_t id; std::string_view text; };
+using TokenCallback = std::function<void(const TokenEvent&)>;  // streaming seam (M10)
 
-// Greedy (argmax) continuation of `prompt_ids`. Returns the generated token
-// ids (excluding the prompt).
-[[nodiscard]] core::StatusOr<std::vector<std::int32_t>> Generate(
+struct GenerateResult {
+  std::vector<std::int32_t> tokens;                // generated ids (prompt excluded)
+  FinishReason finish_reason = FinishReason::kLength;  // stop / length  (stop.h)
+  StopTrigger stop_trigger = StopTrigger::kNone;   // which condition fired
+  std::string matched_stop;                        // kStopString only
+  std::string text;                                // detok text, trimmed before a stop string
+};
+
+// Sampled continuation of `prompt_ids`. Returns the generated ids + finish info.
+[[nodiscard]] core::StatusOr<GenerateResult> Generate(
     Model& model, KvCache& cache, std::span<const std::int32_t> prompt_ids,
     const GenerateOptions& options, const TokenCallback& on_token = {});
 ```
 
-> **M7-T01 update.** `GenerateOptions` now carries a `sampling::SamplingParams`
-> instead of a bare `max_new_tokens` (see the annotated snippet above); the
-> `max_new_tokens` in the prose below is now `options.sampling.max_tokens`, and
-> "argmax" is the sampler's `temperature == 0` branch. The loop's mechanics,
-> stopping, error posture, and determinism are otherwise unchanged — greedy
-> output is bit-identical. See §15.4 for the routing.
+> **M7-T01 update.** `GenerateOptions` carries a `sampling::SamplingParams`
+> instead of a bare `max_new_tokens`; the `max_new_tokens` in the prose below is
+> now `options.sampling.max_tokens`, and "argmax" is the sampler's
+> `temperature == 0` branch. See §15.4 for the sampler routing.
+>
+> **M7-T04 update.** `Generate` now returns a `GenerateResult` (finish reason +
+> detokenized text) instead of a bare `vector`, the callback takes a `TokenEvent`
+> (id + safe-to-emit text delta), and `GenerateOptions` gains an optional
+> `tokenizer`. Stopping is now a `StopChecker` (`src/engine/stop.{h,cpp}`, §15.2)
+> checked per token in priority order — EOS set, request `stop_token_ids`, request
+> `stop_strings` (matched on the incrementally detokenized stream, across token
+> boundaries), then `max_tokens` — producing `FinishReason::kStop` for the first
+> three and `kLength` for the last. With `SamplingParams::Greedy(n)` and no stop
+> conditions the token trajectory is bit-identical to the pre-M7 loop (the
+> `generate.json` regression). `engine → tokenizer` is the sanctioned edge this
+> uses (ADR-002 diagram), first wired here.
 
 - **Prefill** the whole prompt in one `forward` (positions `P0..P0+T-1` where
   `P0 = cache.length()` — the loop continues from a non-empty cache, so `P0` is
@@ -821,10 +843,14 @@ using TokenCallback = std::function<void(std::int32_t)>;
   identical, and the tie-break is stated so it is not left to
   `std::max_element`'s incidental behavior). A non-finite max (NaN logit) is
   surfaced as `Internal`, not returned as a bogus token.
-- **Stopping:** any `eos_ids` match (**the matched EOS id is included** as the
-  last element of the result — HF-style), or `max_new_tokens` produced. `eos_ids`
-  comes from the caller — the tokenizer's `eos_id()` and/or
-  `ModelConfig::eos_token_ids`. *(M5-T09 adds `eos_token_id` parsing to
+- **Stopping (M7-T04):** checked per produced token in priority order — an
+  `eos_ids` match, a request `stop_token_ids` match, a request `stop_strings`
+  match on the detokenized stream, then `max_tokens`. **The matched EOS /
+  stop-token id is included** as the last element (HF-style); a token that
+  *completes a stop string* is included too, but the stop string's own bytes and
+  anything after them are trimmed from `result.text`. `eos_ids` comes from the
+  caller — the tokenizer's `eos_id()` and/or `ModelConfig::eos_token_ids` — and
+  is distinct from a request's `SamplingParams::stop_token_ids`. *(M5-T09 adds `eos_token_id` parsing to
   `ModelConfig` → `eos_token_ids`: HF serializes it as an int or a list, both
   parse to a set validated in `[0, vocab_size)`. A small M4-config addition
   M5-T09 makes in passing, §3.2 of model-loading.md.)*
@@ -1104,11 +1130,34 @@ matches vLLM / OpenAI so results are comparable:
 6. **Logprobs** (T05) — the chosen-token logprob and top-N logprobs, computed
    from the same post-processing logits the sampler saw (documented choice).
 
-**Stop conditions** (T04) live in the generation loop, not the sampler: after a
-token is selected the loop checks the model's EOS set (`GenerateOptions::eos_ids`)
-and the request's `stop_token_ids` / `stop_strings` (the latter matched on the
-incrementally detokenized stream, across token boundaries — §M4-T10), and
-`max_tokens`, producing a `finish_reason` (`stop` / `length`).
+**Stop conditions** (T04 — **done** 2026-08-19) live in the generation loop, not
+the sampler: `src/engine/stop.{h,cpp}` (`engine → tokenizer`, the ADR-002 diagram
+edge first used here). Two pieces:
+
+- **`StopStringMatcher`** — a pure byte-stream matcher (no tokenizer dependency,
+  unit-testable in isolation and reusable by M9's per-request loop). `Feed(chunk)`
+  appends and returns the prefix now safe to emit, **holding back** the longest
+  suffix that could still become the start of a stop string — so a stop string
+  **split across token boundaries** is caught and the text after the match is
+  trimmed. Match position is the earliest occurrence of any stop (ties broken by
+  the request's stop-list order); the scan is naive O(held·Σ|stop|) (stops are
+  short — no Aho–Corasick). `Flush()` releases the held tail at end of stream.
+- **`StopChecker`** — the per-request composite: a `DetokenizerStream` (§M4-T10)
+  per id → the matcher, plus the id-based conditions. `Observe(id, count)` checks
+  **in priority order**: (1) the model EOS set (`GenerateOptions::eos_ids`), (2)
+  the request `stop_token_ids`, (3) `stop_strings` via the matcher, (4)
+  `max_tokens` (`count >= max_tokens`). The first three → `FinishReason::kStop`;
+  the last → `kLength`. An id-based stop (1/2) is **not trimmed** — its own text
+  and any matcher-held tail are released as real output (so an EOS that also
+  completes a stop string reports the id trigger, un-trimmed — the priority is
+  observable). A stop-string match (3) trims its bytes and everything after.
+  `Finish()` releases the held tail + the detokenizer's trailing residue, except
+  after a stop-string match (all post-match text is dropped). `stop_strings`
+  requires `options.tokenizer` — otherwise `Create` is `InvalidArgument`
+  (front-loaded). With no tokenizer, no text is produced (the token-only path the
+  fixture tests and benchmark use). A `finish_reason` (`stop` / `length`) and the
+  finer `StopTrigger` (`kEosId`/`kStopTokenId`/`kStopString`/`kMaxTokens`, for
+  M10's `stop_reason`) are on `GenerateResult`.
 
 ### 15.3 `Sampler` (M7-T01, stochastic branch M7-T02)
 
@@ -1134,9 +1183,11 @@ class Sampler {
 - **`Create`** validates (`ValidateSamplingParams`) and then rejects any
   parameter outside the *implemented* subset with **`Unimplemented`** naming the
   field — the same "not silently ignored" posture as `Backend::kOptimized`
-  before M6. As of T02 the implemented subset is temperature / top-k / top-p; the
-  penalty (T03), stop (T04) and logprobs (T05) guards remain. Each later ticket
-  removes its guard as it lands the stage. When `params.seed` is `nullopt`,
+  before M6. As of T04 the implemented subset is temperature / top-k / top-p /
+  penalties; **stop conditions are the loop's `StopChecker`, not the sampler's,
+  so `Create` accepts and ignores `stop_token_ids`/`stop_strings`**; only the
+  logprobs (T05) guard remains. Each later ticket removes its guard as it lands
+  the stage. When `params.seed` is `nullopt`,
   `Create` draws a nondeterministic seed once and exposes it via `seed()` (so the
   M10 API layer can echo the seed actually used).
 - **`Sample`** dispatches on the selection mode. `temperature == 0` → argmax with
@@ -1179,8 +1230,11 @@ regression the M5/M6 `generate.json` goldens (both backends) assert unchanged.
   (stage 1) wired into both branches of `Sample`; the HF/vLLM history convention
   above; exact hand-computed logit-adjustment tests (`sampling_penalties_test`)
   and an end-to-end greedy-trajectory test. See §15.2 stage 1.
-- **T04** stop conditions & `finish_reason` in the loop; stop-string matching
-  across token boundaries.
+- **T04** stop conditions & `finish_reason` — **done** (2026-08-19):
+  `src/engine/stop.{h,cpp}` (`StopStringMatcher` + `StopChecker`) wired into the
+  generation loop; `Generate` returns `GenerateResult` (finish reason + text),
+  the callback takes a `TokenEvent`; the sampler's two stop guards dropped. See
+  §15.2 stop paragraph and §10.
 - **T05** logprobs from the sampler's post-processing logits.
 - **T06** batched sampler (vectorized softmax/filter reusing M3/M6 kernels,
   partial-sort top-k, `parallel_for` across sequences, per-request Philox) —

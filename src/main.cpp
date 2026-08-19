@@ -8,7 +8,6 @@
 #include "model/registry.h"
 #include "sampling/params.h"
 #include "tensor/dtype.h"
-#include "tokenizer/detokenize.h"
 #include "tokenizer/tokenizer.h"
 
 #include <fmt/base.h>
@@ -46,7 +45,6 @@ using engine::model::BuildOptions;
 using engine::model::load_model;
 using engine::model::Model;
 using engine::sampling::SamplingParams;
-using engine::tokenizer::DetokenizerStream;
 using engine::tokenizer::Tokenizer;
 
 struct Args {
@@ -64,6 +62,8 @@ struct Args {
   float presence_penalty = 0.0F;
   float frequency_penalty = 0.0F;
   std::optional<std::uint64_t> seed;
+  std::vector<std::string> stop_strings;
+  std::vector<std::int32_t> stop_token_ids;
 };
 
 [[nodiscard]] Status ParseArgs(std::span<const std::string> argv, Args& out) {
@@ -122,6 +122,14 @@ struct Args {
       std::string n;
       RETURN_IF_ERROR(next(n));
       out.seed = static_cast<std::uint64_t>(std::stoull(n));
+    } else if (a == "--stop") {
+      std::string s;
+      RETURN_IF_ERROR(next(s));
+      out.stop_strings.push_back(s);
+    } else if (a == "--stop-token-id") {
+      std::string n;
+      RETURN_IF_ERROR(next(n));
+      out.stop_token_ids.push_back(static_cast<std::int32_t>(std::stol(n)));
     } else {
       return engine::core::InvalidArgumentError("unknown flag '{}'", a);
     }
@@ -165,8 +173,12 @@ struct Args {
   sampling.presence_penalty = args.presence_penalty;
   sampling.frequency_penalty = args.frequency_penalty;
   sampling.seed = args.seed;
+  sampling.stop_strings = args.stop_strings;
+  sampling.stop_token_ids = args.stop_token_ids;
   const GenerateOptions options{.sampling = sampling,
-                                .eos_ids = model->config().eos_token_ids};
+                                .eos_ids = model->config().eos_token_ids,
+                                .tokenizer = &tokenizer,
+                                .skip_special_tokens = true};
 
   fmt::print("model:   {}\n", args.model_dir);
   fmt::print("backend: {}\n", engine::engine::BackendName(args.backend));
@@ -178,25 +190,23 @@ struct Args {
   fmt::print("----\n{}", args.prompt);
   std::fflush(stdout);
 
-  DetokenizerStream stream(tokenizer, /*skip_special_tokens=*/true);
   std::int64_t emitted = 0;
   const auto t_gen0 = std::chrono::steady_clock::now();
   std::chrono::steady_clock::time_point t_first_token;
-  const auto on_token = [&](std::int32_t id) {
+  const auto on_token = [&](const engine::engine::TokenEvent& ev) {
     if (emitted == 0) {
       t_first_token = std::chrono::steady_clock::now();
     }
     ++emitted;
-    engine::core::StatusOr<std::string> piece = stream.push(id);
-    if (piece.ok() && !piece->empty()) {
-      fmt::print("{}", *piece);
+    if (!ev.text.empty()) {
+      fmt::print("{}", ev.text);
       std::fflush(stdout);
     }
   };
 
-  ASSIGN_OR_RETURN(const std::vector<std::int32_t> generated,
+  ASSIGN_OR_RETURN(const engine::engine::GenerateResult result,
                    Generate(*model, cache, prompt_ids, options, on_token));
-  fmt::print("{}", stream.finish());
+  const std::vector<std::int32_t>& generated = result.tokens;
   const auto t_gen1 = std::chrono::steady_clock::now();
 
   const double prefill_ms =
@@ -212,7 +222,8 @@ struct Args {
   const auto decode_steps =
       static_cast<double>(generated.empty() ? 0 : generated.size() - 1);
   fmt::print("\n----\n");
-  fmt::print("generated {} tokens\n", generated.size());
+  fmt::print("generated {} tokens (finish_reason: {})\n", generated.size(),
+             engine::engine::FinishReasonName(result.finish_reason));
   fmt::print("prefill: {:.1f} ms ({} prompt tokens, {:.1f} tok/s)\n",
              prefill_ms, prompt_ids.size(),
              prefill_ms > 0 ? static_cast<double>(prompt_ids.size()) /
@@ -243,7 +254,8 @@ int main(int argc, char** argv) {
                  "[--backend reference|optimized] [--max-new-tokens N] "
                  "[--cache-capacity N] [--no-bos] [--temperature T] "
                  "[--top-k K] [--top-p P] [--repetition-penalty R] "
-                 "[--presence-penalty P] [--frequency-penalty F] [--seed S]\n");
+                 "[--presence-penalty P] [--frequency-penalty F] [--seed S] "
+                 "[--stop STR]... [--stop-token-id N]...\n");
       return 2;
     }
     const Status status = RunGenerate(args);

@@ -17,8 +17,10 @@
 // M7-T02 added the stochastic branch (temperature scaling, top-k/top-p
 // filtering, a counter-based Philox draw keyed on `(seed, step)`); M7-T03 adds
 // stage 1, the history-based repetition/frequency/presence penalties, applied
-// before temperature and ahead of the greedy argmax alike. Any parameter whose
-// behaviour is still not implemented (logprobs, stop strings/ids) is rejected
+// before temperature and ahead of the greedy argmax alike. Stop conditions
+// (`stop_token_ids`/`stop_strings`, M7-T04) are the generation loop's
+// `StopChecker`, not the sampler's — `Create` accepts and ignores them. Any
+// parameter whose stage is still not implemented (logprobs, M7-T05) is rejected
 // up front by `Sampler::Create` with `Unimplemented`, so no requested knob is
 // ever silently ignored — each later ticket removes its guard as it lands the
 // stage.
@@ -48,7 +50,7 @@ class Sampler {
  public:
   // Build a sampler from `params`. Returns `InvalidArgument` if the params fail
   // `ValidateSamplingParams`, or `Unimplemented` (naming the field) for a
-  // parameter whose stage is not yet implemented (logprobs, stop conditions).
+  // parameter whose stage is not yet implemented (logprobs, M7-T05).
   // On success the returned sampler's `Sample` is guaranteed to be within the
   // implemented subset. When `params.seed` is `nullopt` a nondeterministic seed
   // is drawn once here and exposed via `seed()`.

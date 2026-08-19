@@ -20,26 +20,22 @@
 // greedy argmax too, so a penalty can move the chosen token. `temperature == 0`
 // is greedy argmax (over the penalized logits); `temperature > 0` runs the full
 // stochastic pipeline (penalties -> temperature -> top-k -> top-p -> Philox
-// categorical draw). The stop-condition (T04) and logprobs (T05) stages are
-// still guarded off at `Create` so a requested knob is never silently dropped.
+// categorical draw). Stop conditions (T04) are the generation loop's, not the
+// sampler's, so `Create` accepts `stop_token_ids`/`stop_strings` and ignores
+// them; only the logprobs (T05) stage is still guarded off so a requested knob
+// is never silently dropped.
 
 namespace engine::sampling {
 namespace {
 
-// True when `params` stays within the stages implemented through M7-T03: any
-// temperature, top-k, top-p and the three penalties (all handled by `Sample`),
-// but no stop machinery (T04 owns those in the loop) or logprobs (T05).
-// `ValidateSamplingParams` has already run, so the values are in range here.
+// True when `params` stays within the stages implemented through M7-T04: any
+// temperature, top-k, top-p and the three penalties (all handled by `Sample`).
+// The stop conditions (`stop_token_ids`/`stop_strings`, M7-T04) are the
+// generation loop's `StopChecker`, not the sampler's — the sampler ignores
+// them here — so only logprobs (T05) remains guarded. `ValidateSamplingParams`
+// has already run, so the values are in range here.
 [[nodiscard]] core::Status CheckImplementedSubset(
     const SamplingParams& params) {
-  if (!params.stop_token_ids.empty()) {
-    return core::UnimplementedError(
-        "stop_token_ids are not implemented until M7-T04");
-  }
-  if (!params.stop_strings.empty()) {
-    return core::UnimplementedError(
-        "stop_strings are not implemented until M7-T04");
-  }
   if (params.logprobs != 0) {
     return core::UnimplementedError(
         "logprobs are not implemented until M7-T05; got {}", params.logprobs);

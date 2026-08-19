@@ -1836,3 +1836,88 @@ plus the `Unimplemented`-before-generating case moved onto `logprobs`). The
 greedy `generate.json` goldens across `generator_test`/`qwen2_family_test`/
 `optimized_model_test` pass unchanged. Full ctest green; format + scoped tidy
 clean.
+
+### M7-T04 — Stop conditions & finish reasons (2026-08-19)
+
+Replaced the generation loop's EOS-and-max-tokens-only stopping with a full stop
+pipeline: the model EOS set, the request's `stop_token_ids` and `stop_strings`
+(matched on the incrementally detokenized stream, across token boundaries), and
+`max_tokens`, producing a `finish_reason` (`stop`/`length`). The machinery lives
+in the loop, not the sampler (design §15.2). `engine generate --stop "</s>"
+--stop-token-id 42` now trims output at a stop string and reports why it stopped.
+
+- **`src/engine/stop.{h,cpp}`** — new. `FinishReason{kStop,kLength}` +
+  `FinishReasonName`, and the finer `StopTrigger`
+  (`kNone/kEosId/kStopTokenId/kStopString/kMaxTokens`, for M10's `stop_reason`).
+  **`StopStringMatcher`** — a pure byte-stream matcher (no tokenizer dependency,
+  unit-testable in isolation, reusable by M9): `Feed(chunk)` appends and emits
+  the safe prefix, **holding back** the longest suffix that could still start a
+  stop string (so a stop split across `Feed`s is caught and the trailing text is
+  trimmed); earliest-occurrence match, ties broken by stop-list order; naive
+  O(held·Σ|stop|) scan; `Flush()` releases the held tail at stream end.
+  **`StopChecker`** — the per-request composite over a `DetokenizerStream`
+  (M4-T10): `Observe(id, count)` checks EOS → `stop_token_ids` → `stop_strings`
+  → `max_tokens` in that priority; id-based stops keep the token's text un-trimmed
+  and release the matcher's held tail, a stop-string match trims its bytes and
+  everything after; `Finish()` releases held/residual text except after a
+  stop-string match. `stop_strings` without a tokenizer → `Create` is
+  `InvalidArgument` (front-loaded); a null tokenizer runs the token-only path
+  (no text).
+- **`src/engine/generator.{h,cpp}`** — `GenerateOptions` gains
+  `const tokenizer::Tokenizer* tokenizer` (required iff `stop_strings` set) and
+  `bool skip_special_tokens`. **`Generate` now returns `GenerateResult`** (tokens,
+  `finish_reason`, `stop_trigger`, `matched_stop`, detokenized `text`) instead of
+  a bare `vector`, and the callback takes a **`TokenEvent`** (id + safe-to-emit
+  text delta; concatenated deltas equal `result.text`, the end-of-stream residue
+  folded into the finishing token's delta). The loop builds a `StopChecker` up
+  front (alongside the sampler — both validated before any forward), and a shared
+  `consume` lambda samples → appends → `Observe` → folds `Finish()` on the last
+  token → fires the callback. Capacity check, determinism, and greedy token
+  trajectory are unchanged.
+- **`src/sampling/sampler.{h,cpp}`** — `CheckImplementedSubset` drops the two
+  stop guards; the sampler now **accepts and ignores** `stop_token_ids`/
+  `stop_strings` (they are the loop's, not the sampler's). Only the logprobs
+  (T05) guard remains.
+- **CMake / edge**: `engine_engine` links **`engine::tokenizer` PUBLIC** (stop.h
+  / generator.h name it) — `engine → tokenizer` is an already-sanctioned ADR-002
+  edge, first used here; no ADR amendment. **Breaking API change** rippled through
+  6 call sites (main.cpp, bench_generate, generator/qwen2_family/optimized_model
+  tests): `Generate(...)` result is now `.tokens`, the callback signature is
+  `const TokenEvent&`. CLI gains repeatable `--stop STR` / `--stop-token-id N`
+  and prints `finish_reason`.
+
+**Non-obvious decisions.** (1) **Priority is EOS → stop_token → stop_string →
+max_tokens** (vLLM's), and it is *observable*: a token that is both EOS and
+completes a stop string reports `kEosId` with its text kept (an id-based stop is
+never trimmed), tested directly. (2) **The completing token is included in the
+ids** but its stop-string bytes (and anything after) are trimmed from `text` —
+matching vLLM's default `include_stop_str_in_output=false`. (3) **Streaming trim
+correctness**: the matcher holds back any pending stop-prefix so a streaming
+consumer never sees bytes that later turn out to be (part of) a stop string; on a
+non-stop-string finish the held tail is real output, released by `Finish()` into
+the last token's delta so concatenated deltas still equal `result.text`. (4)
+**Stop strings match bytewise**, not UTF-8-validated (an ill-formed stop could
+split a delta mid-codepoint) — left to the M10 request mapper, noted in stop.h.
+(5) The `StopStringMatcher` deliberately has **no tokenizer/model dependency** so
+it (and its cross-boundary tests) stand alone and M9's per-request loop can reuse
+it.
+
+Docs: model-execution.md §10 (new `GenerateResult`/`TokenEvent` snippet + M7-T04
+update note, stopping bullet), §15.2 (the landed stop paragraph: matcher +
+checker + priority), §15.3 (guard list), §15.5 (T04 done).
+
+Tests (+25 gtest cases → 992 green, 1022 ctest entries), portable C++
+(`engine`/`unit` labels, no SCALAR_PASS), deterministic: new **`stop_test`** (21
+— matcher: single-chunk / two-chunk / three-chunk splits, hold-back released when
+broken, overlap, earliest-occurrence + list-order tie-breaks, a UTF-8 stop split
+across chunks, `Flush` idempotence, unbounded-hold guard; checker over a
+synthetic byte-level BPE tokenizer: `max_tokens` exact + `length`, stop string
+across tokens with trailing trim, stop within a single token, EOS/stop-token
+`stop`, EOS-beats-stop-string priority, `max_tokens` releasing a held prefix,
+stop_strings-without-tokenizer `InvalidArgument`, null-tokenizer no-text);
+`generator_test` (+4 end-to-end: `max_tokens`→`kLength`, EOS→`kStop`/`kEosId`,
+`stop_token_ids`→`kStop`/`kStopTokenId` inclusive, stop_strings-without-tokenizer
+front-loaded `InvalidArgument`); `sampler_test` (2 reject→accept:
+`AcceptsStopTokenIds`/`AcceptsStopStrings`). The greedy `generate.json` goldens
+across `generator_test`/`qwen2_family_test`/`optimized_model_test` pass unchanged
+(the regression guarantee). Full ctest green; format + scoped tidy clean.

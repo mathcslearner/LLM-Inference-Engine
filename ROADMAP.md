@@ -974,7 +974,7 @@ OpenAI/vLLM semantics — documented choice) before temperature.
 **Acceptance criteria:**
 - Unit tests with hand-computed logit adjustments for each penalty type and combinations; no-op when at default values (exact logits equality).
 
-### M7-T04 · Stop conditions & finish reasons
+### M7-T04 · Stop conditions & finish reasons — ✅ DONE (2026-08-19)
 EOS handling (including multi-EOS token sets from config), stop-token ids, stop
 strings (matched on the incrementally-detokenized stream, handling stop strings that
 span token boundaries), max_tokens; produce `finish_reason` (stop/length).

@@ -187,16 +187,18 @@ TEST(SamplerTest, GreedyPenaltyRejectsOutOfRangeHistory) {
   EXPECT_TRUE(IsInvalidArgument(penalized.Sample(logits, ctx).status()));
 }
 
-TEST(SamplerTest, RejectsStopTokenIds) {
+// Stop conditions are the generation loop's StopChecker (M7-T04), not the
+// sampler's: Create accepts them and ignores them (no Unimplemented guard).
+TEST(SamplerTest, AcceptsStopTokenIds) {
   SamplingParams p = SamplingParams::Greedy(8);
   p.stop_token_ids = {7};
-  EXPECT_TRUE(IsUnimplemented(Sampler::Create(p).status()));
+  EXPECT_TRUE(Sampler::Create(p).ok());
 }
 
-TEST(SamplerTest, RejectsStopStrings) {
+TEST(SamplerTest, AcceptsStopStrings) {
   SamplingParams p = SamplingParams::Greedy(8);
   p.stop_strings = {"STOP"};
-  EXPECT_TRUE(IsUnimplemented(Sampler::Create(p).status()));
+  EXPECT_TRUE(Sampler::Create(p).ok());
 }
 
 TEST(SamplerTest, RejectsLogprobs) {

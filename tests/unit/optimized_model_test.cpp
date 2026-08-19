@@ -373,9 +373,9 @@ TEST(OptimizedModelTest, GreedyMatchesReferenceAndGolden) {
       SimpleKvCache co = FreshCache(*opt, 256);
       SimpleKvCache cr = FreshCache(*ref, 256);
       const std::vector<std::int32_t> got_opt =
-          Unwrap(Generate(*opt, co, c.prompt_ids, options));
+          Unwrap(Generate(*opt, co, c.prompt_ids, options)).tokens;
       const std::vector<std::int32_t> got_ref =
-          Unwrap(Generate(*ref, cr, c.prompt_ids, options));
+          Unwrap(Generate(*ref, cr, c.prompt_ids, options)).tokens;
       EXPECT_EQ(got_opt, c.generated_ids);  // vs HF golden
       EXPECT_EQ(got_opt, got_ref);          // vs reference backend
     }
@@ -390,9 +390,9 @@ TEST(OptimizedModelTest, GenerationIsDeterministic) {
   SimpleKvCache ca = FreshCache(*opt, 256);
   SimpleKvCache cb = FreshCache(*opt, 256);
   const std::vector<std::int32_t> a =
-      Unwrap(Generate(*opt, ca, c.prompt_ids, options));
+      Unwrap(Generate(*opt, ca, c.prompt_ids, options)).tokens;
   const std::vector<std::int32_t> b =
-      Unwrap(Generate(*opt, cb, c.prompt_ids, options));
+      Unwrap(Generate(*opt, cb, c.prompt_ids, options)).tokens;
   EXPECT_EQ(a, b);
 }
 

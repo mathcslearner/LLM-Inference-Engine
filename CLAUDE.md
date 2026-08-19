@@ -644,10 +644,32 @@ behind an existing subsystem):
   reject→accept/behavioural flips; generator +1 e2e penalty-trajectory, the
   Unimplemented-before-generating case moved onto `logprobs`) → 967 green (997
   ctest), deterministic; greedy `generate.json` goldens unchanged. format +
-  scoped tidy clean.
+  scoped tidy clean. T04 stop conditions & finish reasons (2026-08-19): the
+  generation loop's stopping generalized from EOS+max_tokens to the full set —
+  new `src/engine/stop.{h,cpp}`: `StopStringMatcher` (pure byte-stream trim,
+  holds back a pending stop-prefix so a stop string **split across token
+  boundaries** is caught and trailing text trimmed; earliest match, list-order
+  tie-break; no tokenizer/model dependency, reusable by M9) and `StopChecker`
+  (per-request composite over a `DetokenizerStream`: `Observe` checks EOS set →
+  request `stop_token_ids` → `stop_strings` → `max_tokens` **in that priority**,
+  id-based stops kept un-trimmed and releasing the matcher's held tail, a
+  stop-string match trimming its bytes + everything after; `stop_strings`
+  without a tokenizer → front-loaded `InvalidArgument`; null tokenizer = the
+  token-only path). `Generate` now returns **`GenerateResult`** (tokens +
+  `finish_reason`/`stop_trigger`/`matched_stop`/detok `text`) and the callback
+  takes a **`TokenEvent`** (id + safe-to-emit delta; concatenated deltas ==
+  `text`). `GenerateOptions` gains an optional `tokenizer`; `engine_engine`
+  links **`engine::tokenizer` PUBLIC** (ADR-002 diagram edge, first use, no
+  amendment). Sampler `CheckImplementedSubset` drops the two stop guards (now
+  accepts+ignores them; only logprobs guarded). Breaking API rippled through 6
+  call sites (`.tokens`, `TokenEvent` callback); CLI gains `--stop`/
+  `--stop-token-id` and prints `finish_reason`. design §10/§15.2/§15.3/§15.5
+  updated. +25 gtest cases (new `stop_test` 21; `generator_test` +4 e2e
+  finish-reason; `sampler_test` 2 reject→accept) → 992 green (1022 ctest),
+  deterministic; greedy `generate.json` goldens unchanged. format + scoped tidy
+  clean.
 
-Next up: **M7-T04** (stop conditions & finish reasons: EOS set, request
-`stop_token_ids` / `stop_strings` matched on the incrementally detokenized stream
-across token boundaries, and `max_tokens`, producing a `finish_reason`
-(`stop`/`length`); the machinery lives in the generation loop, not the sampler —
-drops the two stop `Unimplemented` guards in `CheckImplementedSubset`).
+Next up: **M7-T05** (logprobs: return the chosen-token logprob and top-N
+logprobs per step, computed from the same post-processing logits the sampler saw
+— documented OpenAI semantics; drops the last `Unimplemented` guard, `logprobs`,
+in `CheckImplementedSubset`).

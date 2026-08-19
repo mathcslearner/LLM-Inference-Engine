@@ -847,6 +847,12 @@ per request.
 > - **`finish` resets the carry**: a second `finish` returns `""` and the
 >   stream is reusable for a fresh id sequence. A rejected (out-of-range)
 >   `push` leaves the carried state untouched.
+>
+> **Consumer (M7-T04).** The generation loop's `StopChecker`
+> (`src/engine/stop.{h,cpp}`, model-execution.md §15.2) owns one
+> `DetokenizerStream` per request: it feeds each sampled id through `push`, then
+> matches `stop_strings` on the emitted text (across token boundaries) and
+> flushes the residue via `finish` at end of generation.
 
 ---
 

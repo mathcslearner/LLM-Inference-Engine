@@ -40,9 +40,11 @@ using engine::core::IsResourceExhausted;
 using engine::core::StatusOr;
 using engine::engine::Backend;
 using engine::engine::BackendName;
+using engine::engine::FinishReason;
 using engine::engine::Generate;
 using engine::engine::GenerateOptions;
 using engine::engine::ParseBackend;
+using engine::engine::StopTrigger;
 using engine::kvcache::CacheGeometry;
 using engine::kvcache::SimpleKvCache;
 using engine::model::BuildModel;
@@ -142,7 +144,7 @@ TEST(GeneratorTest, GreedyContinuationMatchesHfGolden) {
     const GenerateOptions options{.sampling = SamplingParams::Greedy(max_new),
                                   .eos_ids = {}};
     const std::vector<std::int32_t> got =
-        Unwrap(Generate(*model, cache, c.prompt_ids, options));
+        Unwrap(Generate(*model, cache, c.prompt_ids, options)).tokens;
     EXPECT_EQ(got, c.generated_ids) << "case " << c.name;
     // Peak cache occupancy: prompt + (max_new - 1) — the last token is produced
     // but never appended.
@@ -161,9 +163,9 @@ TEST(GeneratorTest, TwoRunsAreIdentical) {
   SimpleKvCache cache_a = FreshCache();
   SimpleKvCache cache_b = FreshCache();
   const std::vector<std::int32_t> run_a =
-      Unwrap(Generate(*model, cache_a, c.prompt_ids, options));
+      Unwrap(Generate(*model, cache_a, c.prompt_ids, options)).tokens;
   const std::vector<std::int32_t> run_b =
-      Unwrap(Generate(*model, cache_b, c.prompt_ids, options));
+      Unwrap(Generate(*model, cache_b, c.prompt_ids, options)).tokens;
   EXPECT_EQ(run_a, run_b);
 }
 
@@ -178,7 +180,7 @@ TEST(GeneratorTest, MaxNewTokensStops) {
     const GenerateOptions options{.sampling = SamplingParams::Greedy(n),
                                   .eos_ids = {}};
     const std::vector<std::int32_t> got =
-        Unwrap(Generate(*model, cache, c.prompt_ids, options));
+        Unwrap(Generate(*model, cache, c.prompt_ids, options)).tokens;
     ASSERT_EQ(static_cast<std::int64_t>(got.size()), n);
     // A prefix of the full golden continuation.
     for (std::int64_t i = 0; i < n; ++i) {
@@ -196,7 +198,7 @@ TEST(GeneratorTest, EosOnFirstTokenStopsImmediately) {
                                 .eos_ids = {c.generated_ids.front()}};
   SimpleKvCache cache = FreshCache();
   const std::vector<std::int32_t> got =
-      Unwrap(Generate(*model, cache, c.prompt_ids, options));
+      Unwrap(Generate(*model, cache, c.prompt_ids, options)).tokens;
   ASSERT_EQ(got.size(), 1U);
   EXPECT_EQ(got.front(), c.generated_ids.front());
 }
@@ -222,9 +224,80 @@ TEST(GeneratorTest, EosMidSequenceStopsAtFirstOccurrenceInclusive) {
   const GenerateOptions options{.sampling = SamplingParams::Greedy(40),
                                 .eos_ids = {eos}};
   const std::vector<std::int32_t> got =
-      Unwrap(Generate(*model, cache, c.prompt_ids, options));
+      Unwrap(Generate(*model, cache, c.prompt_ids, options)).tokens;
   EXPECT_EQ(got, expected);
   EXPECT_EQ(got.back(), eos);  // the EOS id is included
+}
+
+// ------------------------------------------------- finish reasons (M7-T04) --
+
+TEST(GeneratorTest, MaxTokensFinishReasonIsLength) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  const GenerateCase c = LoadGoldenCases().front();
+  SimpleKvCache cache = FreshCache();
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(7),
+                                .eos_ids = {}};
+  const engine::engine::GenerateResult r =
+      Unwrap(Generate(*model, cache, c.prompt_ids, options));
+  EXPECT_EQ(r.tokens.size(), 7U);
+  EXPECT_EQ(r.finish_reason, FinishReason::kLength);
+  EXPECT_EQ(r.stop_trigger, StopTrigger::kMaxTokens);
+  EXPECT_TRUE(r.text.empty()) << "no tokenizer supplied → no text";
+}
+
+TEST(GeneratorTest, EosFinishReasonIsStop) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  const GenerateCase c = LoadGoldenCases().front();
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(40),
+                                .eos_ids = {c.generated_ids.front()}};
+  SimpleKvCache cache = FreshCache();
+  const engine::engine::GenerateResult r =
+      Unwrap(Generate(*model, cache, c.prompt_ids, options));
+  ASSERT_EQ(r.tokens.size(), 1U);
+  EXPECT_EQ(r.finish_reason, FinishReason::kStop);
+  EXPECT_EQ(r.stop_trigger, StopTrigger::kEosId);
+}
+
+TEST(GeneratorTest, StopTokenIdStopsWithStopReason) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  const std::vector<GenerateCase> cases = LoadGoldenCases();
+  const GenerateCase& c = cases.back();
+  ASSERT_GE(c.generated_ids.size(), 5U);
+  const std::int32_t stop_id = c.generated_ids[4];
+
+  std::vector<std::int32_t> expected;
+  for (const std::int32_t id : c.generated_ids) {
+    expected.push_back(id);
+    if (id == stop_id) {
+      break;
+    }
+  }
+
+  // The request's stop_token_ids (SamplingParams), distinct from the model's
+  // eos_ids — routed through the loop's StopChecker, not the sampler.
+  SamplingParams sampling = SamplingParams::Greedy(40);
+  sampling.stop_token_ids = {stop_id};
+  SimpleKvCache cache = FreshCache();
+  const engine::engine::GenerateResult r = Unwrap(Generate(
+      *model, cache, c.prompt_ids, {.sampling = sampling, .eos_ids = {}}));
+  EXPECT_EQ(r.tokens, expected);
+  EXPECT_EQ(r.tokens.back(), stop_id);
+  EXPECT_EQ(r.finish_reason, FinishReason::kStop);
+  EXPECT_EQ(r.stop_trigger, StopTrigger::kStopTokenId);
+}
+
+TEST(GeneratorTest, StopStringsWithoutTokenizerIsInvalidArgument) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  SimpleKvCache cache = FreshCache();
+  const std::vector<std::int32_t> prompt = {1, 5, 9};
+  SamplingParams sampling = SamplingParams::Greedy(8);
+  sampling.stop_strings = {"stop"};
+  // No options.tokenizer → front-loaded InvalidArgument, cache untouched.
+  const auto got =
+      Generate(*model, cache, prompt, {.sampling = sampling, .eos_ids = {}});
+  ASSERT_FALSE(got.ok());
+  EXPECT_TRUE(IsInvalidArgument(got.status()));
+  EXPECT_EQ(cache.length(), 0);
 }
 
 // ------------------------------------------------------ token callback --
@@ -239,11 +312,13 @@ TEST(GeneratorTest, OnTokenFiresOncePerIdInOrderBeforeNextForward) {
   std::vector<std::int64_t> cache_len_at_callback;
   const GenerateOptions options{.sampling = SamplingParams::Greedy(16),
                                 .eos_ids = {}};
-  const std::vector<std::int32_t> got = Unwrap(
-      Generate(*model, cache, c.prompt_ids, options, [&](std::int32_t id) {
-        streamed.push_back(id);
-        cache_len_at_callback.push_back(cache.length());
-      }));
+  const std::vector<std::int32_t> got =
+      Unwrap(Generate(*model, cache, c.prompt_ids, options,
+                      [&](const engine::engine::TokenEvent& ev) {
+                        streamed.push_back(ev.id);
+                        cache_len_at_callback.push_back(cache.length());
+                      }))
+          .tokens;
 
   // Fired exactly once per returned id, in the same order.
   EXPECT_EQ(streamed, got);
@@ -286,7 +361,7 @@ TEST(GeneratorTest, ContinuationFromNonEmptyCacheMatchesFullPrompt) {
   const GenerateOptions options{.sampling = SamplingParams::Greedy(n),
                                 .eos_ids = {}};
   const std::vector<std::int32_t> got =
-      Unwrap(Generate(*model, cache, tail, options));
+      Unwrap(Generate(*model, cache, tail, options)).tokens;
   for (std::int64_t i = 0; i < n; ++i) {
     EXPECT_EQ(got[static_cast<std::size_t>(i)],
               c.generated_ids[static_cast<std::size_t>(i)])
@@ -381,14 +456,16 @@ TEST(GeneratorTest, RepetitionPenaltyAltersGreedyTrajectory) {
   const std::vector<std::int32_t> plain =
       Unwrap(Generate(*model, plain_cache, prompt,
                       GenerateOptions{.sampling = SamplingParams::Greedy(kNew),
-                                      .eos_ids = {}}));
+                                      .eos_ids = {}}))
+          .tokens;
 
   SamplingParams penalized = SamplingParams::Greedy(kNew);
   penalized.repetition_penalty = 100.0F;
   SimpleKvCache pen_cache = FreshCache();
   const std::vector<std::int32_t> pen =
       Unwrap(Generate(*model, pen_cache, prompt,
-                      GenerateOptions{.sampling = penalized, .eos_ids = {}}));
+                      GenerateOptions{.sampling = penalized, .eos_ids = {}}))
+          .tokens;
 
   ASSERT_EQ(plain.size(), static_cast<std::size_t>(kNew));
   ASSERT_EQ(pen.size(), static_cast<std::size_t>(kNew));
@@ -398,7 +475,8 @@ TEST(GeneratorTest, RepetitionPenaltyAltersGreedyTrajectory) {
   SimpleKvCache pen_cache2 = FreshCache();
   const std::vector<std::int32_t> pen2 =
       Unwrap(Generate(*model, pen_cache2, prompt,
-                      GenerateOptions{.sampling = penalized, .eos_ids = {}}));
+                      GenerateOptions{.sampling = penalized, .eos_ids = {}}))
+          .tokens;
   EXPECT_EQ(pen, pen2);
 }
 
@@ -422,9 +500,9 @@ TEST(GeneratorTest, StochasticGenerationSameSeedIsIdentical) {
   SimpleKvCache cache_a = FreshCache();
   SimpleKvCache cache_b = FreshCache();
   const std::vector<std::int32_t> run_a =
-      Unwrap(Generate(*model, cache_a, c.prompt_ids, options));
+      Unwrap(Generate(*model, cache_a, c.prompt_ids, options)).tokens;
   const std::vector<std::int32_t> run_b =
-      Unwrap(Generate(*model, cache_b, c.prompt_ids, options));
+      Unwrap(Generate(*model, cache_b, c.prompt_ids, options)).tokens;
   EXPECT_EQ(run_a, run_b);
   EXPECT_EQ(run_a.size(), 24U);
 }
@@ -434,12 +512,16 @@ TEST(GeneratorTest, StochasticGenerationDifferentSeedsDiffer) {
   const GenerateCase c = LoadGoldenCases().front();
   SimpleKvCache cache_a = FreshCache();
   SimpleKvCache cache_b = FreshCache();
-  const std::vector<std::int32_t> run_a = Unwrap(
-      Generate(*model, cache_a, c.prompt_ids,
-               {.sampling = StochasticParams(24, /*seed=*/1), .eos_ids = {}}));
-  const std::vector<std::int32_t> run_b = Unwrap(
-      Generate(*model, cache_b, c.prompt_ids,
-               {.sampling = StochasticParams(24, /*seed=*/2), .eos_ids = {}}));
+  const std::vector<std::int32_t> run_a =
+      Unwrap(Generate(
+                 *model, cache_a, c.prompt_ids,
+                 {.sampling = StochasticParams(24, /*seed=*/1), .eos_ids = {}}))
+          .tokens;
+  const std::vector<std::int32_t> run_b =
+      Unwrap(Generate(
+                 *model, cache_b, c.prompt_ids,
+                 {.sampling = StochasticParams(24, /*seed=*/2), .eos_ids = {}}))
+          .tokens;
   EXPECT_NE(run_a, run_b);
 }
 
@@ -450,8 +532,10 @@ TEST(GeneratorTest, StochasticGenerationWithNulloptSeedRuns) {
   sampling.max_tokens = 8;
   sampling.temperature = 0.8F;  // seed nullopt -> engine-chosen
   SimpleKvCache cache = FreshCache();
-  const std::vector<std::int32_t> got = Unwrap(Generate(
-      *model, cache, c.prompt_ids, {.sampling = sampling, .eos_ids = {}}));
+  const std::vector<std::int32_t> got =
+      Unwrap(Generate(*model, cache, c.prompt_ids,
+                      {.sampling = sampling, .eos_ids = {}}))
+          .tokens;
   EXPECT_EQ(got.size(), 8U);
 }
 

@@ -163,7 +163,19 @@ engine_add_tests(TREE unit SOURCES
 # `ctest -L engine` iterate the execution suite alone.
 engine_add_tests(TREE unit SOURCES
   generator_test.cpp
-  DEPS engine::engine engine::model engine::kvcache nlohmann_json::nlohmann_json
+  DEPS engine::engine engine::model engine::kvcache engine::tokenizer
+       nlohmann_json::nlohmann_json
+  LABELS engine)
+
+# stop_test (M7-T04): the stop-condition machinery (engine/stop.{h,cpp}) —
+# the streaming StopStringMatcher (cross-token matches, trailing-text trim,
+# hold-back, earliest/longest tie-break) and the StopChecker composite
+# (EOS/stop_token/stop_string/max_tokens priority, finish_reason, deltas
+# concatenating to the full text) over a synthetic byte-level BPE tokenizer.
+# No model dependency, so no SCALAR_PASS. `engine` label.
+engine_add_tests(TREE unit SOURCES
+  stop_test.cpp
+  DEPS engine::engine engine::tokenizer
   LABELS engine)
 
 # qwen2_family_test (M5-T10): the Qwen-family reference path on the shared M5

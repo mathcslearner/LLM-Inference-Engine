@@ -256,13 +256,13 @@ struct RunResult {
 
   std::vector<Clock::time_point> stamps;
   stamps.reserve(static_cast<std::size_t>(new_tokens));
-  const auto on_token = [&](std::int32_t /*id*/) {
+  const auto on_token = [&](const engine::engine::TokenEvent& /*ev*/) {
     stamps.push_back(Clock::now());
   };
 
   const Clock::time_point t0 = Clock::now();
   const std::vector<std::int32_t> generated =
-      Unwrap(Generate(model, cache, prompt_ids, options, on_token));
+      Unwrap(Generate(model, cache, prompt_ids, options, on_token)).tokens;
   if (stamps.empty()) {
     fmt::print(stderr, "fatal: generation produced no tokens\n");
     std::exit(1);

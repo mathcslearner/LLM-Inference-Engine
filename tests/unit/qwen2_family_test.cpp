@@ -324,7 +324,7 @@ TEST(Qwen2FamilyTest, GreedyContinuationMatchesHfGolden) {
     const GenerateOptions options{.sampling = SamplingParams::Greedy(max_new),
                                   .eos_ids = {}};
     const std::vector<std::int32_t> got =
-        Unwrap(Generate(*model, cache, c.prompt_ids, options));
+        Unwrap(Generate(*model, cache, c.prompt_ids, options)).tokens;
     EXPECT_EQ(got, c.generated_ids) << "case " << c.name;
     EXPECT_EQ(cache.length(),
               static_cast<std::int64_t>(c.prompt_ids.size()) + max_new - 1)
@@ -341,9 +341,9 @@ TEST(Qwen2FamilyTest, GenerationIsDeterministic) {
   SimpleKvCache cache_a = FreshCache();
   SimpleKvCache cache_b = FreshCache();
   const std::vector<std::int32_t> run_a =
-      Unwrap(Generate(*model, cache_a, c.prompt_ids, options));
+      Unwrap(Generate(*model, cache_a, c.prompt_ids, options)).tokens;
   const std::vector<std::int32_t> run_b =
-      Unwrap(Generate(*model, cache_b, c.prompt_ids, options));
+      Unwrap(Generate(*model, cache_b, c.prompt_ids, options)).tokens;
   EXPECT_EQ(run_a, run_b);
 }
 
@@ -360,14 +360,15 @@ TEST(Qwen2FamilyTest, ContinuationFromNonEmptyCacheMatchesFullRun) {
   const GenerateOptions options{.sampling = SamplingParams::Greedy(20),
                                 .eos_ids = {}};
   const std::vector<std::int32_t> whole =
-      Unwrap(Generate(*model, full, c.prompt_ids, options));
+      Unwrap(Generate(*model, full, c.prompt_ids, options)).tokens;
 
   // Split: prefill a prefix by generating 1 token, then continue from the
   // populated cache with the extended prompt. The concatenation must match.
   SimpleKvCache split = FreshCache();
   const std::vector<std::int32_t> first =
       Unwrap(Generate(*model, split, c.prompt_ids,
-                      {.sampling = SamplingParams::Greedy(1), .eos_ids = {}}));
+                      {.sampling = SamplingParams::Greedy(1), .eos_ids = {}}))
+          .tokens;
   ASSERT_EQ(first.size(), 1U);
   std::vector<std::int32_t> extended = c.prompt_ids;
   extended.push_back(first.front());
@@ -376,7 +377,8 @@ TEST(Qwen2FamilyTest, ContinuationFromNonEmptyCacheMatchesFullRun) {
   const std::span<const std::int32_t> tail(&extended.back(), 1);
   const std::vector<std::int32_t> rest =
       Unwrap(Generate(*model, split, tail,
-                      {.sampling = SamplingParams::Greedy(19), .eos_ids = {}}));
+                      {.sampling = SamplingParams::Greedy(19), .eos_ids = {}}))
+          .tokens;
 
   std::vector<std::int32_t> stitched = first;
   stitched.insert(stitched.end(), rest.begin(), rest.end());
