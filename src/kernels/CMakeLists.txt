@@ -29,6 +29,11 @@ add_library(engine_kernels STATIC
   # fp16/bf16->fp32 widen, dispatched through the existing convert variants; the
   # gather itself is inherently scalar (optimized-cpu-execution.md §2, §7).
   embedding.cpp
+  # kv_scatter.cpp has no per-ISA TU (M8-T04): the paged KV write is a pure
+  # fp32->fp32 memcpy per (token, head) — Class E, bit-identical across ISAs and
+  # thread counts, so a single scalar TU ships (paged-kv-cache.md §9.1), like the
+  # embedding gather above.
+  kv_scatter.cpp
   scalar/probe.cpp
   scalar/elementwise.cpp
   scalar/reduce.cpp

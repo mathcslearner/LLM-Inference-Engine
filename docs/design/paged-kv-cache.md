@@ -674,6 +674,38 @@ paths but this deliberate, tested fast path. The default-implemented virtual
 `kv_cache.h`'s class comment is amended (T04) to document `paged_view` and the
 now-permitted `kvcache → kernels` edge.
 
+**M8-T04 implementation notes** (as built, `src/kvcache/paged_cache.{h,cpp}` —
+additive clarifications of §8, no divergence):
+
+- **Construction cannot fail.** `PagedKvCache(BlockPool* pool)` is a plain
+  constructor (CHECK non-null pool), not a `StatusOr` factory — the slabs were
+  allocated when the pool was created, so nothing here allocates. Move-only,
+  mirroring `BlockTable`/`BlockPool`: move-construct (moved-from left empty via
+  the block table's own move), move-assign deleted.
+- **The layer protocol is enforced, not merely assumed.** `next_layer_` (0
+  between forwards) tracks the expected layer: an append whose `layer !=
+  next_layer_` is `InvalidArgument`, and a `layer > 0` append whose `T` differs
+  from the layer-0 batch is `InvalidArgument` — so an out-of-order, repeated, or
+  short append is rejected rather than corrupting the cache. Layer 0 grows the
+  table (all-or-nothing) and records the slot mapping in `pending_slots_`;
+  layers 1..L−1 reuse it; `next_layer_ = (layer + 1) % L` marks the forward
+  complete on wrap. `truncate` resets `pending_slots_`/`next_layer_` (a truncate
+  between or mid-forward re-opens the protocol at layer 0). This is stricter
+  than §8.2's "documented contract" — the design left it to the caller; the
+  implementation checks it, since the cost is one integer compare off the write.
+- **`view(layer)` is `Unimplemented` in T04**, deferred to the M8-T06 paged
+  gather (§9.3) whose body it will become. The decode path never calls it — it
+  reads through `paged_view` (§8.3) with zero copy — so nothing consumes `view`
+  until T06 wires the prefill read path. `SimpleKvCache::view` is unaffected.
+- **`capacity()` reports `num_blocks·bs + free_blocks·bs`** (owned-slot capacity,
+  which includes the partial tail block's still-free slots, plus the free pool),
+  a small correction to §8.1's `num_tokens + free_blocks·bs`: the latter
+  under-counts the tail block's free slots and would make `Generate`'s up-front
+  check (and the models' `length()+T > capacity()` guard) spuriously reject
+  tokens that fit in an already-owned block. It stays **advisory** (a shared
+  pool's free blocks may be taken by another sequence first — the binding check
+  is `append`'s per-forward `ResourceExhausted`, M8-T08).
+
 ---
 
 ## 9. Kernels
@@ -705,6 +737,14 @@ writes land in the exact expected block/offset, verified by reading back and
 comparing against an **independently-simulated** paged layout (a test-local
 plain-array model), across boundary-straddling prefills and single-token
 decodes.
+
+**As built** (`src/kernels/kv_scatter.{h,cpp}`): the signature is §9.1 verbatim.
+Tokens are the unit of `parallel_for` work (grain 16 = one `bs=16` block's
+tokens per worker), each writing disjoint slots — race-free and thread-count
+bit-identical trivially (a copy has no reduction). Because there is no
+dispatched (per-ISA) path — a single scalar TU ships — `kv_scatter_test`
+registers **no `SCALAR_PASS`** (the forced-scalar pass would rerun the identical
+bytes); the design's §12 M8-T04 entry is read accordingly.
 
 ### 9.2 `PagedDecodeAttentionF32` (M8-T05) — decode through the block table
 

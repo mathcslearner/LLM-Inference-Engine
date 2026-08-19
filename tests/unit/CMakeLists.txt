@@ -137,6 +137,25 @@ engine_add_tests(TREE unit SOURCES
   block_table_test.cpp
   DEPS engine::kvcache engine::tensor)
 
+# kv_scatter_test (M8-T04): the paged KV-write kernel (KvScatterF32) vs an
+# independently-simulated paged layout, across boundary-straddling prefills and
+# single-token decodes, plus geometry sweep, permuted mappings, and exact
+# bit-pattern preservation. Pure memcpy (Class E), single scalar TU, no
+# dispatched path — so no SCALAR_PASS. `kernels` label.
+engine_add_tests(TREE unit SOURCES
+  kv_scatter_test.cpp
+  DEPS engine::kernels
+  LABELS kernels)
+
+# paged_cache_test (M8-T04): PagedKvCache over BlockPool + BlockTable — the
+# layer-0-grows/layers-reuse append protocol, the KvScatterF32 write verified by
+# reading back through paged_view, front-loaded validation, the ordering
+# protocol, layer-0 exhaustion, truncate/reset, RAII reclamation, and pool
+# sharing. The scatter kernel is ISA-independent (Class E), so no SCALAR_PASS.
+engine_add_tests(TREE unit SOURCES
+  paged_cache_test.cpp
+  DEPS engine::kvcache engine::tensor)
+
 # model_test (M5-T07): the DecoderLayer/Mlp modules, ReferenceModel end-to-end
 # logits vs activations.safetensors, the per-layer activation hook, kLast/kAll
 # consistency, and the KV-cache invariant elevated to full-model logits. Uses

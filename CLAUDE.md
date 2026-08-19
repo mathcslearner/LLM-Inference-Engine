@@ -786,19 +786,52 @@ behind an existing subsystem):
   prefill/decode slot mappings at `bs = 8` with a primed free list, all-or-
   nothing exhaustion rollback, truncate/free/move, death tests) → **1108
   green**. design §7.2 updated to `bs = 8` + an "as built" notes block.
-  Format + scoped tidy clean.
+  Format + scoped tidy clean. T04 KV-write (scatter) kernel & `PagedKvCache`:
+  new `src/kernels/kv_scatter.{h,cpp}` (`KvScatterF32(src_k, src_v,
+  slot_mapping, T, Hkv, d, bs, k_slab, v_slab)` — writes token-major `[T,Hkv,d]`
+  K/V into the paged slabs at the block table's slot mapping, a pure fp32→fp32
+  `memcpy` of `d` floats per (token, head): **Class E** bit-exact, **single
+  scalar TU** no per-ISA variant like the M6-T06 embedding gather,
+  `parallel_for` over tokens with disjoint slots) and
+  `src/kvcache/paged_cache.{h,cpp}` (`PagedKvCache : KvCache` — the paged impl
+  of the M5 interface; composes `BlockPool*` + one `BlockTable`).
+  `append(layer,k,v)` front-loads `SimpleKvCache`-identical validation, then
+  **layer 0 grows the table** all-or-nothing (`AppendTokens` → `pending_slots_`,
+  a `ResourceExhausted` aborting the forward with nothing written) and **layers
+  1..L−1 reuse** that slot mapping, scattering each layer's slabs (§8.2); the
+  **per-forward layer protocol is enforced** via `next_layer_`
+  (out-of-order/repeated/wrong-`T` append → `InvalidArgument`, stricter than
+  §8.2's documented contract). `length()` = committed tokens (one table, all
+  layers agree); `capacity()` advisory `num_blocks·bs + free·bs` (corrects §8.1,
+  which under-counts the partial-tail free slots); `truncate` delegates +
+  resets the pending forward; `view` `Unimplemented` until the M8-T06 gather
+  (decode uses `paged_view`). The interface gains **one additive virtual**,
+  `paged_view(layer)` → `PagedKvView` (slab bases + block-table ptr + strides),
+  default-`Unimplemented` on `KvCache`, overridden zero-copy by `PagedKvCache`
+  (the decode fast path, §8.3) — the only consumer change M8-T07 needs.
+  **`kvcache → kernels` PRIVATE downward edge added** (ADR-002-permitted, no
+  amendment; `paged_cache.h` stays kernels-free); stale "arrives with M8-T04"
+  comments in `block_pool.h`/`block_table.h` refreshed. +25 tests (new
+  `kv_scatter_test` 8, `kernels` label, no SCALAR_PASS — readback vs an
+  independently-simulated paged layout across a non-monotonic-block straddling
+  prefill, mid-block/fresh-block decodes, geometry sweep, 1000-token permuted
+  mapping, exact bit-pattern fidelity; new `paged_cache_test` 16, `unit` — the
+  §7.2 walk verified through `paged_view`, token-by-token == batched, front-
+  loaded validation, the layer protocol, layer-0 exhaustion + recovery,
+  truncate/reset, RAII, pool sharing; +1 `simple_cache_test` default-`paged_view`)
+  → **1133 green**. design §8/§9.1 gained "as built" notes; format + scoped tidy
+  clean (kv_cache.h header edit → full includer set swept).
 
-Next up: **M8-T04** (`src/kernels/kv_scatter.{h,cpp}` + `KvScatterF32`, and
-`src/kvcache/paged_cache.{h,cpp}` — `PagedKvCache : KvCache`): the paged append.
-`KvScatterF32(src_k, src_v, slot_mapping, T, Hkv, d, bs, k_slab, v_slab)` writes
-`[T,Hkv,d]` token-major K/V into the paged slabs at the block table's slot
-mapping — a pure `memcpy` of `d` floats per (token, head), Class E (bit-exact),
-single TU, no per-ISA variant (like the M6 embedding gather). `PagedKvCache`
-composes `BlockPool` + `BlockTable`: `append(layer,k,v)` grows the table on the
-`layer == 0` call and reuses the slot mapping for layers 1..L−1 (§8.2), then
-scatters; `view(layer)` gathers via `paged_gather` (M8-T06). Adds the
-**`kvcache → kernels`** downward edge (ADR-002-permitted, no amendment;
-`engine_kvcache … PRIVATE engine::kernels`) and updates the stale "never links
-kernels" comment in `kv_cache.h`. Per paged-kv-cache.md §8.2/§9.1: readback vs
-an independently-simulated paged layout across boundary-straddling prefills and
-single-token decodes, front-loaded append validation.
+Next up: **M8-T05** (`src/kernels/paged_attention.{h,cpp}` +
+`PagedDecodeAttentionF32`, per-ISA TUs): decode attention reading K/V through
+the block table. Reuses M6-T05's `DecodeUnitsImpl`/`DecodeGroupSlice`
+recurrence (the four `Ops` primitives) but walks the block table instead of a
+contiguous `k_head + s·d`; because `bs | kAttnKb=64` (§4), a 64-key online-
+softmax unit spans `64/bs` whole blocks, so per fixed query head the arithmetic
+order is identical to `DecodeAttentionF32` → **bit-identical by construction**
+(the M8-T05 acceptance: matches the M6-T05 contiguous kernel exactly for cache
+lengths crossing many blocks, incl. length exactly at a block boundary), and
+threaded across `Hkv` kv heads. Consumed via `PagedKvCache::paged_view` (the
+zero-copy fast path landed in T04) with a `view()`+contiguous-kernel fallback
+for `SimpleKvCache`. Per paged-kv-cache.md §9.2; `SCALAR_PASS`, AVX2 blind +
+CI-proven.

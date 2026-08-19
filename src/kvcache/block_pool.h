@@ -35,11 +35,11 @@
 // rc ≥ 1 is never rewritten in place because sequences only append to their
 // exclusive rc-1 tail — is stated in §6.4.
 //
-// Layering (ADR-002 Amendment 5): `kvcache` links `tensor`/`memory`/`core`
-// only. This header takes `memory::Allocator*`, so `engine::memory` is a PUBLIC
-// link dependency of `engine_kvcache`. No kernels are linked by M8-T02 (the
-// `kvcache → kernels` downward edge lands with the scatter/decode kernels in
-// M8-T04).
+// Layering (ADR-002 Amendment 5): `kvcache` links `tensor`/`memory`/`core`, and
+// — as of M8-T04 — the downward `kvcache → kernels` edge (the paged
+// scatter/decode kernels). This header takes `memory::Allocator*`, so
+// `engine::memory` is a PUBLIC link dependency of `engine_kvcache`; `BlockPool`
+// itself links no kernel (it is pure bookkeeping).
 
 namespace engine::kvcache {
 

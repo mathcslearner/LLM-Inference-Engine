@@ -338,4 +338,12 @@ TEST(SimpleKvCacheTest, TwoCachesAreIndependent) {
   EXPECT_EQ(b.length(), 0);
 }
 
+// The contiguous cache does not support the paged decode fast path (§8.3): the
+// interface's default `paged_view` is Unimplemented, so the consumer falls back
+// to `view()` + the contiguous decode kernel.
+TEST(SimpleKvCacheTest, PagedViewIsUnimplemented) {
+  const SimpleKvCache cache = Unwrap(SimpleKvCache::Create(Geom(2, 2, 4), 8));
+  EXPECT_TRUE(IsUnimplemented(cache.paged_view(0).status()));
+}
+
 }  // namespace

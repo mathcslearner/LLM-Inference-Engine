@@ -1040,7 +1040,7 @@ token positions, free-on-completion.
 **Acceptance criteria:**
 - Unit tests: growth across block boundaries, slot mappings for prefill (T tokens) and decode (1 token) hand-verified, blocks returned to pool on free.
 
-### M8-T04 · KV write (scatter) kernel
+### M8-T04 · KV write (scatter) kernel — ✅ DONE (2026-08-19)
 Kernel writing a batch of new K/V vectors into paged storage given a slot mapping
 (one entry per token). Replaces the contiguous append path.
 **Depends on:** M8-T03.

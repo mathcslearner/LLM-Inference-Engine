@@ -22,12 +22,20 @@
 // pure-interface + POD — no implementation lives here.
 //
 // Layering (ADR-002 Amendment 5): `kvcache` is a layer-2 domain module linking
-// only `tensor`/`memory`/`core`; it never links `model`. The new `model →
-// kvcache` edge (`Attention` holds a `KvCache&`) is one-directional.
+// only `tensor`/`memory`/`core` — and, as of M8-T04, the downward
+// `kvcache → kernels` edge (the paged scatter/decode kernels; ADR-002 permits a
+// layer-2→1 edge without amendment, as `model → kernels`). It never links
+// `model`. The `model → kvcache` edge (`Attention` holds a `KvCache&`) is
+// one-directional.
 //
 // The interface header lands with M5-T05 (not T06) because the `Attention`
 // module consumes it; `SimpleKvCache`, the v0 contiguous implementation, and
-// the token-by-token KV invariant test land with M5-T06 (§6.2).
+// the token-by-token KV invariant test land with M5-T06 (§6.2). M8-T04 adds
+// `PagedKvCache` (a shared block pool + per-sequence block table) as a second
+// implementation of this exact interface, plus one additive accessor —
+// `paged_view` — the paged decode fast path needs (§8.3); every other consumer
+// (`Attention`, the generation loop) is oblivious to which implementation it
+// holds.
 
 namespace engine::kvcache {
 
@@ -49,6 +57,24 @@ struct CacheGeometry {
 struct KvView {
   tensor::Tensor k;  // [Hkv, len, d], contiguous, head-major
   tensor::Tensor v;  // [Hkv, len, d]
+};
+
+// A zero-copy read view of one layer's paged K/V, addressed **through** a block
+// table (paged-kv-cache.md §8.3). A paged cache cannot hand back a single
+// contiguous `[Hkv, len, d]` slice (the history is scattered across blocks), so
+// the decode fast path (M8-T05 `PagedDecodeAttentionF32`) reads slabs + block
+// table directly instead of paying a full-history gather every step. Valid
+// until the next `append`/`truncate` to this sequence. `SimpleKvCache` does not
+// support it (default `Unimplemented`); `PagedKvCache` overrides `paged_view`.
+struct PagedKvView {
+  const float* k_slab = nullptr;              // layer's K slab base
+  const float* v_slab = nullptr;              // layer's V slab base
+  const std::int32_t* block_table = nullptr;  // logical→physical, this sequence
+  std::int64_t num_blocks = 0;                // valid entries in block_table
+  int block_size = 0;                         // bs
+  std::int64_t length = 0;        // committed tokens (last block partial)
+  std::int64_t block_stride = 0;  // Hkv·bs·d — one block id's float span
+  // Hkv, d come from geometry().
 };
 
 // Per-sequence, all-layers, device-agnostic KV cache (model-execution.md §6.1).
@@ -78,6 +104,17 @@ class KvCache {
   // appended this forward — head-major `[Hkv, fill, d]`. Valid until the next
   // append to this layer. An out-of-range `layer` is `InvalidArgument`.
   [[nodiscard]] virtual core::StatusOr<KvView> view(int layer) const = 0;
+
+  // Zero-copy paged view of `layer` (the decode fast path — §8.3). The default
+  // is `Unimplemented`: a contiguous cache (`SimpleKvCache`) cannot provide
+  // one, and the consumer (`OptimizedModel::forward`) falls back to `view()` +
+  // the contiguous decode kernel when it sees `Unimplemented`. `PagedKvCache`
+  // overrides it. An out-of-range `layer` is `InvalidArgument`.
+  [[nodiscard]] virtual core::StatusOr<PagedKvView> paged_view(
+      int layer) const {
+    (void)layer;
+    return core::UnimplementedError("paged_view: cache is not paged");
+  }
 
   // Drop everything after `new_length` tokens (per layer). `truncate(0)` ==
   // `reset`. A `new_length` above the current length, or negative, is

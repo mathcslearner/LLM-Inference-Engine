@@ -2269,3 +2269,75 @@ lifetimes; move (moved-from emptied, source destruction releases nothing); and
 death tests (null pool, `slot` out-of-range / on-empty). Design §7.2 updated to
 `bs = 8` with an "as built" notes block. **1085 → 1108 ctest green** (+23).
 Format + scoped tidy clean.
+
+### M8-T04 — KV write (scatter) kernel & PagedKvCache (2026-08-19)
+
+New **`src/kernels/kv_scatter.{h,cpp}`** — `KvScatterF32`, the paged KV-write
+kernel (design: paged-kv-cache.md §9.1), and **`src/kvcache/paged_cache.{h,cpp}`**
+— `PagedKvCache`, the paged implementation of the M5 `KvCache` interface (§8).
+Together they replace the contiguous `SimpleKvCache::append` transpose-copy with
+the paged append: grow a per-sequence block table, then scatter the new K/V into
+the shared pool's slabs at the resulting slot mapping.
+
+What landed:
+
+- **`KvScatterF32(src_k, src_v, slot_mapping, T, Hkv, d, bs, k_slab, v_slab)`**
+  (§9.1). For each (token, head): `memcpy` the `d`-float row from token-major
+  `[T, Hkv, d]` source to the slab at `slot = slot_mapping[t]` (block `slot/bs`,
+  in-block row `slot%bs`, §3.1). A pure fp32→fp32 copy — **Class E** (bit-exact
+  across ISAs and thread counts), so a **single scalar TU** ships (no per-ISA
+  variant, like the M6-T06 embedding gather), added to `engine_kernels`. Tokens
+  are the `parallel_for` unit (grain 16); distinct tokens write disjoint slots,
+  so the threaded scatter is race-free. Raw-pointer, layout-agnostic (§2): the
+  kernel never sees `BlockPool`/`BlockTable`.
+- **`PagedKvCache`** composes `BlockPool*` (shared, non-owning) + one
+  `BlockTable`. `append(layer, k, v)` (§8.2): front-loaded validation (layer
+  range, rank/contiguity/dtype/`[T≥1,Hkv,d]`, k.T==v.T — mirroring `SimpleKvCache`
+  so both reject identically) precedes any mutation; **layer 0 grows the table**
+  all-or-nothing (`AppendTokens` → `pending_slots_`, a `ResourceExhausted`
+  aborting the forward with nothing written), **layers 1..L−1 reuse** that slot
+  mapping, then `KvScatterF32` writes the layer's slabs. The **per-forward layer
+  protocol is enforced** (`next_layer_`): an out-of-order, repeated, or
+  wrong-token-count append is `InvalidArgument` (stricter than §8.2's documented
+  contract — the check is one integer compare off the write path).
+- **`length()`** = the sequence's committed tokens (all layers agree, one table).
+  **`capacity()`** is advisory: `num_blocks·bs + free_blocks·bs` — a correction
+  to the design's `num_tokens + free·bs`, which under-counts the partial tail
+  block's free slots (recorded in §8's as-built notes). **`truncate`** delegates
+  to `BlockTable::Truncate` and resets the pending forward state; **`view`** is
+  `Unimplemented` until the M8-T06 paged gather (the decode path uses `paged_view`
+  instead). Move-only, RAII (a dropped cache returns its blocks).
+- **The one additive interface accessor**, `paged_view(layer)` (§8.3): a new
+  `struct PagedKvView` (slab bases + block-table pointer + strides) and a
+  default-`Unimplemented` virtual on `KvCache`. `PagedKvCache` overrides it
+  zero-copy (the decode fast path that keeps M8-T07 under its ≤10% regression
+  bound); `SimpleKvCache` inherits the default (its decode falls back to `view()`
+  + the contiguous kernel). `kv_cache.h`'s header comment amended to document
+  the accessor and the now-permitted `kvcache → kernels` edge.
+
+CMake: `engine_kernels` gains `kv_scatter.cpp`; `engine_kvcache` gains
+`paged_cache.cpp` and the **downward `kvcache → kernels` PRIVATE edge** (a
+layer-2→1 edge ADR-002 permits without amendment, exactly as `model → kernels`;
+`paged_cache.h` stays kernels-free, the `KvScatterF32` call in the .cpp). The
+stale "arrives with M8-T04" remarks in `block_pool.h`/`block_table.h` were
+refreshed.
+
+Tests: new **`tests/unit/kv_scatter_test.cpp`** (8 cases, `kernels` label, no
+`SCALAR_PASS` — no dispatched path) — readback vs an independently-simulated
+paged layout (a plain-array model) across a non-monotonic-block boundary-
+straddling prefill, single-token decodes (mid-block and fresh-block-row-0),
+sequential accumulation, slot overwrite, a `{bs}×{Hkv}×{d}` geometry sweep, a
+1000-token permuted mapping, and exact bit-pattern preservation (NaN payload,
+−inf, −0.0, denormal). New **`tests/unit/paged_cache_test.cpp`** (16 cases,
+`unit` label) — the §7.2 prefill/decode walk (values land at the hand-worked
+slots `[5,2]`, verified through `paged_view`), token-by-token == batched, a
+wider geometry, front-loaded validation (each leaving stats/length untouched),
+the layer protocol (out-of-order/repeat/short/skip → `InvalidArgument`, single-
+layer repeated appends), layer-0 exhaustion (nothing written, recovery works),
+truncate/reset (blocks released, partial tail kept, re-append overwrites),
+`view` Unimplemented, `paged_view` bad-layer, RAII reclamation, move, and two
+caches sharing one pool disjointly. One case added to `simple_cache_test`
+(`paged_view` default Unimplemented). **1108 → 1133 ctest green** (+25). Design
+§8 gained an "as built" notes block, §9.1 an as-built note; format + scoped tidy
+clean (kv_cache.h is a header edit, so its full includer set — model/engine/main
++ tests — was tidy-swept).

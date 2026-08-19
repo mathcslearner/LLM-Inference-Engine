@@ -33,7 +33,8 @@
 //
 // Layering: `block_table.h` lives in the layer-2 `kvcache` module and adds no
 // new link edge — it calls only `BlockPool` (same module). The `kvcache →
-// kernels` downward edge arrives with the scatter/decode kernels in M8-T04.
+// kernels` downward edge (the paged scatter/decode kernels) is added by
+// `PagedKvCache` in M8-T04.
 
 namespace engine::kvcache {
 
