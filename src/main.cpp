@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -55,6 +56,11 @@ struct Args {
   std::int64_t max_new_tokens = 64;
   std::int64_t cache_capacity = 0;  // 0 → prompt + max_new_tokens
   bool add_bos = true;
+  // Sampling controls (0 temperature ⇒ greedy, the default).
+  float temperature = 0.0F;
+  std::int32_t top_k = 0;
+  float top_p = 1.0F;
+  std::optional<std::uint64_t> seed;
 };
 
 [[nodiscard]] Status ParseArgs(std::span<const std::string> argv, Args& out) {
@@ -85,6 +91,22 @@ struct Args {
       out.cache_capacity = std::stoll(n);
     } else if (a == "--no-bos") {
       out.add_bos = false;
+    } else if (a == "--temperature") {
+      std::string n;
+      RETURN_IF_ERROR(next(n));
+      out.temperature = std::stof(n);
+    } else if (a == "--top-k") {
+      std::string n;
+      RETURN_IF_ERROR(next(n));
+      out.top_k = static_cast<std::int32_t>(std::stol(n));
+    } else if (a == "--top-p") {
+      std::string n;
+      RETURN_IF_ERROR(next(n));
+      out.top_p = std::stof(n);
+    } else if (a == "--seed") {
+      std::string n;
+      RETURN_IF_ERROR(next(n));
+      out.seed = static_cast<std::uint64_t>(std::stoull(n));
     } else {
       return engine::core::InvalidArgumentError("unknown flag '{}'", a);
     }
@@ -119,9 +141,14 @@ struct Args {
   const CacheGeometry geom = model->cache_geometry();
   ASSIGN_OR_RETURN(SimpleKvCache cache, SimpleKvCache::Create(geom, capacity));
 
-  const GenerateOptions options{
-      .sampling = SamplingParams::Greedy(args.max_new_tokens),
-      .eos_ids = model->config().eos_token_ids};
+  SamplingParams sampling;
+  sampling.max_tokens = args.max_new_tokens;
+  sampling.temperature = args.temperature;
+  sampling.top_k = args.top_k;
+  sampling.top_p = args.top_p;
+  sampling.seed = args.seed;
+  const GenerateOptions options{.sampling = sampling,
+                                .eos_ids = model->config().eos_token_ids};
 
   fmt::print("model:   {}\n", args.model_dir);
   fmt::print("backend: {}\n", engine::engine::BackendName(args.backend));
@@ -196,7 +223,8 @@ int main(int argc, char** argv) {
       fmt::print(stderr,
                  "usage: engine generate --model DIR [--prompt STR] "
                  "[--backend reference|optimized] [--max-new-tokens N] "
-                 "[--cache-capacity N] [--no-bos]\n");
+                 "[--cache-capacity N] [--no-bos] [--temperature T] "
+                 "[--top-k K] [--top-p P] [--seed S]\n");
       return 2;
     }
     const Status status = RunGenerate(args);

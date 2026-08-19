@@ -957,7 +957,7 @@ the new pipeline structure.
 - Validation unit tests (rejects temperature<0, top_p∉(0,1], etc.).
 - Greedy generation output unchanged (regression test passes).
 
-### M7-T02 · Temperature, top-k, top-p sampling
+### M7-T02 · Temperature, top-k, top-p sampling — ✅ DONE (2026-08-18)
 Implement the core sampler over the final-position logits: temperature scale →
 top-k filter → top-p (nucleus) filter → categorical sample with a per-request
 counter-based RNG (Philox) so results are reproducible per (seed, step) and

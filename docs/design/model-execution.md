@@ -1065,12 +1065,30 @@ matches vLLM / OpenAI so results are comparable:
    `temperature == 0` (the greedy branch, which bypasses stages 2–4 and the
    categorical draw).
 3. **Top-k filter** (T02) — keep the `k` highest logits, mask the rest to `-inf`.
+   **Threshold semantics** (matching `torch.topk` / vLLM): everything strictly
+   below the k-th largest logit is masked, so ties at the boundary are all kept
+   and more than `k` tokens may survive. `k == 0` or `k >= V` is a no-op.
 4. **Top-p (nucleus) filter** (T02) — over the post-k softmax, keep the smallest
-   high-probability set reaching cumulative `top_p`.
+   high-probability set reaching cumulative `top_p`; ties ordered by ascending
+   vocab index, the crossing token included, at least one token always kept.
+   `top_p == 1.0` is skipped entirely (so no rounding can drop a tail token).
 5. **Selection** — greedy argmax (`temperature == 0`, **T01**) or a categorical
-   draw from the filtered distribution with a counter-based Philox RNG keyed on
-   `(seed, step_index)` (T02), so a draw is reproducible per `(seed, step)` and
-   independent of batch composition.
+   draw from the filtered distribution (T02). The draw is an **inverse-CDF walk**
+   in ascending vocab index over the kept probabilities, targeting `u * mass`
+   where `u ∈ [0, 1)` is a **Philox4x32-10** variate (`src/sampling/philox.h`)
+   keyed on `(seed, step_index)` with the counter derived from
+   `context.generated_ids.size()` — so a draw is reproducible per `(seed, step)`,
+   independent of batch composition, and needs no mutable RNG stream (the sampler
+   stays `const`). The softmax uses fp32 max-subtraction with the exponential sum
+   accumulated in `double` in ascending order, and `-inf` logits (the top-k mask
+   value) map to exactly `0.0`. **Portability caveat:** because `std::exp`
+   differs by ulps between libm implementations, sampled *token sequences* are
+   reproducible on a given machine but not bit-identical across platforms; the
+   cross-platform determinism contract is M17-T04's, and `sampling` cannot link
+   the `kernels` module's shared exp polynomial (ADR-002). The stochastic stages
+   are factored into `src/sampling/stages.{h,cpp}` (`engine::sampling::detail`)
+   for exact-mask unit testing and as the token-for-token reference the T06
+   batched sampler must match given the same RNG draw.
 6. **Logprobs** (T05) — the chosen-token logprob and top-N logprobs, computed
    from the same post-processing logits the sampler saw (documented choice).
 
@@ -1080,7 +1098,7 @@ and the request's `stop_token_ids` / `stop_strings` (the latter matched on the
 incrementally detokenized stream, across token boundaries — §M4-T10), and
 `max_tokens`, producing a `finish_reason` (`stop` / `length`).
 
-### 15.3 `Sampler` (M7-T01)
+### 15.3 `Sampler` (M7-T01, stochastic branch M7-T02)
 
 `src/sampling/sampler.h` — the single-sequence **reference** sampler:
 
@@ -1095,26 +1113,37 @@ class Sampler {
  public:
   static core::StatusOr<Sampler> Create(SamplingParams params);
   core::StatusOr<std::int32_t> Sample(std::span<const float> logits,
-                                      const SampleContext& context);
+                                      const SampleContext& context) const;
   const SamplingParams& params() const;
+  std::uint64_t seed() const;                  // resolved seed (T02)
 };
 ```
 
-- **`Create`** validates (`ValidateSamplingParams`) and then, in T01, rejects any
-  parameter outside the greedy subset with **`Unimplemented`** naming the field —
-  the same "not silently ignored" posture as `Backend::kOptimized` before M6.
-  Each later ticket removes its guard as it lands the stage, so at no point is a
-  requested knob dropped without an error.
-- **`Sample`** dispatches on the selection mode: `temperature == 0` → argmax with
+- **`Create`** validates (`ValidateSamplingParams`) and then rejects any
+  parameter outside the *implemented* subset with **`Unimplemented`** naming the
+  field — the same "not silently ignored" posture as `Backend::kOptimized`
+  before M6. As of T02 the implemented subset is temperature / top-k / top-p; the
+  penalty (T03), stop (T04) and logprobs (T05) guards remain. Each later ticket
+  removes its guard as it lands the stage. When `params.seed` is `nullopt`,
+  `Create` draws a nondeterministic seed once and exposes it via `seed()` (so the
+  M10 API layer can echo the seed actually used).
+- **`Sample`** dispatches on the selection mode. `temperature == 0` → argmax with
   a strict `>` scan (lowest vocab index wins ties → deterministic; a NaN maximum
-  → `Internal`; an empty row → `InvalidArgument`). This is the greedy logic moved
-  verbatim from the M5-T09 loop's `ArgmaxLastRow`. The `temperature > 0` branch
-  is the seam T02 fills.
+  → `Internal`; an empty row → `InvalidArgument`), the greedy logic moved verbatim
+  from the M5-T09 loop's `ArgmaxLastRow`. `temperature > 0` → the stochastic
+  pipeline (§15.2 stages 2–5): finiteness check, temperature, top-k, softmax,
+  top-p, then a Philox inverse-CDF draw keyed on `(seed, generated_ids.size())`.
+- **`const` / no mutable RNG state**: the Philox counter is *derived* from the
+  step index, so the draw is a pure function of `(seed, step)` and `Sample` needs
+  no advancing stream member. This is exactly what makes a draw reproducible per
+  `(seed, step)` and independent of batch composition.
 - **History-stateless**: the engine already owns the prompt/generated vectors, so
-  the sampler holds only params (and, from T02, per-request RNG/scratch). This
-  keeps it cheap to construct per sequence, trivially per-request for the batched
-  path (T06) and M9's `Request`, and lets `generated_ids.size()` be the step
-  index the RNG and penalties key on.
+  the sampler holds only the params and the resolved seed. This keeps it cheap to
+  construct per sequence, trivially per-request for the batched path (T06) and
+  M9's `Request`, and lets `generated_ids.size()` be the step index the RNG (and
+  T03's penalties) key on. Per-call scratch (the mutable logits copy and the
+  probability buffer) is allocated inside `Sample` in the reference path;
+  allocation-freedom is T06's concern.
 
 ### 15.4 Engine routing (M7-T01)
 
@@ -1130,8 +1159,10 @@ regression the M5/M6 `generate.json` goldens (both backends) assert unchanged.
 
 ### 15.5 What later tickets add (recorded, not built)
 
-- **T02** temperature/top-k/top-p + Philox RNG; statistical (chi-square) and
-  exact-mask tests; the `temperature > 0` branch of `Sample`.
+- **T02** temperature/top-k/top-p + Philox RNG — **done** (2026-08-18): the
+  `temperature > 0` branch of `Sample`, `src/sampling/philox.h` (Philox4x32-10)
+  and `src/sampling/stages.{h,cpp}`; chi-square and exact-mask tests. See §15.2/
+  §15.3.
 - **T03** penalties over history; exact hand-computed logit-adjustment tests.
 - **T04** stop conditions & `finish_reason` in the loop; stop-string matching
   across token boundaries.

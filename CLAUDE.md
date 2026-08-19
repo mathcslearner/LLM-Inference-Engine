@@ -606,12 +606,30 @@ behind an existing subsystem):
   18, sampler 16 — both `sampling` label, no SCALAR_PASS — + 1 generator
   rejection case) → 912 green (942 ctest); the greedy `generate.json` goldens on
   both backends pass unchanged (the regression guarantee). format + scoped tidy
-  clean.
+  clean. T02 temperature/top-k/top-p sampling (2026-08-18): the
+  `Sampler::Sample` `temperature > 0` branch — new `src/sampling/philox.h`
+  (header-only **Philox4x32-10**, a `constexpr` pure block fn +
+  `PhiloxUniformDouble(seed, step, draw)` → 53-bit `[0,1)`; counter derived from
+  the step so there is **no mutable RNG state** and `Sample` stays `const`) and
+  `src/sampling/stages.{h,cpp}` (`engine::sampling::detail`: `CheckFinite` /
+  `ApplyTemperature` / `ApplyTopK` (torch.topk threshold semantics — boundary
+  ties kept) / `Softmax` (double-accumulated, −inf→0 exactly) / `ApplyTopP`
+  (ascending-index tie-break, crossing token inclusive, no-op at 1.0) /
+  `SelectByCdf` (inverse-CDF ascending walk)). `Sampler::Create` drops the
+  temperature/top-k/top-p guards (penalties/stop/logprobs still `Unimplemented`),
+  resolves the seed (request seed else `random_device`+clock) and exposes
+  `seed()`. `engine generate` CLI gains `--temperature/--top-k/--top-p/--seed`.
+  Sampled sequences are same-machine reproducible only (`std::exp` ulp variance;
+  `sampling` can't link `kernels`' exp — cross-platform contract is M17-T04's;
+  recorded in stages.h/§15.2). design §15.2/§15.3/§15.5 updated. +41 gtest cases
+  (philox 7 incl. Random123 KAT vectors `static_assert`-checked, stages 18 exact-
+  mask, sampler +13 incl. chi-square over 20k draws, generator +3 stochastic) →
+  953 green (983 ctest), all deterministic (fixed seeds); greedy goldens
+  unchanged. format + scoped tidy clean.
 
-Next up: **M7-T02** (temperature, top-k, top-p sampling: implement the core
-sampler over the final-position logits — temperature scale → top-k → top-p →
-categorical draw with a per-request counter-based Philox RNG, reproducible per
-`(seed, step)` and batch-composition-independent; statistical/chi-square draw
-tests + exact top-k/p mask tests + same-seed-identical/different-seed-independent;
-fills the `Sampler::Sample` `temperature > 0` branch and drops the T02 `Create`
-guards).
+Next up: **M7-T03** (repetition, presence & frequency penalties: apply penalties
+over the request's token history (prompt + generated, OpenAI/vLLM semantics)
+*before* temperature — the stage-1 seam in the pipeline; exact hand-computed
+logit-adjustment tests per penalty type and combinations, no-op-at-default exact
+equality; drops the three penalty `Unimplemented` guards in
+`Sampler::Create`/`CheckImplementedSubset`).

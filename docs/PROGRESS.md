@@ -1695,3 +1695,79 @@ across `generator_test`/`qwen2_family_test`/`optimized_model_test` (HF
 `generate.json` token-for-token, determinism, KV invariant, EOS/max-cap,
 callback, error paths) pass unchanged — the regression guarantee. Full ctest
 green; format + scoped tidy clean.
+
+### M7-T02 — Temperature, top-k, top-p sampling (2026-08-18)
+
+Filled the `Sampler`'s `temperature > 0` branch with the stochastic pipeline —
+temperature → top-k → top-p → a seeded categorical draw — so generation is no
+longer greedy-only. Real ~0.5B-model output is now reproducible per seed
+(`engine generate --temperature 0.8 --top-p 0.95 --seed 1` gives the same tokens
+every run; a different seed diverges; `--temperature 0` stays bit-identical to
+the old greedy path).
+
+- **`src/sampling/philox.h`** (header-only) — Philox4x32-10 (Salmon et al.,
+  SC'11; the Random123/JAX/PyTorch generator). A `constexpr` pure block function
+  `Philox4x32_10(key, ctr)` plus `PhiloxUniformDouble(seed, step, draw)` →
+  `[0, 1)` with 53 bits (two output words; float's 24 are too coarse for a
+  ~150k-vocab tail). Keyed on the seed; the counter carries `(step_lo, step_hi,
+  draw, 0)`. Because the whole output is a pure function of `(key, counter)`
+  there is **no mutable RNG stream** — a draw is fully determined by its
+  `(seed, step)` coordinate, which is what makes sampling reproducible per
+  `(seed, step)`, batch-composition-independent, and lets `Sample` stay `const`.
+- **`src/sampling/stages.{h,cpp}`** (`engine::sampling::detail`) — the stages
+  factored out for exact-mask testing and as the T06 token-for-token reference:
+  `CheckFinite` (NaN/+inf/all-−inf → `Internal`), `ApplyTemperature` (in-place
+  divide), `ApplyTopK` (threshold semantics matching `torch.topk` — mask
+  everything below the k-th largest, boundary ties kept, may keep > k; `nth_element`
+  on a copy; no-op at `k == 0`/`k >= V`), `Softmax` (max-subtracted, `double`
+  sum in ascending order, −inf → exactly 0), `ApplyTopP` (descending sort with
+  ascending-index tie-break, keep the prefix reaching `top_p` inclusive of the
+  crossing token, ≥1 kept, no-op at `top_p >= 1`), `SelectByCdf` (inverse-CDF
+  walk in ascending index over `u * mass`, last-positive fallback).
+- **`src/sampling/sampler.{h,cpp}`** — the `Create` guard (renamed
+  `CheckGreedySubset` → `CheckImplementedSubset`) drops the temperature/top-k/
+  top-p clauses; penalties/stop/logprobs still `Unimplemented`. `Create` resolves
+  the seed (explicit request seed, else `random_device` mixed with a
+  steady-clock tick) and stores it; new `seed()` accessor exposes it. `Sample`
+  gains the stochastic branch (`SampleStochastic`: copy → temperature → top-k →
+  softmax → top-p → Philox draw) and stays `const`.
+- **Engine/CLI**: no `Generate` logic change (it already routed through the
+  sampler in T01). `src/main.cpp` `engine generate` gains `--temperature`,
+  `--top-k`, `--top-p`, `--seed` (greedy stays the default at temperature 0).
+
+**Non-obvious decisions.** (1) `Sample` **stays `const`** — the T01 header note
+predicted a `mutable` counter, but deriving the Philox counter from
+`generated_ids.size()` means there is no stream state to advance, which is the
+cleaner outcome and the one that guarantees batch-independence. (2) **Top-k uses
+threshold (not exact-k) semantics** matching `torch.topk`/vLLM: boundary ties are
+all kept, so a request can end up with > k candidates — deterministic and the
+documented HF behaviour. (3) **`double` accumulation** in softmax and the CDF, but
+sampled *token sequences* are only same-machine reproducible: `std::exp` differs
+by ulps across libm's, and `sampling` cannot link `kernels`' shared exp
+polynomial (ADR-002) — the cross-platform contract is M17-T04's. Recorded in
+stages.h and §15.2. (4) Reference path allocates per-call scratch (a logits copy
+and the prob buffer); allocation-freedom is explicitly T06's concern.
+
+Docs: model-execution.md §15.2 (top-k/top-p semantics, inverse-CDF selection,
+the Philox keying and portability caveat), §15.3 (the `const`/no-mutable-state
+rationale, `seed()`, the implemented-subset guard), §15.5 (T02 marked done).
+
+Tests (+41 gtest cases → 953 green, 983 ctest entries), all portable C++
+(`sampling`/`engine` labels, no SCALAR_PASS) and **deterministic** (every
+statistical test uses a fixed seed, so no flake): new `philox_test` (7 — the
+three canonical Random123 known-answer vectors asserted at runtime *and* compile
+time via `static_assert`, counter/key sensitivity, uniform range/reproducibility/
+decile coverage), new `sampling_stages_test` (18 — exact behaviour of every
+stage: finiteness posture, temperature exactness, top-k threshold-ties/no-op,
+softmax normalization + −inf → 0, top-p crossing-token/tiny-p/no-op/tie-order,
+CDF cumulative-walk/never-masked/clamp), `sampler_test` (+13, 3 reject→accept
+flips: chi-square vs softmax at T=1 and T=0.5 over 20k draws within the dof-4
+0.001 critical value, top-k/top-p support restriction, same-seed-identical,
+different-seed-different, draw-depends-on-step-not-history-contents, `seed()`
+echo + nullopt-distinct, stochastic empty/NaN/+inf error posture, never-samples
+−inf), `generator_test` (+3, 1 rewrite: stochastic same-seed-identical /
+different-seed-different / nullopt-seed-runs on tiny-llama; the
+`Unimplemented`-before-generating case reworked to use a still-guarded
+penalty knob). The greedy `generate.json` goldens across
+`generator_test`/`qwen2_family_test`/`optimized_model_test` pass unchanged — the
+regression guarantee. Full ctest green; format + scoped tidy clean.

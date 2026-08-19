@@ -353,17 +353,70 @@ TEST(GeneratorTest, NotYetImplementedSamplingIsRejectedBeforeGenerating) {
   const std::unique_ptr<Model> model = BuildTiny();
   SimpleKvCache cache = FreshCache();
   const std::vector<std::int32_t> prompt = {1, 5, 9};
-  // A stochastic request: M7-T01 routes through the sampler, whose Create
-  // rejects temperature > 0 with Unimplemented, front-loaded so nothing is
-  // generated and the cache is untouched.
+  // A still-unimplemented knob (penalties land in M7-T03): the sampler's Create
+  // rejects it with Unimplemented, front-loaded so nothing is generated and the
+  // cache is untouched.
   SamplingParams sampling = SamplingParams::Greedy(8);
-  sampling.temperature = 0.7F;
+  sampling.repetition_penalty = 1.1F;
   const GenerateOptions options{.sampling = sampling, .eos_ids = {}};
   const auto got = Generate(*model, cache, prompt, options);
   ASSERT_FALSE(got.ok());
   EXPECT_TRUE(engine::core::IsUnimplemented(got.status()))
       << got.status().ToString();
   EXPECT_EQ(cache.length(), 0);
+}
+
+// ------------------------------------------------ stochastic generation --
+
+[[nodiscard]] SamplingParams StochasticParams(std::int64_t max_tokens,
+                                              std::uint64_t seed,
+                                              float temperature = 1.0F) {
+  SamplingParams p;
+  p.max_tokens = max_tokens;
+  p.temperature = temperature;
+  p.seed = seed;
+  return p;
+}
+
+TEST(GeneratorTest, StochasticGenerationSameSeedIsIdentical) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  const GenerateCase c = LoadGoldenCases().front();
+  const GenerateOptions options{.sampling = StochasticParams(24, /*seed=*/2024),
+                                .eos_ids = {}};
+  SimpleKvCache cache_a = FreshCache();
+  SimpleKvCache cache_b = FreshCache();
+  const std::vector<std::int32_t> run_a =
+      Unwrap(Generate(*model, cache_a, c.prompt_ids, options));
+  const std::vector<std::int32_t> run_b =
+      Unwrap(Generate(*model, cache_b, c.prompt_ids, options));
+  EXPECT_EQ(run_a, run_b);
+  EXPECT_EQ(run_a.size(), 24U);
+}
+
+TEST(GeneratorTest, StochasticGenerationDifferentSeedsDiffer) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  const GenerateCase c = LoadGoldenCases().front();
+  SimpleKvCache cache_a = FreshCache();
+  SimpleKvCache cache_b = FreshCache();
+  const std::vector<std::int32_t> run_a = Unwrap(
+      Generate(*model, cache_a, c.prompt_ids,
+               {.sampling = StochasticParams(24, /*seed=*/1), .eos_ids = {}}));
+  const std::vector<std::int32_t> run_b = Unwrap(
+      Generate(*model, cache_b, c.prompt_ids,
+               {.sampling = StochasticParams(24, /*seed=*/2), .eos_ids = {}}));
+  EXPECT_NE(run_a, run_b);
+}
+
+TEST(GeneratorTest, StochasticGenerationWithNulloptSeedRuns) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  const GenerateCase c = LoadGoldenCases().front();
+  SamplingParams sampling;
+  sampling.max_tokens = 8;
+  sampling.temperature = 0.8F;  // seed nullopt -> engine-chosen
+  SimpleKvCache cache = FreshCache();
+  const std::vector<std::int32_t> got = Unwrap(Generate(
+      *model, cache, c.prompt_ids, {.sampling = sampling, .eos_ids = {}}));
+  EXPECT_EQ(got.size(), 8U);
 }
 
 // ------------------------------------------------------ backend helpers --

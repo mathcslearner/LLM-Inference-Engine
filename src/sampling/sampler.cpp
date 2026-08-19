@@ -2,43 +2,33 @@
 
 #include "core/status.h"
 #include "sampling/params.h"
+#include "sampling/philox.h"
+#include "sampling/stages.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <random>
 #include <span>
 #include <utility>
+#include <vector>
 
-// M7-T01: the sampler skeleton with the greedy selection branch only. The
-// stage-by-stage pipeline (penalties → temperature → top-k/p → categorical
-// draw) fills in across M7-T02…T05; until then `Create` rejects any request
-// outside the greedy subset with `Unimplemented`, so a knob is never silently
-// dropped.
+// M7-T02: the sampler with both selection branches. `temperature == 0` is
+// greedy argmax (unchanged from T01); `temperature > 0` runs the stochastic
+// pipeline (temperature -> top-k -> top-p -> Philox categorical draw, design
+// §15.2). The penalty (T03), stop-condition (T04) and logprobs (T05) stages are
+// still guarded off at `Create` so a requested knob is never silently dropped.
 
 namespace engine::sampling {
 namespace {
 
-// True when `params` selects the pure argmax path M7-T01 implements: greedy
-// temperature, every filter/penalty at its no-op default, no logprobs, and no
-// stop-string / stop-token machinery (T04 owns those). `ValidateSamplingParams`
-// has already run, so the values are in range here.
-[[nodiscard]] core::Status CheckGreedySubset(const SamplingParams& params) {
-  if (params.temperature != 0.0F) {
-    return core::UnimplementedError(
-        "temperature > 0 (stochastic sampling) is not implemented until "
-        "M7-T02; got {}",
-        params.temperature);
-  }
-  if (params.top_k != 0) {
-    return core::UnimplementedError(
-        "top_k filtering is not implemented until M7-T02; got {}",
-        params.top_k);
-  }
-  if (params.top_p != 1.0F) {
-    return core::UnimplementedError(
-        "top_p filtering is not implemented until M7-T02; got {}",
-        params.top_p);
-  }
+// True when `params` stays within the stages M7-T02 implements: any
+// temperature, top-k and top-p (all handled by `Sample`), but no penalties,
+// stop machinery (T04 owns those in the loop), or logprobs.
+// `ValidateSamplingParams` has already run, so the values are in range here.
+[[nodiscard]] core::Status CheckImplementedSubset(
+    const SamplingParams& params) {
   if (params.repetition_penalty != 1.0F) {
     return core::UnimplementedError(
         "repetition_penalty is not implemented until M7-T03; got {}",
@@ -69,6 +59,22 @@ namespace {
   return core::OkStatus();
 }
 
+// Resolve the RNG seed: honour an explicit request seed, else draw a
+// nondeterministic one. `random_device` is mixed with a steady-clock tick so
+// two samplers created back-to-back get distinct seeds even where
+// `random_device` is weak/deterministic.
+[[nodiscard]] std::uint64_t ResolveSeed(const SamplingParams& params) {
+  if (params.seed.has_value()) {
+    return *params.seed;
+  }
+  std::random_device rd;
+  std::uint64_t seed = (static_cast<std::uint64_t>(rd()) << 32) ^
+                       static_cast<std::uint64_t>(rd());
+  seed ^= static_cast<std::uint64_t>(
+      std::chrono::steady_clock::now().time_since_epoch().count());
+  return seed;
+}
+
 // Argmax over a `[V]` fp32 logits row with a strict `>` scan so the lowest
 // vocab index wins ties (deterministic). A NaN maximum is surfaced as
 // `Internal`. Ported verbatim from the M5-T09 generation loop's `ArgmaxLastRow`
@@ -92,32 +98,53 @@ namespace {
   return static_cast<std::int32_t>(best);
 }
 
+// The stochastic branch: temperature -> top-k -> top-p -> Philox draw. `step`
+// is the decode step index (the RNG counter), `seed` the resolved request seed.
+[[nodiscard]] core::StatusOr<std::int32_t> SampleStochastic(
+    std::span<const float> logits, const SamplingParams& params,
+    std::uint64_t seed, std::uint64_t step) {
+  if (logits.empty()) {
+    return core::InvalidArgumentError("logits row must be non-empty");
+  }
+  if (core::Status status = detail::CheckFinite(logits); !status.ok()) {
+    return status;
+  }
+  // Work on a mutable copy — the caller's logits buffer is const, and top-k
+  // masks in place.
+  std::vector<float> scratch(logits.begin(), logits.end());
+  const std::span<float> work{scratch};
+  detail::ApplyTemperature(work, params.temperature);
+  detail::ApplyTopK(work, params.top_k);
+  std::vector<double> probs;
+  detail::Softmax(work, probs);
+  detail::ApplyTopP(probs, params.top_p);
+  const double u = PhiloxUniformDouble(seed, step, /*draw=*/0U);
+  return detail::SelectByCdf(probs, u);
+}
+
 }  // namespace
 
 core::StatusOr<Sampler> Sampler::Create(SamplingParams params) {
   if (core::Status status = ValidateSamplingParams(params); !status.ok()) {
     return status;
   }
-  if (core::Status status = CheckGreedySubset(params); !status.ok()) {
+  if (core::Status status = CheckImplementedSubset(params); !status.ok()) {
     return status;
   }
-  return Sampler(std::move(params));
+  const std::uint64_t seed = ResolveSeed(params);
+  return Sampler(std::move(params), seed);
 }
 
 core::StatusOr<std::int32_t> Sampler::Sample(
     std::span<const float> logits, const SampleContext& context) const {
-  // Dispatch on the selection mode — the seam T02 plugs the stochastic path
-  // into. `Create` has already guaranteed the greedy subset, so
-  // `temperature == 0` is the only reachable branch in T01; the explicit check
-  // keeps `Sample` self-consistent and gives T02 its insertion point. The
-  // context is unused until penalties (T03) and the seeded RNG (T02) read the
-  // token history.
-  (void)context;
   if (params_.temperature == 0.0F) {
     return ArgmaxRow(logits);
   }
-  return core::UnimplementedError(
-      "stochastic sampling (temperature > 0) is not implemented until M7-T02");
+  // The step index the RNG keys on: the number of tokens produced so far this
+  // request (0 for the first sampled token). Independent of batch composition,
+  // so the draw is reproducible across runs and batch layouts.
+  const auto step = static_cast<std::uint64_t>(context.generated_ids.size());
+  return SampleStochastic(logits, params_, seed_, step);
 }
 
 }  // namespace engine::sampling
