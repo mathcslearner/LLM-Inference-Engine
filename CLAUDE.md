@@ -500,12 +500,35 @@ behind an existing subsystem):
   flash-decoding motivator, recorded). Bench (BASELINES.md M6-T05): **5.25×** the
   reference at 8-thread NEON on a 2k-context decode step (1407 → 268 µs/call),
   7.15× single-thread NEON; decode ≈ prefill(T=1) (both hold one score row at
-  T=1). +12 test registrations → **849 green**.
+  T=1). +12 test registrations → **849 green**. T06 embedding & logits path:
+  `src/kernels/embedding.{h,cpp}` — `EmbeddingLookupF32` (row-major `[V,E]`,
+  untied) and `EmbeddingLookupPackedF32` (packed lm_head `[ceil(V/kNr),E,kNr]`,
+  tied, gathering logical row `v` from panel `v/kNr` lane `v%kNr`). A pure
+  gather + exact fp16/bf16→fp32 widen → **bit-identical** across thread counts,
+  ISAs, and vs the `cpu::embedding_lookup` oracle. **No per-ISA embedding TU**
+  (amends design §2): the only per-element work is the widen, dispatched through
+  the M3-T06 `convert` variants via a `KernelTable<WidenFn>`, so `embedding.cpp`
+  needs no NEON/AVX2 TU and the forced-scalar pass still exercises the scalar
+  widen; the gather is inherently scalar (strided packed lanes chunked into a
+  512-wide stack buffer, widened a chunk at a time — Class E, chunk-invariant).
+  `src/model/optimized_embedding.{h,cpp}` — `OptimizedEmbedding` mirroring the M5
+  `Embedding` surface: `FromTable` (untied zero-copy `[V,E]`) and
+  `FromPackedLinear` (tied — holds the lm_head's `packed_weight()` by value; the
+  refcounted `shared_ptr<Buffer>` keeps the **one physical copy** alive so the
+  linear may then be moved behind a `unique_ptr<Linear>` without dangling —
+  tested); `forward` front-loads the `y` checks + `[0,V)` id pre-scan (naming
+  index+value like the oracle) so the raw gather never touches a bad row. The
+  lm_head logits path is unchanged `PackedLinear::forward` (kAll GEMM / kLast
+  GEMV) — no new logits kernel. `model → kernels` stays PRIVATE. +13 gtest cases
+  (embedding_kernel_test/kernels + embedding_logits_test/model, both SCALAR_PASS)
+  → **862 green** (875 ctest entries). No fixture change; `src/parallel/`
+  untouched; format + scoped tidy clean.
 
-Next up: **M6-T06** (embedding & logits path: embedding-lookup mapping ids →
-packed rows through the repacked panel layout, and the lm_head GEMM/GEMV
-producing fp32 logits; tied embeddings honored so lookup and projection share
-one physical packed copy — the packed lm_head authoritative, lookup gathering
-row `v` from panel `v/kNr` per the design doc's tied-embedding resolution; tests:
-lookup matches the reference for random/repeated id sets, logits match the
-reference within tolerance on the fixture model).
+Next up: **M6-T07** (optimized model forward & generation: wire the M6 kernels
+into the M5 `Model` interface as the `kOptimized` backend — `OptimizedModel` +
+its reused-across-layers `Workspace`, weight repacking at load with progress
+logging, full prefill + decode forward, greedy loop reused from M5; acceptance:
+tiny-fixture greedy generation token-for-token identical to the reference
+backend and end-to-end logits within tolerance, plus a real ~1B model
+(Llama-3.2-1B or Qwen2.5-0.5B bf16) loading and generating coherent text on the
+dev machine with sample outputs in the PR description).

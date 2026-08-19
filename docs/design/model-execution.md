@@ -338,6 +338,10 @@ The builder (§9) resolves every module's weights from `LoadedModel.weights`
   physical copy — the packed lm_head** — and the embedding lookup gathers logical
   row `v` out of the packed `[P, K, NR]` layout (panel `v/NR`, lane `v%NR`),
   avoiding a `[V, E]` duplicate that costs ~272 MB on a tied Qwen2.5-0.5B.)*
+  *(Built 2026-08-18, M6-T06: `model::OptimizedEmbedding` — `FromTable` (untied,
+  zero-copy `[V, E]`) and `FromPackedLinear` (tied, sharing the packed lm_head's
+  refcounted storage). The lm_head projection is `PackedLinear::forward`; the
+  optimized backend binds them in M6-T07.)*
 
 Modules borrow weight handles (shared `Tensor`, i.e. shared `Buffer`); the
 mapped checkpoint stays alive as long as any module holds a handle (M4's

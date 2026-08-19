@@ -1371,3 +1371,68 @@ CI's x86-64 warnings-as-errors build + all suites (the accepted arm64-CI gap).
 +12 test registrations (6 new cases × SCALAR_PASS; 1 forced-scalar slot-guard
 `GTEST_SKIP`) → **849 green**. Format clean; scoped tidy clean on the new/edited
 TUs (the `model → kernels`/attention includers set).
+
+### M6-T06 — embedding & logits path (2026-08-18)
+
+The two ends of the optimized model: the embedding-lookup gather (ids → fp32
+rows, both source layouts) and the lm_head logits projection (already
+`PackedLinear::forward` from T02, so T06 adds no logits kernel — only its
+fixture-model tests). Tied embeddings honored with **one physical copy**
+(design §7): the packed lm_head is authoritative, and the lookup gathers logical
+row `v` out of its `[ceil(V/kNr), E, kNr]` layout — no ~272 MB `[V, E]`
+duplicate on a tied Qwen2.5-0.5B.
+
+**Kernels (`src/kernels/embedding.{h,cpp}`).** `EmbeddingLookupF32` (row-major
+`[V, E]` source, untied) and `EmbeddingLookupPackedF32` (packed lm_head source,
+tied). A pure gather + exact fp16/bf16→fp32 widen — **bit-identical** across
+thread counts, across ISAs, and vs the `cpu::embedding_lookup` oracle (the §10
+"embedding lookup" row; one of only two pure-map kernels). Both thread over
+tokens (`kRowGrain = 1`, each output row written by one worker); the row-major
+path widens a whole row in one call, the packed path gathers each row's
+`kNr`-strided 16-bit lanes into a fixed 512-wide stack buffer a chunk at a time
+then widens the chunk (widen is Class E → chunk-invariant → bit-exact). f32
+tables skip the widen (`memcpy`/strided copy).
+
+**Non-obvious decision — no per-ISA embedding TU** (amends the design §2 file
+table, updated in the same change). The gather has no ISA-specific control flow;
+its only per-element arithmetic is the widen, which the M3-T06 `convert`
+variants (`scalar/neon/avx2::{Bf16,Fp16}ToFp32`) already provide bit-exact per
+`half.h` including NaN payloads. So `embedding.cpp` builds a
+`KernelTable<WidenFn>` from those variants and `Select`s once — `ENGINE_FORCE_ISA`
+still selects the widen path, the forced-scalar pass still exercises the scalar
+widen, and a blind AVX2 embedding TU (a pure wrapper) is avoided. `model →
+kernels` stays a PRIVATE link (the packed bytes are a plain `tensor::Tensor`).
+
+**Module (`src/model/optimized_embedding.{h,cpp}`).** `OptimizedEmbedding`
+mirrors the M5 `Embedding` surface (so M6-T07's `OptimizedModel` swaps it in
+1:1): `FromTable` (untied — validation identical to `Embedding::Create`, table
+retained zero-copy) and `FromPackedLinear` (tied — holds the lm_head's
+`packed_weight()` **by value**; the refcounted `shared_ptr<Buffer>` keeps the
+one physical copy alive independently of the `PackedLinear`, so the linear may
+then be moved into a `unique_ptr<Linear>` without dangling — tested). `forward`
+front-loads the `y` shape/dtype checks and the `[0, V)` id pre-scan (naming the
+offending index+value exactly as the oracle) so a bad id never reaches the raw
+gather, then dispatches the packed or row-major kernel. The lm_head logits path
+is unchanged `PackedLinear::forward` — GEMM shape (kAll) or GEMV shape (kLast).
+
+**Tests** (+13 gtest cases; ×2 for SCALAR_PASS on the ctest side → 875 ctest
+entries, all green — was 849 gtest = 862 now). `embedding_kernel_test` (kernels
+label, SCALAR_PASS): both layouts vs a single-threaded reference gather across
+dtypes {f32,f16,bf16} × shapes (E > the 512 chunk and non-multiple, V with and
+without a padded last panel) × id sets (random+repeats, edges {0,V−1}); packed
+zero-pad-lane correctness at V−1; NaN/inf/subnormal bit patterns widen bit-exact
+vs the oracle (raw-bit compare); row-major/packed vs `cpu::embedding_lookup` on
+the real tiny-llama bf16 table; single-token (decode-shaped) path.
+`embedding_logits_test` (model label, SCALAR_PASS): `OptimizedEmbedding`
+create/forward validation mirrors the reference; untied (tiny-llama) vs the
+reference `Embedding` bit-exact; tied (tiny-qwen2) shares the packed lm_head
+storage (`source().data() == lm_head.packed_weight().data()`) and matches the
+reference bit-exact, including after the linear is moved behind a
+`unique_ptr<Linear>`; the design §7 shared-storage assertion (gathered row `v`
+== checkpoint row `v` widened, sampled over the padded-panel edge); the logits
+path (`PackedLinear` GEMM + last-row GEMV) vs `ReferenceLinear` (`rtol/atol
+1e-4`, the T02 band) with GEMV == GEMM last row bit-identical, and vs the HF
+`logits` golden (`rtol 1e-4, atol 2e-4`) on both fixtures.
+
+Format clean; scoped tidy clean on the four new TUs (no existing header edited).
+No fixture change (existing goldens sufficed). `src/parallel/` untouched.

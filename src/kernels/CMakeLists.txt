@@ -25,6 +25,10 @@ add_library(engine_kernels STATIC
   norm.cpp
   rope.cpp
   attention.cpp
+  # embedding.cpp has no per-ISA TU (M6-T06): its only per-element work is the
+  # fp16/bf16->fp32 widen, dispatched through the existing convert variants; the
+  # gather itself is inherently scalar (optimized-cpu-execution.md §2, §7).
+  embedding.cpp
   scalar/probe.cpp
   scalar/elementwise.cpp
   scalar/reduce.cpp

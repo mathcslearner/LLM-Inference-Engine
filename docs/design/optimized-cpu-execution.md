@@ -91,7 +91,8 @@ Files this milestone creates:
 | `src/kernels/norm.h`, `activation.h`, `softmax.h`, `rope.h` (+ per-ISA TUs) | kernels | RMSNorm, SiLU-and-mul, numerically-stable softmax, RoPE-apply | T03 |
 | `src/kernels/internal/exp_common.h`, `neon_exp.h`, `avx2_exp.h`, `exp_impl.h` + `exp.cpp` + `{scalar,neon,avx2}/exp.cpp` | kernels | the shared vector-`expf` polynomial (§10): a scalar spec + NEON/AVX2 lane helpers, plus array-form variants exposed only for the ulp sweep. `exp` is not a public kernel — softmax/SiLU embed the lane helpers. Residual add reuses the existing Class-E `kernels::AddF32` (no new kernel). | T03 |
 | `src/kernels/attention.h` / per-ISA TUs | kernels | blocked prefill attention (online softmax) + decode attention | T04, T05 |
-| `src/kernels/embedding.h` / per-ISA TUs | kernels | packed-layout-aware embedding lookup + the lm_head logits path | T06 |
+| `src/kernels/embedding.h` / `.cpp` (no per-ISA TU) | kernels | packed-layout-aware embedding lookup. **As-built (M6-T06): no per-ISA TU** — the only per-element work is the fp16/bf16→fp32 widen, dispatched through the M3-T06 `convert` variants; the gather itself is inherently scalar (§7). The lm_head logits path is `PackedLinear::forward` (T02) — no new kernel. | T06 |
+| `src/model/optimized_embedding.h` / `.cpp` | model | `OptimizedEmbedding` — untied (`FromTable`) and tied (`FromPackedLinear`, sharing the packed lm_head's storage) lookup behind the M5 `Embedding` surface (§7) | T06 |
 | `src/model/packed_linear.h` / `.cpp` | model | `PackedLinear` (repack at construction; GEMM/GEMV in `forward`) | T02 |
 | `src/model/optimized_model.h` / `.cpp` | model | `OptimizedModel` + its workspace; the `kOptimized` family builder | T07 |
 | `src/model/workspace.h` / `.cpp` | model | `Workspace` (model-level buffers + per-worker scratch, §6) | T07 |
@@ -573,6 +574,40 @@ widen — no accumulation, so no tolerance); the logits match the reference with
 the GEMM tolerance (§10). A dedicated test builds a tied model and asserts the
 gathered embedding row `v` equals the packed lm_head's logical row `v`
 (the shared-storage-across-layouts property, model-execution.md §4.3).
+
+**As-built (M6-T06).**
+
+- **Two kernel entries, one widen path** (`src/kernels/embedding.{h,cpp}`):
+  `EmbeddingLookupF32` (row-major `[V, E]` source) and
+  `EmbeddingLookupPackedF32` (packed `[PackedPanels(V), E, kNr]` source). Both
+  thread over tokens (`kRowGrain = 1`); each output row is written by exactly
+  one worker, so the result is bit-identical across thread counts. The
+  contiguous (row-major) path widens a whole row in one call; the strided
+  (packed) path gathers each row's `kNr`-strided 16-bit lanes into a fixed stack
+  buffer a `kGatherChunk`-wide chunk at a time, then widens the chunk — the
+  widen is Class E (chunk-invariant), so chunking is bit-exact.
+- **No per-ISA TU.** The gather has no ISA-specific control flow; its only
+  per-element arithmetic is the fp16/bf16→fp32 widen, which the M3-T06 `convert`
+  variants (`scalar/neon/avx2::{Bf16,Fp16}ToFp32`) already provide bit-exact per
+  `half.h`. So `embedding.cpp` builds a `KernelTable<WidenFn>` from those
+  variants and `Select`s once — `ENGINE_FORCE_ISA` still selects the widen path,
+  keeping the forced-scalar pass honest. This amends the §2 file-table entry
+  (which sketched per-ISA TUs); a blind AVX2 embedding TU would be a pure
+  wrapper for no benefit. f32 tables need no widen (a `memcpy`/strided copy).
+- **Storage sharing is a `Tensor` handle, not a raw borrow.** The tied
+  `OptimizedEmbedding::FromPackedLinear` holds `PackedLinear::packed_weight()`
+  **by value** — the refcounted `shared_ptr<Buffer>` keeps the one physical
+  packed copy alive independently of the `PackedLinear` object, so the linear may
+  then be moved into a `unique_ptr<Linear>` (what M6-T07's `OptimizedModel` does)
+  without dangling. Tested: `source().data() == lm_head.packed_weight().data()`,
+  and the lookup still matches after the linear is moved.
+- **The id-range pre-scan lives in the module, not the kernel.** The kernel
+  entries are raw-pointer, precondition-only (like `PackedGemm`);
+  `OptimizedEmbedding::forward` front-loads the `y` shape/dtype checks and the
+  `[0, V)` id scan (naming the offending index+value exactly as
+  `cpu::embedding_lookup`) so a bad id never reaches the gather (an
+  out-of-bounds read), and nothing inside the parallel region does anything but
+  move+widen (§5, ADR-003).
 
 ---
 

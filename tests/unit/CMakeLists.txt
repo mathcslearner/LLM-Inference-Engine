@@ -247,6 +247,29 @@ engine_add_tests(TREE unit SOURCES
   LABELS kernels
   SCALAR_PASS)
 
+# embedding_kernel_test (M6-T06): the embedding-lookup kernels (row-major and
+# packed-lm_head layouts) vs a single-threaded reference gather and the
+# cpu::embedding_lookup oracle — bit-exact (pure gather + exact widen, §7/§10).
+# Reads fixtures via engine::model's SafetensorsFile/loader and the oracle from
+# engine::cpu; SCALAR_PASS proves the scalar widen path. `kernels` label.
+engine_add_tests(TREE unit SOURCES
+  embedding_kernel_test.cpp
+  DEPS engine::kernels engine::cpu engine::model
+  LABELS kernels
+  SCALAR_PASS)
+
+# embedding_logits_test (M6-T06): the OptimizedEmbedding module (untied
+# table + tied packed-lm_head sharing) vs the reference Embedding, and the
+# lm_head logits path (PackedLinear GEMM/GEMV) vs ReferenceLinear and the HF
+# logits golden. A dispatched gather + GEMM run inside, so this `model` suite
+# opts into SCALAR_PASS (design §9). Depends on engine::cpu for the oracle path
+# in the reference Embedding.
+engine_add_tests(TREE unit SOURCES
+  embedding_logits_test.cpp
+  DEPS engine::model engine::cpu
+  LABELS model
+  SCALAR_PASS)
+
 # The ENGINE_FORCE_ISA failure modes, exercised through the real environment
 # variable (M3 audit; design §4.3). The in-process death tests can only reach
 # detail::ResolveIsa — SelectedIsa()'s memoization hides the env path — so

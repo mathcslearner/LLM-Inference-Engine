@@ -909,7 +909,7 @@ sequences when batched later).
 **Acceptance criteria:**
 - Tests vs reference across cache lengths {1, 63, 64, 65, 2048} and GQA configs; matches the prefill path's result for the same token.
 
-### M6-T06 · Embedding & logits path
+### M6-T06 · Embedding & logits path — ✅ DONE (2026-08-18)
 Embedding-lookup (ids → packed rows, handling repacked layouts) and the lm_head
 GEMM/GEMV producing fp32 logits; tied embeddings honored (lookup and projection
 share storage across different layouts — resolved in the design doc).

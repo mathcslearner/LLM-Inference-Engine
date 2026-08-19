@@ -5,9 +5,9 @@
 # implementation detail (never in a public header, design §2) and stays
 # PRIVATE.
 add_library(engine_model STATIC checkpoint.cpp config.cpp loader.cpp
-                                mapped_file.cpp modules.cpp packed_linear.cpp
-                                reference_model.cpp registry.cpp safetensors.cpp
-                                weight_map.cpp)
+                                mapped_file.cpp modules.cpp optimized_embedding.cpp
+                                packed_linear.cpp reference_model.cpp registry.cpp
+                                safetensors.cpp weight_map.cpp)
 add_library(engine::model ALIAS engine_model)
 target_include_directories(engine_model PUBLIC ${PROJECT_SOURCE_DIR}/src)
 # engine::cpu is PRIVATE: modules.cpp/reference_model.cpp call cpu:: ops, but no
@@ -16,7 +16,8 @@ target_include_directories(engine_model PUBLIC ${PROJECT_SOURCE_DIR}/src)
 #
 # engine::kernels is PRIVATE (M6-T02, the `model → kernels` downward edge —
 # already allowed by ADR-002 §2.2, no amendment): packed_linear.cpp calls
-# kernels::PackedGemm / PackWeightPanels, but packed_linear.h exposes only a
+# kernels::PackedGemm / PackWeightPanels and optimized_embedding.cpp (M6-T06)
+# calls kernels::EmbeddingLookup*, but their headers expose only a
 # tensor::Tensor for the packed bytes, never a kernels type
 # (optimized-cpu-execution.md §2.1).
 #
