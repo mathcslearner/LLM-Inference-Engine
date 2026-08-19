@@ -11,6 +11,7 @@
 #include "model/registry.h"
 #include "model/safetensors.h"
 #include "model/workspace.h"
+#include "sampling/params.h"
 #include "tensor/dtype.h"
 #include "tensor/ops.h"
 #include "tensor/shape.h"
@@ -68,6 +69,7 @@ using engine::model::Model;
 using engine::model::OptimizedModel;
 using engine::model::SafetensorsFile;
 using engine::model::Workspace;
+using engine::sampling::SamplingParams;
 using engine::tensor::DataType;
 using engine::tensor::Shape;
 using engine::tensor::Tensor;
@@ -363,7 +365,8 @@ TEST(OptimizedModelTest, GreedyMatchesReferenceAndGolden) {
     const std::int64_t max_new = GoldenMaxNew(fixture);
     std::unique_ptr<Model> opt = Optimized(fixture);
     std::unique_ptr<Model> ref = Reference(fixture);
-    const GenerateOptions options{.max_new_tokens = max_new, .eos_ids = {}};
+    const GenerateOptions options{.sampling = SamplingParams::Greedy(max_new),
+                                  .eos_ids = {}};
 
     for (const GenerateCase& c : LoadGoldenCases(fixture)) {
       SCOPED_TRACE(c.name);
@@ -382,7 +385,8 @@ TEST(OptimizedModelTest, GreedyMatchesReferenceAndGolden) {
 TEST(OptimizedModelTest, GenerationIsDeterministic) {
   std::unique_ptr<Model> opt = Optimized(kLlama);
   const GenerateCase c = LoadGoldenCases(kLlama).front();
-  const GenerateOptions options{.max_new_tokens = 24, .eos_ids = {}};
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(24),
+                                .eos_ids = {}};
   SimpleKvCache ca = FreshCache(*opt, 256);
   SimpleKvCache cb = FreshCache(*opt, 256);
   const std::vector<std::int32_t> a =

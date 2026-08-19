@@ -1625,3 +1625,73 @@ Design docs synced: `optimized-cpu-execution.md` §10 benchmark-obligations M6-T
 bullet marked landed with the numbers; §5 pool note updated (the consequential
 finding is the heterogeneous cores, not the briefly-idle core). No `src/` change;
 907 ctest entries green (905 prior + 2 smoke); format + scoped tidy clean.
+
+## Milestone 7 — Sampling & Generation Controls
+
+### M7-T01 — SamplingParams & pipeline skeleton (2026-08-18)
+
+Replaced greedy-only generation's hard-coded argmax with a real (if
+single-branch) sampling pipeline, without changing any output. New `sampling`
+module content (the archive was an anchor-only placeholder until now):
+
+- **`src/sampling/params.{h,cpp}`** — `SamplingParams` (temperature, top_k,
+  top_p, repetition/presence/frequency penalties, optional seed, max_tokens,
+  stop_token_ids, stop_strings, logprobs) with OpenAI/vLLM-convention defaults
+  (a default-constructed value is the identity "sample from raw softmax"
+  request) and `ValidateSamplingParams` — the single validation entry point
+  (shared with the future M10 request mapper), returning `InvalidArgument`
+  naming the offending field. `SamplingParams::Greedy(max_tokens)` builds the
+  pre-M7 config (temperature 0). `kMaxLogprobs = 20` (the OpenAI cap).
+- **`src/sampling/sampler.{h,cpp}`** — the single-sequence reference `Sampler`.
+  `Create(params)` validates, then **rejects any parameter outside the greedy
+  subset with `Unimplemented` naming the field** (the `Backend::kOptimized`-
+  until-M6 posture — no requested knob silently ignored; each later ticket drops
+  its guard). `Sample(logits, SampleContext{prompt_ids, generated_ids})`
+  dispatches on `temperature`: the `== 0` branch is argmax with a strict-`>`
+  lowest-index tie-break (NaN max → `Internal`, empty row → `InvalidArgument`) —
+  the greedy logic moved verbatim from the M5-T09 loop's `ArgmaxLastRow`; the
+  `> 0` branch is the T02 seam (currently `Unimplemented`). History-stateless
+  (the engine owns the token vectors; `generated_ids.size()` is the step index
+  the RNG/penalties will key on), so it is cheap per-request and ready for the
+  batched path (T06) and M9's `Request`.
+
+Engine routing (`src/engine/generator.{h,cpp}`): `GenerateOptions` swaps
+`max_new_tokens` for a `sampling::SamplingParams sampling` field (`eos_ids` stays
+a separate, model-derived field — config/tokenizer EOS, distinct from a
+request's `stop_token_ids`). `Generate` builds one `Sampler` up front (its
+validation/`Unimplemented` are front-loaded like the old `max_new_tokens <= 0`
+check, `cache` untouched on error), reads the last logits row as a `[V]` span,
+and replaces both argmax calls with `sampler.Sample(...)`. `engine → sampling`
+linked PUBLIC (generator.h exposes `SamplingParams`); the old
+`ArgmaxLastRow`/`tensor` argmax dropped (tensor stays a PRIVATE link for the row
+read).
+
+**Non-obvious decisions.** (1) `max_new_tokens → sampling.max_tokens` is a
+deliberate breaking rename across the six call sites (main.cpp, bench_generate,
+three test suites) — one source of truth, the OpenAI/roadmap name — over keeping
+a duplicate field. (2) Not-yet-implemented knobs `Unimplemented` rather than
+ignored, so a default `SamplingParams` (temperature 1.0) does **not** run in
+T01; greedy call sites use `SamplingParams::Greedy(n)`. (3) `Sample` is `const`
+in T01 (greedy is pure) with a header note that T02's RNG counter becomes
+`mutable` (or the qualifier drops) — chosen over leaving it non-const-able and
+carrying a NOLINT. (4) The NaN-max contract is exactly the ported M5 one: the
+strict-`>` scan makes the max NaN only when the leading logit is NaN, not on any
+NaN in the row — the sampler test asserts the real contract, not a stronger one.
+
+Docs: model-execution.md §15 written (SamplingParams table, the fixed stage
+order, the `Sampler` contract, engine routing, the per-ticket forward map); §10
+snippet re-annotated with an M7-T01 update note; §14 sampling bullet retired to
+"designed in §15".
+
+Tests (+35 gtest cases → 912 green, 942 ctest entries): new
+`sampling_params_test` (18 — defaults, `Greedy`, boundary acceptances, one
+rejection per rule with the field named) and `sampler_test` (16 — greedy
+argmax/tie-break/single-element/determinism, empty-row and NaN error posture,
+the `Unimplemented` guard per not-yet-landed knob, the `InvalidArgument` vs
+`Unimplemented` distinction), both portable C++ (`sampling` label, no
+SCALAR_PASS). One `generator_test` case added (a stochastic request is rejected
+`Unimplemented` before generating, cache untouched); the existing greedy goldens
+across `generator_test`/`qwen2_family_test`/`optimized_model_test` (HF
+`generate.json` token-for-token, determinism, KV invariant, EOS/max-cap,
+callback, error paths) pass unchanged — the regression guarantee. Full ctest
+green; format + scoped tidy clean.

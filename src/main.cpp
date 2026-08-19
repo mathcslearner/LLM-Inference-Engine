@@ -6,6 +6,7 @@
 #include "model/loader.h"
 #include "model/model.h"
 #include "model/registry.h"
+#include "sampling/params.h"
 #include "tensor/dtype.h"
 #include "tokenizer/detokenize.h"
 #include "tokenizer/tokenizer.h"
@@ -43,6 +44,7 @@ using engine::model::BuildModel;
 using engine::model::BuildOptions;
 using engine::model::load_model;
 using engine::model::Model;
+using engine::sampling::SamplingParams;
 using engine::tokenizer::DetokenizerStream;
 using engine::tokenizer::Tokenizer;
 
@@ -117,8 +119,9 @@ struct Args {
   const CacheGeometry geom = model->cache_geometry();
   ASSIGN_OR_RETURN(SimpleKvCache cache, SimpleKvCache::Create(geom, capacity));
 
-  const GenerateOptions options{.max_new_tokens = args.max_new_tokens,
-                                .eos_ids = model->config().eos_token_ids};
+  const GenerateOptions options{
+      .sampling = SamplingParams::Greedy(args.max_new_tokens),
+      .eos_ids = model->config().eos_token_ids};
 
   fmt::print("model:   {}\n", args.model_dir);
   fmt::print("backend: {}\n", engine::engine::BackendName(args.backend));

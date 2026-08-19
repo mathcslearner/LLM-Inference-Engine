@@ -8,6 +8,7 @@
 #include "model/loader.h"
 #include "model/model.h"
 #include "model/registry.h"
+#include "sampling/params.h"
 #include "tensor/dtype.h"
 
 #include <gtest/gtest.h>
@@ -49,6 +50,7 @@ using engine::model::ForwardRequest;
 using engine::model::load_model;
 using engine::model::LogitsMode;
 using engine::model::Model;
+using engine::sampling::SamplingParams;
 using engine::tensor::DataType;
 
 // tiny-llama fixture invariants (config.json).
@@ -137,7 +139,8 @@ TEST(GeneratorTest, GreedyContinuationMatchesHfGolden) {
 
   for (const GenerateCase& c : LoadGoldenCases()) {
     SimpleKvCache cache = FreshCache();
-    const GenerateOptions options{.max_new_tokens = max_new, .eos_ids = {}};
+    const GenerateOptions options{.sampling = SamplingParams::Greedy(max_new),
+                                  .eos_ids = {}};
     const std::vector<std::int32_t> got =
         Unwrap(Generate(*model, cache, c.prompt_ids, options));
     EXPECT_EQ(got, c.generated_ids) << "case " << c.name;
@@ -152,7 +155,8 @@ TEST(GeneratorTest, GreedyContinuationMatchesHfGolden) {
 TEST(GeneratorTest, TwoRunsAreIdentical) {
   const std::unique_ptr<Model> model = BuildTiny();
   const GenerateCase c = LoadGoldenCases().front();
-  const GenerateOptions options{.max_new_tokens = 24, .eos_ids = {}};
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(24),
+                                .eos_ids = {}};
 
   SimpleKvCache cache_a = FreshCache();
   SimpleKvCache cache_b = FreshCache();
@@ -171,7 +175,8 @@ TEST(GeneratorTest, MaxNewTokensStops) {
 
   for (const std::int64_t n : {std::int64_t{1}, std::int64_t{7}}) {
     SimpleKvCache cache = FreshCache();
-    const GenerateOptions options{.max_new_tokens = n, .eos_ids = {}};
+    const GenerateOptions options{.sampling = SamplingParams::Greedy(n),
+                                  .eos_ids = {}};
     const std::vector<std::int32_t> got =
         Unwrap(Generate(*model, cache, c.prompt_ids, options));
     ASSERT_EQ(static_cast<std::int64_t>(got.size()), n);
@@ -187,7 +192,7 @@ TEST(GeneratorTest, EosOnFirstTokenStopsImmediately) {
   const std::unique_ptr<Model> model = BuildTiny();
   const GenerateCase c = LoadGoldenCases().front();
   // Make the very first produced token an EOS: generation returns exactly it.
-  const GenerateOptions options{.max_new_tokens = 40,
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(40),
                                 .eos_ids = {c.generated_ids.front()}};
   SimpleKvCache cache = FreshCache();
   const std::vector<std::int32_t> got =
@@ -214,7 +219,8 @@ TEST(GeneratorTest, EosMidSequenceStopsAtFirstOccurrenceInclusive) {
   }
 
   SimpleKvCache cache = FreshCache();
-  const GenerateOptions options{.max_new_tokens = 40, .eos_ids = {eos}};
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(40),
+                                .eos_ids = {eos}};
   const std::vector<std::int32_t> got =
       Unwrap(Generate(*model, cache, c.prompt_ids, options));
   EXPECT_EQ(got, expected);
@@ -231,7 +237,8 @@ TEST(GeneratorTest, OnTokenFiresOncePerIdInOrderBeforeNextForward) {
   SimpleKvCache cache = FreshCache();
   std::vector<std::int32_t> streamed;
   std::vector<std::int64_t> cache_len_at_callback;
-  const GenerateOptions options{.max_new_tokens = 16, .eos_ids = {}};
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(16),
+                                .eos_ids = {}};
   const std::vector<std::int32_t> got = Unwrap(
       Generate(*model, cache, c.prompt_ids, options, [&](std::int32_t id) {
         streamed.push_back(id);
@@ -276,7 +283,8 @@ TEST(GeneratorTest, ContinuationFromNonEmptyCacheMatchesFullPrompt) {
   const std::vector<std::int32_t> tail(c.prompt_ids.begin() + split,
                                        c.prompt_ids.end());
   const std::int64_t n = 16;
-  const GenerateOptions options{.max_new_tokens = n, .eos_ids = {}};
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(n),
+                                .eos_ids = {}};
   const std::vector<std::int32_t> got =
       Unwrap(Generate(*model, cache, tail, options));
   for (std::int64_t i = 0; i < n; ++i) {
@@ -291,7 +299,8 @@ TEST(GeneratorTest, ContinuationFromNonEmptyCacheMatchesFullPrompt) {
 TEST(GeneratorTest, EmptyPromptIsInvalidArgument) {
   const std::unique_ptr<Model> model = BuildTiny();
   SimpleKvCache cache = FreshCache();
-  const GenerateOptions options{.max_new_tokens = 4, .eos_ids = {}};
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(4),
+                                .eos_ids = {}};
   const std::span<const std::int32_t> empty;
   const auto got = Generate(*model, cache, empty, options);
   ASSERT_FALSE(got.ok());
@@ -304,11 +313,14 @@ TEST(GeneratorTest, NonPositiveMaxNewTokensIsInvalidArgument) {
   const std::unique_ptr<Model> model = BuildTiny();
   SimpleKvCache cache = FreshCache();
   const std::vector<std::int32_t> prompt = {1, 5, 9};
-  const GenerateOptions options{.max_new_tokens = 0, .eos_ids = {}};
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(0),
+                                .eos_ids = {}};
   const auto got = Generate(*model, cache, prompt, options);
   ASSERT_FALSE(got.ok());
   EXPECT_TRUE(IsInvalidArgument(got.status()));
-  EXPECT_NE(got.status().message().find("max_new_tokens"), std::string::npos);
+  // max_new_tokens folded into SamplingParams::max_tokens in M7-T01; the
+  // validation now lives in ValidateSamplingParams.
+  EXPECT_NE(got.status().message().find("max_tokens"), std::string::npos);
 }
 
 TEST(GeneratorTest, InsufficientCapacityIsResourceExhausted) {
@@ -316,7 +328,8 @@ TEST(GeneratorTest, InsufficientCapacityIsResourceExhausted) {
   const std::vector<std::int32_t> prompt = {1, 5, 9};
   // Capacity exactly the prompt length: no room for any decode-step append.
   SimpleKvCache cache = FreshCache(static_cast<std::int64_t>(prompt.size()));
-  const GenerateOptions options{.max_new_tokens = 8, .eos_ids = {}};
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(8),
+                                .eos_ids = {}};
   const auto got = Generate(*model, cache, prompt, options);
   ASSERT_FALSE(got.ok());
   EXPECT_TRUE(IsResourceExhausted(got.status()));
@@ -328,11 +341,29 @@ TEST(GeneratorTest, OutOfRangePromptIdPropagatesFromForward) {
   const std::unique_ptr<Model> model = BuildTiny();
   SimpleKvCache cache = FreshCache();
   const std::vector<std::int32_t> prompt = {1, 512};  // vocab_size == 512
-  const GenerateOptions options{.max_new_tokens = 4, .eos_ids = {}};
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(4),
+                                .eos_ids = {}};
   const auto got = Generate(*model, cache, prompt, options);
   ASSERT_FALSE(got.ok());
   EXPECT_TRUE(IsInvalidArgument(got.status()));
   EXPECT_NE(got.status().message().find("512"), std::string::npos);
+}
+
+TEST(GeneratorTest, NotYetImplementedSamplingIsRejectedBeforeGenerating) {
+  const std::unique_ptr<Model> model = BuildTiny();
+  SimpleKvCache cache = FreshCache();
+  const std::vector<std::int32_t> prompt = {1, 5, 9};
+  // A stochastic request: M7-T01 routes through the sampler, whose Create
+  // rejects temperature > 0 with Unimplemented, front-loaded so nothing is
+  // generated and the cache is untouched.
+  SamplingParams sampling = SamplingParams::Greedy(8);
+  sampling.temperature = 0.7F;
+  const GenerateOptions options{.sampling = sampling, .eos_ids = {}};
+  const auto got = Generate(*model, cache, prompt, options);
+  ASSERT_FALSE(got.ok());
+  EXPECT_TRUE(engine::core::IsUnimplemented(got.status()))
+      << got.status().ToString();
+  EXPECT_EQ(cache.length(), 0);
 }
 
 // ------------------------------------------------------ backend helpers --

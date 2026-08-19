@@ -8,6 +8,7 @@
 #include "model/model.h"
 #include "model/registry.h"
 #include "parallel/thread_pool.h"
+#include "sampling/params.h"
 #include "tensor/dtype.h"
 
 #include <fmt/format.h>
@@ -80,6 +81,7 @@ using engine::model::BuildModel;
 using engine::model::BuildOptions;
 using engine::model::load_model;
 using engine::model::Model;
+using engine::sampling::SamplingParams;
 
 template <typename T>
 [[nodiscard]] T Unwrap(engine::core::StatusOr<T> value) {
@@ -249,7 +251,8 @@ struct RunResult {
   cache.reset();
   // Empty eos set → exactly `new_tokens` decode steps, so the measured decode
   // window is fixed regardless of what the random logits argmax to.
-  const GenerateOptions options{.max_new_tokens = new_tokens, .eos_ids = {}};
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(new_tokens),
+                                .eos_ids = {}};
 
   std::vector<Clock::time_point> stamps;
   stamps.reserve(static_cast<std::size_t>(new_tokens));

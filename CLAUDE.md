@@ -577,9 +577,41 @@ behind an existing subsystem):
   `src/` change; `tools/.venv` restored to its pins after conversion; 907 ctest
   green; format + scoped tidy clean.
 
-Next up: **M7-T01** (SamplingParams & pipeline skeleton: define/validate
-`SamplingParams` — temperature, top_k, top_p, penalties, seed, max_tokens, stop
-tokens/strings, logprobs — document the pipeline stage order in
-model-execution.md, and route the existing greedy path through the new pipeline
-structure so greedy output is unchanged; the first ticket of Milestone 7,
-Sampling & Generation Controls).
+- **M7 (sampling & generation controls) — in progress**: T01 SamplingParams &
+  pipeline skeleton (2026-08-18): new `sampling` module content (was
+  anchor-only) — `src/sampling/params.{h,cpp}` (`SamplingParams`:
+  temperature/top_k/top_p/repetition·presence·frequency penalties/seed/
+  max_tokens/stop_token_ids/stop_strings/logprobs with OpenAI·vLLM defaults, a
+  default value = identity "raw softmax" request; `ValidateSamplingParams` the
+  single field-naming `InvalidArgument` validator shared with the M10 mapper;
+  `SamplingParams::Greedy(n)` = temperature-0; `kMaxLogprobs=20`) and
+  `src/sampling/sampler.{h,cpp}` (single-sequence reference `Sampler`:
+  `Create` validates then **rejects any non-greedy-subset knob with
+  `Unimplemented` naming the field** — no knob silently ignored, each later
+  ticket drops its guard; `Sample(logits, SampleContext{prompt_ids,
+  generated_ids})` dispatches on temperature, `==0` = strict-`>` lowest-index
+  argmax ported verbatim from M5-T09's `ArgmaxLastRow` (NaN max→`Internal`,
+  empty→`InvalidArgument`), `>0` = the T02 seam; history-stateless so
+  `generated_ids.size()` is the step index the RNG/penalties will key on; `const`
+  in T01 with a note that T02's RNG counter goes `mutable`). Engine routing:
+  `GenerateOptions` swaps `max_new_tokens` for a `sampling::SamplingParams`
+  field (`eos_ids` stays separate, model-derived), `Generate` builds one
+  `Sampler` up front (front-loaded validation, cache untouched on error) and
+  samples the last logits row — `engine → sampling` PUBLIC, the old tensor
+  argmax dropped. **Breaking rename `max_new_tokens → sampling.max_tokens`**
+  across 6 call sites (main.cpp, bench_generate, 3 test suites). design §15
+  written (SamplingParams table, fixed stage order penalties→temp→top-k→top-p→
+  select→logprobs, `Sampler` contract, routing, per-ticket forward map); §10
+  re-annotated, §14 sampling bullet retired. +35 gtest cases (sampling_params
+  18, sampler 16 — both `sampling` label, no SCALAR_PASS — + 1 generator
+  rejection case) → 912 green (942 ctest); the greedy `generate.json` goldens on
+  both backends pass unchanged (the regression guarantee). format + scoped tidy
+  clean.
+
+Next up: **M7-T02** (temperature, top-k, top-p sampling: implement the core
+sampler over the final-position logits — temperature scale → top-k → top-p →
+categorical draw with a per-request counter-based Philox RNG, reproducible per
+`(seed, step)` and batch-composition-independent; statistical/chi-square draw
+tests + exact top-k/p mask tests + same-seed-identical/different-seed-independent;
+fills the `Sampler::Sample` `temperature > 0` branch and drops the T02 `Create`
+guards).

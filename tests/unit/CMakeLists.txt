@@ -138,6 +138,16 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::model engine::kvcache engine::cpu
   LABELS model)
 
+# sampling (M7; design: docs/design/model-execution.md §15). SamplingParams
+# validation and the single-sequence reference Sampler (greedy branch in T01).
+# Ordinary portable C++ — depends only on engine::sampling (→ engine::core), no
+# ISA concern, no SCALAR_PASS. `ctest -L sampling` selects the suite alone.
+engine_add_tests(TREE unit SOURCES
+  sampling_params_test.cpp
+  sampler_test.cpp
+  DEPS engine::sampling
+  LABELS sampling)
+
 # generator_test (M5-T09): the greedy generation loop — token-for-token vs the
 # HF generate.json golden (>=32 tokens), determinism, EOS/max-new-tokens
 # stopping, the per-token callback, continuation from a non-empty cache, and the

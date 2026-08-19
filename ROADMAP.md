@@ -947,7 +947,7 @@ exactly the knobs the API layer (M10) will expose.
 **Architecture documents:** sampling pipeline section added to
 `docs/design/model-execution.md` (M7-T01).
 
-### M7-T01 · SamplingParams & pipeline skeleton
+### M7-T01 · SamplingParams & pipeline skeleton — ✅ DONE (2026-08-18)
 Define `SamplingParams` (temperature, top_k, top_p, repetition/presence/frequency
 penalties, seed, max_tokens, stop tokens/strings, logprobs count) with validation;
 document the pipeline stage order in the design doc; implement the greedy path through

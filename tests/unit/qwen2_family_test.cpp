@@ -9,6 +9,7 @@
 #include "model/reference_model.h"
 #include "model/registry.h"
 #include "model/safetensors.h"
+#include "sampling/params.h"
 #include "tensor/dtype.h"
 #include "tensor/ops.h"
 #include "tensor/shape.h"
@@ -63,6 +64,7 @@ using engine::model::LogitsMode;
 using engine::model::Model;
 using engine::model::ReferenceModel;
 using engine::model::SafetensorsFile;
+using engine::sampling::SamplingParams;
 using engine::tensor::DataType;
 using engine::tensor::Shape;
 using engine::tensor::Tensor;
@@ -319,7 +321,8 @@ TEST(Qwen2FamilyTest, GreedyContinuationMatchesHfGolden) {
 
   for (const GenerateCase& c : LoadGoldenCases()) {
     SimpleKvCache cache = FreshCache();
-    const GenerateOptions options{.max_new_tokens = max_new, .eos_ids = {}};
+    const GenerateOptions options{.sampling = SamplingParams::Greedy(max_new),
+                                  .eos_ids = {}};
     const std::vector<std::int32_t> got =
         Unwrap(Generate(*model, cache, c.prompt_ids, options));
     EXPECT_EQ(got, c.generated_ids) << "case " << c.name;
@@ -332,7 +335,8 @@ TEST(Qwen2FamilyTest, GreedyContinuationMatchesHfGolden) {
 TEST(Qwen2FamilyTest, GenerationIsDeterministic) {
   const std::unique_ptr<Model> model = BuildQwen();
   const GenerateCase c = LoadGoldenCases().front();
-  const GenerateOptions options{.max_new_tokens = 24, .eos_ids = {}};
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(24),
+                                .eos_ids = {}};
 
   SimpleKvCache cache_a = FreshCache();
   SimpleKvCache cache_b = FreshCache();
@@ -353,23 +357,26 @@ TEST(Qwen2FamilyTest, ContinuationFromNonEmptyCacheMatchesFullRun) {
 
   // Full run over a fresh cache.
   SimpleKvCache full = FreshCache();
-  const GenerateOptions options{.max_new_tokens = 20, .eos_ids = {}};
+  const GenerateOptions options{.sampling = SamplingParams::Greedy(20),
+                                .eos_ids = {}};
   const std::vector<std::int32_t> whole =
       Unwrap(Generate(*model, full, c.prompt_ids, options));
 
   // Split: prefill a prefix by generating 1 token, then continue from the
   // populated cache with the extended prompt. The concatenation must match.
   SimpleKvCache split = FreshCache();
-  const std::vector<std::int32_t> first = Unwrap(Generate(
-      *model, split, c.prompt_ids, {.max_new_tokens = 1, .eos_ids = {}}));
+  const std::vector<std::int32_t> first =
+      Unwrap(Generate(*model, split, c.prompt_ids,
+                      {.sampling = SamplingParams::Greedy(1), .eos_ids = {}}));
   ASSERT_EQ(first.size(), 1U);
   std::vector<std::int32_t> extended = c.prompt_ids;
   extended.push_back(first.front());
   // The cache already holds prompt tokens; Generate prefills only the last id
   // (positions continue from cache.length()).
   const std::span<const std::int32_t> tail(&extended.back(), 1);
-  const std::vector<std::int32_t> rest = Unwrap(
-      Generate(*model, split, tail, {.max_new_tokens = 19, .eos_ids = {}}));
+  const std::vector<std::int32_t> rest =
+      Unwrap(Generate(*model, split, tail,
+                      {.sampling = SamplingParams::Greedy(19), .eos_ids = {}}));
 
   std::vector<std::int32_t> stitched = first;
   stitched.insert(stitched.end(), rest.begin(), rest.end());

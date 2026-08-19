@@ -3,44 +3,36 @@
 #include "core/status.h"
 #include "kvcache/kv_cache.h"
 #include "model/model.h"
+#include "sampling/params.h"
+#include "sampling/sampler.h"
 #include "tensor/tensor.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
 
-// Greedy generation loop (M5-T09; design: docs/design/model-execution.md §10).
-// Deliberately allocation-light and backend-agnostic: prefill the prompt once
-// (kLast), then decode one token per forward, argmax over the final-position
-// logits, feeding each produced token back as the next step's single input.
+// Generation loop (M5-T09; M7-T01 routes it through the sampler; design:
+// docs/design/model-execution.md §10, §15). Deliberately allocation-light and
+// backend-agnostic: prefill the prompt once (kLast), then decode one token per
+// forward, sampling the next id from the final-position logits and feeding each
+// produced token back as the next step's single input.
 
 namespace engine::engine {
 namespace {
 
-// Argmax over a `[1, V]` (or `[·, V]`) fp32 logits row: scan the last-dimension
-// vector with a strict `>` so the lowest vocab index wins ties (deterministic,
-// the two-runs-identical criterion). A non-finite maximum (NaN — an upstream
-// numerics bug) is surfaced as Internal rather than returned as a bogus token.
-[[nodiscard]] core::StatusOr<std::int32_t> ArgmaxLastRow(
-    const tensor::Tensor& logits) {
+// The `[1, V]` (or `[·, V]`) logits tensor from `forward` as a flat `[V]` span
+// over its last row, for the sampler. `forward` returns a contiguous
+// caller-owned buffer (kLast is a single row), so the last `V` elements are the
+// final position's logits.
+[[nodiscard]] std::span<const float> LastRow(const tensor::Tensor& logits) {
   const int rank = logits.shape().rank();
   const std::int64_t vocab = logits.shape().dim(rank - 1);
-  const float* row = logits.data_ptr<float>();
-  std::int64_t best = 0;
-  float best_val = row[0];
-  for (std::int64_t v = 1; v < vocab; ++v) {
-    if (row[v] > best_val) {
-      best_val = row[v];
-      best = v;
-    }
-  }
-  if (std::isnan(best_val)) {
-    return core::InternalError("argmax over non-finite logits (max is NaN)");
-  }
-  return static_cast<std::int32_t>(best);
+  const std::int64_t rows = logits.numel() / vocab;
+  const float* base = logits.data_ptr<float>();
+  const auto offset = static_cast<std::size_t>((rows - 1) * vocab);
+  return std::span<const float>{base + offset, static_cast<std::size_t>(vocab)};
 }
 
 }  // namespace
@@ -52,30 +44,35 @@ core::StatusOr<std::vector<std::int32_t>> Generate(
   if (prompt_ids.empty()) {
     return core::InvalidArgumentError("prompt_ids must be non-empty");
   }
-  if (options.max_new_tokens <= 0) {
-    return core::InvalidArgumentError("max_new_tokens must be > 0, got {}",
-                                      options.max_new_tokens);
+  // Build the sampler up front: `Create` validates the params (an invalid or
+  // not-yet-implemented `sampling` fails here, before any forward) and gives
+  // the authoritative `max_tokens` the loop caps on. This is where the old
+  // `max_new_tokens <= 0` check now lives (ValidateSamplingParams).
+  auto sampler = sampling::Sampler::Create(options.sampling);
+  if (!sampler.ok()) {
+    return sampler.status();
   }
+  const std::int64_t max_tokens = sampler->params().max_tokens;
 
   const auto prompt_len = static_cast<std::int64_t>(prompt_ids.size());
   const std::int64_t start = cache.length();
   // Worst-case cache occupancy (no early EOS): the prompt (prefill) plus one
   // appended token per decode step. The final produced token is never appended,
-  // so the peak length is start + prompt_len + (max_new_tokens - 1). Checked up
+  // so the peak length is start + prompt_len + (max_tokens - 1). Checked up
   // front — a StatusOr<vector> cannot carry a partial result beside a Status.
-  const std::int64_t peak = start + prompt_len + (options.max_new_tokens - 1);
+  const std::int64_t peak = start + prompt_len + (max_tokens - 1);
   if (peak > cache.capacity()) {
     return core::ResourceExhaustedError(
         "cache capacity {} too small for prompt {} + {} new tokens from length "
         "{} (needs {})",
-        cache.capacity(), prompt_len, options.max_new_tokens, start, peak);
+        cache.capacity(), prompt_len, max_tokens, start, peak);
   }
 
   const auto is_eos = [&](std::int32_t id) {
     return std::ranges::find(options.eos_ids, id) != options.eos_ids.end();
   };
 
-  const auto cap = static_cast<std::size_t>(options.max_new_tokens);
+  const auto cap = static_cast<std::size_t>(max_tokens);
   std::vector<std::int32_t> generated;
   generated.reserve(cap);
 
@@ -97,7 +94,11 @@ core::StatusOr<std::vector<std::int32_t>> Generate(
     if (!logits.ok()) {
       return logits.status();
     }
-    auto next = ArgmaxLastRow(*logits);
+    // Step 0: no tokens generated yet, so the sampler's context history is the
+    // prompt alone.
+    auto next = sampler->Sample(
+        LastRow(*logits), sampling::SampleContext{.prompt_ids = prompt_ids,
+                                                  .generated_ids = generated});
     if (!next.ok()) {
       return next.status();
     }
@@ -124,7 +125,12 @@ core::StatusOr<std::vector<std::int32_t>> Generate(
     if (!logits.ok()) {
       return logits.status();
     }
-    auto next = ArgmaxLastRow(*logits);
+    // `generated` holds every token produced so far, so its size is this step's
+    // index — exactly the context the penalties (T03) and seeded RNG (T02) key
+    // on.
+    auto next = sampler->Sample(
+        LastRow(*logits), sampling::SampleContext{.prompt_ids = prompt_ids,
+                                                  .generated_ids = generated});
     if (!next.ok()) {
       return next.status();
     }

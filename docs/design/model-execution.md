@@ -787,9 +787,9 @@ core::Status RegisterArchitecture(std::string_view hf_arch_name,
 ## 10. Generation loop (M5-T09) — landed 2026-08-18
 
 ```cpp
-// src/engine/generator.h
+// src/engine/generator.h  (M7-T01: max_new_tokens folded into sampling)
 struct GenerateOptions {
-  std::int64_t max_new_tokens = 0;                 // hard cap; > 0 required
+  sampling::SamplingParams sampling;               // §15; max_tokens > 0 required
   std::vector<std::int32_t> eos_ids;               // stop when any is produced
 };
 
@@ -802,6 +802,13 @@ using TokenCallback = std::function<void(std::int32_t)>;
     Model& model, KvCache& cache, std::span<const std::int32_t> prompt_ids,
     const GenerateOptions& options, const TokenCallback& on_token = {});
 ```
+
+> **M7-T01 update.** `GenerateOptions` now carries a `sampling::SamplingParams`
+> instead of a bare `max_new_tokens` (see the annotated snippet above); the
+> `max_new_tokens` in the prose below is now `options.sampling.max_tokens`, and
+> "argmax" is the sampler's `temperature == 0` branch. The loop's mechanics,
+> stopping, error posture, and determinism are otherwise unchanged — greedy
+> output is bit-identical. See §15.4 for the routing.
 
 - **Prefill** the whole prompt in one `forward` (positions `P0..P0+T-1` where
   `P0 = cache.length()` — the loop continues from a non-empty cache, so `P0` is
@@ -975,8 +982,9 @@ message names the offending input (the actionability criterion, tested).
   M6/M12, behind the `Model`/`Linear` contracts above. *(M6-T01 landed the design:
   `docs/design/optimized-cpu-execution.md` — packed tile layout, workspace sizing,
   backend selection, kernel-validation tolerance table.)*
-- **Sampling** (temperature, top-k/p, penalties, logprobs, seeded RNG) — M7;
-  M7-T01 appends §15 here.
+- **Sampling** (temperature, top-k/p, penalties, logprobs, seeded RNG) — M7,
+  designed in §15 (M7-T01 landed `SamplingParams` + the `Sampler` skeleton with
+  the greedy branch; T02–T06 fill in the stages).
 - **Batching / ragged forward / cu_seqlens** — M9; `ForwardRequest` grows the
   fields (§5.1, §5.4).
 - **Paged storage, block tables, refcounts, INT8 KV** — M8/M13; the `KvCache`
@@ -997,6 +1005,139 @@ message names the offending input (the actionability criterion, tested).
 
 ## 15. Sampling pipeline
 
-*Placeholder — M7-T01 appends the sampling-pipeline design here (SamplingParams,
-penalties, top-k/p, stop conditions, logprobs, seeded RNG), extending the
-`Model::forward` logits contract of §5.2.*
+The generation loop (§10) turns a position's logits into a token. M5/M6
+hard-coded that step to argmax; M7 replaces it with a configurable **sampling
+pipeline** — temperature, top-k/top-p, penalties, seeded RNG, stop conditions,
+logprobs. This section is the contract M7-T01…T06 build on; T01 lands the
+`SamplingParams` struct, the `Sampler` skeleton, and the greedy branch, and
+routes the existing loop through it with **no behavioural change**. Each later
+ticket fills in one stage.
+
+The module is `sampling` (`src/sampling/`), a layer-2 domain module depending
+only on `core` (ADR-002) — no `model`/`tensor` edge, so the whole pipeline is
+unit-testable on CPU-only CI in isolation. The engine (`engine → sampling`,
+already an allowed edge) constructs one `Sampler` per request and calls it once
+per produced token.
+
+### 15.1 `SamplingParams` (M7-T01)
+
+`src/sampling/params.h` — the per-request knob bundle the API layer (M10) maps
+OpenAI request fields onto. Every field has a meaningful default; a
+default-constructed value is the identity request ("sample from the raw
+softmax"). Semantics follow the OpenAI / vLLM conventions:
+
+| Field | Type | Default | Meaning / validation |
+|---|---|---|---|
+| `temperature` | `float` | `1.0` | logit scale `1/temperature`; **exactly `0` ⇒ greedy** (argmax, no division). Finite, `>= 0`. |
+| `top_k` | `int32` | `0` | keep the `k` highest logits; `0` disables (HF convention). `>= 0`. |
+| `top_p` | `float` | `1.0` | nucleus: smallest set with cumulative prob `>= top_p`; `1.0` keeps all. Finite, `0 < top_p <= 1`. |
+| `repetition_penalty` | `float` | `1.0` | HF divide-if-positive / multiply-if-negative on seen tokens; `1.0` no-op. Finite, `> 0`. |
+| `presence_penalty` | `float` | `0.0` | flat subtraction for any seen token; `0.0` no-op. Finite, `[-2, 2]`. |
+| `frequency_penalty` | `float` | `0.0` | subtraction scaled by occurrence count; `0.0` no-op. Finite, `[-2, 2]`. |
+| `seed` | `optional<uint64>` | `nullopt` | per-request RNG seed (T02 Philox); `nullopt` = engine-chosen. |
+| `max_tokens` | `int64` | `0` | hard cap on generated tokens (prompt excluded). `> 0`. **This is what the M5/M6 `GenerateOptions::max_new_tokens` folded into.** |
+| `stop_token_ids` | `vector<int32>` | `{}` | stop on any of these ids (T04). Each `>= 0`. |
+| `stop_strings` | `vector<string>` | `{}` | stop on any of these strings in the detokenized stream (T04). None empty. |
+| `logprobs` | `int32` | `0` | top-N logprobs per step (T05); `0` off. `[0, kMaxLogprobs]` (`kMaxLogprobs = 20`, the OpenAI cap). |
+
+`ValidateSamplingParams(const SamplingParams&) → Status` is the single
+validation entry point (shared by `Sampler::Create` and the M10 request mapper),
+returning `InvalidArgument` naming the offending field on the first violation.
+`SamplingParams::Greedy(max_tokens)` is the convenience constructor for the
+pre-M7 configuration (`temperature = 0`, everything else default) that all
+current greedy call sites use.
+
+Deliberately **out of scope** for M7 (M10/later, noted so the struct is not
+mistaken for complete): `n` (multiple completions), `min_p`, `ignore_eos`,
+`logit_bias`. Adding them is a field plus a validation clause — no interface
+break.
+
+### 15.2 Stage order
+
+The sampler runs these stages over a single position's `[V]` fp32 logits row
+(the last row of the `kLast` forward output — §5.2); the order is fixed and
+matches vLLM / OpenAI so results are comparable:
+
+1. **Penalties** (T03) — repetition / presence / frequency, computed over the
+   request's token history (prompt + generated). Applied to raw logits, *before*
+   temperature (documented choice, matching vLLM).
+2. **Temperature** (T02) — divide logits by `temperature`. Skipped entirely when
+   `temperature == 0` (the greedy branch, which bypasses stages 2–4 and the
+   categorical draw).
+3. **Top-k filter** (T02) — keep the `k` highest logits, mask the rest to `-inf`.
+4. **Top-p (nucleus) filter** (T02) — over the post-k softmax, keep the smallest
+   high-probability set reaching cumulative `top_p`.
+5. **Selection** — greedy argmax (`temperature == 0`, **T01**) or a categorical
+   draw from the filtered distribution with a counter-based Philox RNG keyed on
+   `(seed, step_index)` (T02), so a draw is reproducible per `(seed, step)` and
+   independent of batch composition.
+6. **Logprobs** (T05) — the chosen-token logprob and top-N logprobs, computed
+   from the same post-processing logits the sampler saw (documented choice).
+
+**Stop conditions** (T04) live in the generation loop, not the sampler: after a
+token is selected the loop checks the model's EOS set (`GenerateOptions::eos_ids`)
+and the request's `stop_token_ids` / `stop_strings` (the latter matched on the
+incrementally detokenized stream, across token boundaries — §M4-T10), and
+`max_tokens`, producing a `finish_reason` (`stop` / `length`).
+
+### 15.3 `Sampler` (M7-T01)
+
+`src/sampling/sampler.h` — the single-sequence **reference** sampler:
+
+```cpp
+struct SampleContext {                         // per-call token history
+  std::span<const std::int32_t> prompt_ids;    // prefill input
+  std::span<const std::int32_t> generated_ids; // this request's output so far;
+                                               // its size is the step index
+};
+
+class Sampler {
+ public:
+  static core::StatusOr<Sampler> Create(SamplingParams params);
+  core::StatusOr<std::int32_t> Sample(std::span<const float> logits,
+                                      const SampleContext& context);
+  const SamplingParams& params() const;
+};
+```
+
+- **`Create`** validates (`ValidateSamplingParams`) and then, in T01, rejects any
+  parameter outside the greedy subset with **`Unimplemented`** naming the field —
+  the same "not silently ignored" posture as `Backend::kOptimized` before M6.
+  Each later ticket removes its guard as it lands the stage, so at no point is a
+  requested knob dropped without an error.
+- **`Sample`** dispatches on the selection mode: `temperature == 0` → argmax with
+  a strict `>` scan (lowest vocab index wins ties → deterministic; a NaN maximum
+  → `Internal`; an empty row → `InvalidArgument`). This is the greedy logic moved
+  verbatim from the M5-T09 loop's `ArgmaxLastRow`. The `temperature > 0` branch
+  is the seam T02 fills.
+- **History-stateless**: the engine already owns the prompt/generated vectors, so
+  the sampler holds only params (and, from T02, per-request RNG/scratch). This
+  keeps it cheap to construct per sequence, trivially per-request for the batched
+  path (T06) and M9's `Request`, and lets `generated_ids.size()` be the step
+  index the RNG and penalties key on.
+
+### 15.4 Engine routing (M7-T01)
+
+`GenerateOptions` (§10) changes from `{ max_new_tokens, eos_ids }` to
+`{ sampling::SamplingParams sampling, eos_ids }`: `max_new_tokens` folds into
+`sampling.max_tokens`, and `eos_ids` stays a separate, model-derived field
+(config/tokenizer EOS), distinct from a request's `SamplingParams::stop_token_ids`
+(T04). `Generate` builds one `Sampler` up front (its validation/`Unimplemented`
+are front-loaded, `cache` untouched on error) and replaces the two argmax calls
+with `sampler.Sample(last_row, {prompt_ids, generated})`. With
+`SamplingParams::Greedy(n)` the output is bit-identical to the pre-M7 loop — the
+regression the M5/M6 `generate.json` goldens (both backends) assert unchanged.
+
+### 15.5 What later tickets add (recorded, not built)
+
+- **T02** temperature/top-k/top-p + Philox RNG; statistical (chi-square) and
+  exact-mask tests; the `temperature > 0` branch of `Sample`.
+- **T03** penalties over history; exact hand-computed logit-adjustment tests.
+- **T04** stop conditions & `finish_reason` in the loop; stop-string matching
+  across token boundaries.
+- **T05** logprobs from the sampler's post-processing logits.
+- **T06** batched sampler (vectorized softmax/filter reusing M3/M6 kernels,
+  partial-sort top-k, `parallel_for` across sequences, per-request Philox) —
+  **must pick identical tokens to this reference sampler given identical RNG
+  counters** (the acceptance criterion). The single-sequence `Sampler` here is
+  that reference.
