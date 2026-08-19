@@ -119,6 +119,15 @@ engine_add_tests(TREE unit SOURCES
   simple_cache_test.cpp
   DEPS engine::kvcache engine::tensor)
 
+# block_pool_test (M8-T02): BlockPool free-list allocate/release, refcount
+# share, exhaustion, double-free/share-on-free CHECK death tests, scripted stats,
+# blocks_needed, the §5.2 capacity helpers, and thread-safety. Pure bookkeeping,
+# no model or kernels, so no SCALAR_PASS. Links engine::memory for the
+# CachingAllocator-backed and scriptable-upstream construction tests.
+engine_add_tests(TREE unit SOURCES
+  block_pool_test.cpp
+  DEPS engine::kvcache engine::memory engine::tensor)
+
 # model_test (M5-T07): the DecoderLayer/Mlp modules, ReferenceModel end-to-end
 # logits vs activations.safetensors, the per-layer activation hook, kLast/kAll
 # consistency, and the KV-cache invariant elevated to full-model logits. Uses

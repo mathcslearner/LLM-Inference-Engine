@@ -399,6 +399,35 @@ class BlockPool {
 `stats()` accuracy through scripted alloc/free/share sequences, `ResourceExhausted`
 on exhaustion (no crash), and the double-free `CHECK` are M8-T02's acceptance.
 
+**M8-T02 implementation notes** (as built, `src/kvcache/block_pool.{h,cpp}` —
+additive clarifications of the sketch above, no divergence):
+
+- **Slabs are allocated directly from the `Allocator` at `kSlabAlignment = 256`
+  (== `CachingAllocator::kMaxAlignment`) then `memset` to zero**, rather than
+  through `tensor::ops::zeros`/`Tensor::empty` (which pin a 64-byte alignment).
+  This honors the §6.1 256-byte guarantee for any allocator; the slabs are held
+  as `tensor::Tensor` values (`Tensor::from_buffer` over the raw `Buffer`).
+- **The pool is returned by value (`StatusOr<BlockPool>`) and holds its mutex
+  behind a `std::unique_ptr<std::mutex>`** so it stays movable (`std::mutex` is
+  not). The move-constructor `CHECK(used_ == 0)` enforces "move out of `Create`
+  before any block is handed out" (§6.1) — the M8-T03 `BlockTable` holds a raw
+  `BlockPool*`, so a post-handout move would dangle it. There is no destructor
+  `CHECK`: nothing dangles into a dead pool except that non-owning pointer,
+  whose lifetime rule (§10.1) already covers it.
+- **The §5.2 capacity formula ships as two static pure helpers on `BlockPool`** —
+  `BytesPerBlock(geom, block_size)` and `NumBlocksForBudget(geom, block_size,
+  budget)` (overflow-guarded; `< 1` block → `ResourceExhausted`). Host-RAM
+  detection and the fraction-of-RAM subtraction (§5.3) stay with M8-T07, their
+  first consumer (§13).
+- **`block_size` is validated to `{8,16,32,64}` at construction *and* in the
+  capacity helpers** (the §4 `bs | kAttnKb=64` constraint), `InvalidArgument`
+  with the rationale otherwise; a non-fp32 `geom.dtype` is `Unimplemented` (the
+  M13 seam), matching `SimpleKvCache::Create`.
+- **Kernel-facing accessors** expose all three §3.1 strides — `block_stride()`
+  (`Hkv·bs·d`), `head_stride()` (`bs·d`), `row_stride()` (`d`) — plus
+  `slab_bytes()`/`total_bytes()` for the M8-T07 stats log and
+  `block_size()`/`num_blocks()`/`geometry()`.
+
 ### 6.3 Refcount lifecycle
 
 ```

@@ -2136,3 +2136,74 @@ Cross-doc edits in the same change: model-execution.md §6.4 (points to the new
 doc; folds back the advisory-`capacity()` and `paged_view` clarifications),
 optimized-cpu-execution.md §8 (the `bs | kAttnKb` constraint on the paged decode
 kernel). No `src/` change; 1058 tests unchanged.
+
+### M8-T02 — Block pool & allocator (2026-08-19)
+
+New **`src/kvcache/block_pool.{h,cpp}`** — `BlockPool`, the paged KV cache's
+block allocator (design: paged-kv-cache.md §6). Pure bookkeeping over
+pre-allocated per-layer K/V slabs, fully unit-testable without a model or any
+kernel. The first M8 implementation ticket; M8-T03's `BlockTable` and
+M8-T04's `PagedKvCache`/scatter build directly on it.
+
+What landed:
+
+- **Storage (§3.1/§6.1).** `Create(geom, block_size, num_blocks, allocator)`
+  allocates `2·num_layers` slabs (one K, one V per layer), each a
+  `[num_blocks, Hkv, bs, d]` fp32 `tensor::Tensor`, and zero-fills them once.
+  The slabs come straight from the passed `Allocator` (the engine's M2
+  `CachingAllocator`; tests pass the default CPU allocator or a scriptable
+  fake) — the per-block free list is the actual KV block allocator and never
+  calls upstream on the hot path.
+- **Free list + refcounts (§6.2/§6.3).** `Allocate` pops a LIFO free-list stack
+  (reuses cache-warm blocks), sets refcount 1; `Share` bumps it (M11 prefix
+  sharing); `Release` drops it, returning the block to the free list at 1→0.
+  `refcount`/`stats`/`free_blocks`/`blocks_needed` round out the surface. One
+  `std::mutex` guards the bookkeeping (allocation is off the token hot path).
+- **Capacity arithmetic (§5.2).** Static pure helpers `BytesPerBlock` (=
+  `2·L·Hkv·bs·d·itemsize`, overflow-guarded) and `NumBlocksForBudget` (=
+  `⌊budget / bytes_per_block⌋`, `< 1` → `ResourceExhausted`). Host-RAM
+  detection and the fraction-of-RAM subtraction (§5.3) stay with M8-T07, the
+  first consumer of the fraction spelling (§13).
+
+Non-obvious decisions (each an amendment to the design doc, recorded there):
+
+- **Slabs via raw `Allocator::Allocate(…, 256)` + `Tensor::from_buffer` +
+  `memset`, not `tensor::ops::zeros`.** `Tensor::empty`/`ops::zeros` pin a
+  64-byte alignment; the design mandates 256 (`kSlabAlignment ==
+  CachingAllocator::kMaxAlignment, §6.1`). Going through the allocator directly
+  honors the doc for any allocator and lets the test assert `ptr % 256 == 0`.
+- **Value-returned `BlockPool` with a `std::unique_ptr<std::mutex>`.** The
+  design's `StatusOr<BlockPool>` signature means the pool is move-constructed
+  out of `Create`; `std::mutex` is immovable, so it lives behind a `unique_ptr`.
+  The move-ctor `CHECK(used_ == 0)` enforces §6.1's "moved out before any block
+  is handed out" — a `BlockTable` (M8-T03) will hold a raw `BlockPool*`, so a
+  post-handout move would dangle it. No dtor `CHECK`: unlike `CachingAllocator`,
+  nothing dangles into a dead pool except that non-owning pointer, whose
+  lifetime rule ("pool outlives every table", §10.1) already covers it.
+- **`block_size` validated to `{8,16,32,64}`** at construction and in the
+  capacity helpers — the §4 `bs | kAttnKb=64` divisibility constraint M8-T05
+  rests on for its bit-exact match — with the rationale in the error message.
+- **Extra strides/sizing accessors** beyond the design's `block_stride()`:
+  `head_stride()`/`row_stride()` (§3.1 names all three; the scatter/decode
+  kernels take all three), `slab_bytes()`/`total_bytes()` (the M8-T07 stats
+  log), `block_size()`/`num_blocks()`/`geometry()`.
+
+CMake: `engine_kvcache` gains `block_pool.cpp` and an explicit **PUBLIC
+`engine::memory`** link (the header takes a `memory::Allocator*`; previously
+`memory` was only transitive via `tensor`). No `kvcache → kernels` edge yet —
+that lands with the scatter/decode kernels in M8-T04.
+
+Tests: new **`tests/unit/block_pool_test.cpp`** (27 cases, label `unit`, no
+`SCALAR_PASS` — pure bookkeeping): construction validation (geometry, dtype,
+`block_size`, `num_blocks`; null-allocator default; slab alignment/distinctness/
+zero-fill; `CachingAllocator`-backed round-trip freeing all slabs on drop; a
+scriptable-upstream failure propagating with no leak); `Allocate`/`Release`
+uniqueness, exhaustion → `ResourceExhausted` (stats unchanged, recovery after
+release), LIFO reuse; `Share` refcount semantics; a scripted alloc/free/share
+sequence asserting `used/free/utilization` and the `used+free==total` invariant
+at every step; hand-worked `blocks_needed` boundary crossings; the §3.3
+`BytesPerBlock`/`NumBlocksForBudget` worked numbers (tiny-llama 8 KiB,
+Qwen2-0.5B 384 KiB → 2730 blocks, Llama-3-8B 4 MiB → 10240); death tests for
+double-`Release`, `Share`-on-free, out-of-range ids/layers, and move-after-
+handout; and an 8-thread concurrency stress leaving the invariant intact.
+**1058 → 1085 ctest green** (+27). Format + scoped tidy clean.

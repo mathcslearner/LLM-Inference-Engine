@@ -1024,7 +1024,7 @@ preemption + future prefix-caching interactions.
 **Acceptance criteria:**
 - Doc specifies exact memory layout with a worked example and the formula for blocks-per-pool; refcount lifecycle diagram included.
 
-### M8-T02 · Block pool & allocator
+### M8-T02 · Block pool & allocator — ✅ DONE (2026-08-19)
 `src/kvcache/block_pool.h`: pool sized from config/free memory, free-list
 allocate/free of block ids, per-block refcounts, stats (used/free/total). Pure
 bookkeeping, fully unit-testable; block storage drawn from the M2 caching allocator.

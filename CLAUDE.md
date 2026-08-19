@@ -739,11 +739,37 @@ behind an existing subsystem):
   as layout-agnostic raw-pointer entries over the new **`kvcache → kernels`**
   downward edge (ADR-002-permitted like `model → kernels`, no amendment).
   Cross-doc: model-execution.md §6.4 + optimized-cpu-execution.md §8 updated. No
-  `src/` change (1058 tests unchanged).
+  `src/` change (1058 tests unchanged). T02 block pool & allocator:
+  `src/kvcache/block_pool.{h,cpp}` — `BlockPool`, pure bookkeeping over
+  `2·num_layers` pre-allocated per-layer K/V slabs (`[num_blocks,Hkv,bs,d]` fp32,
+  zero-filled once), fully unit-testable without a model or kernel. `Create` pulls
+  the slabs straight from the passed `Allocator` (engine → M2 `CachingAllocator`;
+  tests → default/fake) at **256-byte alignment** (`kSlabAlignment ==
+  CachingAllocator::kMaxAlignment` — bypasses `ops::zeros`, which pins 64B) and
+  the per-block free list is the KV block allocator itself (never upstream on the
+  hot path); `Allocate` pops a LIFO stack + refcount 1, `Share`/`Release` are the
+  M11-ready refcount verbs (FREE→OWNED→SHARED, §6.3), `refcount`/`stats`/
+  `free_blocks`/`blocks_needed` round it out, one `std::mutex` off the token path.
+  Static capacity helpers `BytesPerBlock`/`NumBlocksForBudget` (§5.2, overflow-
+  guarded; host-RAM/fraction math deferred to T07). `block_size` validated to
+  `{8,16,32,64}` (the §4 `bs | kAttnKb=64` constraint M8-T05 rests on). Decisions:
+  value-returned pool with a `unique_ptr<std::mutex>` (movable) + a move-ctor
+  `CHECK(used_==0)` so a post-handout move can't dangle T03's raw `BlockPool*`; no
+  dtor CHECK (nothing dangles into a dead pool but that pointer, whose lifetime
+  rule already covers it); extra `head/row_stride`+`slab/total_bytes` accessors
+  the kernels/stats-log need. CMake: `engine_kvcache` gains `block_pool.cpp` +
+  explicit PUBLIC `engine::memory` (header takes `memory::Allocator*`); no
+  `kvcache → kernels` edge yet (M8-T04). +27 tests (new `block_pool_test`, label
+  `unit`, no SCALAR_PASS — construction/validation, LIFO alloc/exhaustion/recovery,
+  share refcounts, scripted stats invariant, hand-worked `blocks_needed`, §3.3
+  capacity numbers, double-free/share-on-free/out-of-range/move-after-handout death
+  tests, 8-thread stress) → **1085 green**. Format + scoped tidy clean.
 
-Next up: **M8-T02** (`src/kvcache/block_pool.{h,cpp}`: the block pool sized from
-the capacity formula — free-list allocate/free of block ids, per-block
-refcounts, `used/free/total` stats — pure bookkeeping over slabs drawn from the
-M2 `CachingAllocator`, fully unit-testable; per paged-kv-cache.md §6:
-`ResourceExhausted` on exhaustion, `CHECK` on double-free, stats accurate
-through scripted alloc/free/share).
+Next up: **M8-T03** (`src/kvcache/block_table.{h,cpp}`: per-sequence
+logical→physical block map over the `BlockPool` — `AppendTokens(count)` growing
+blocks on boundary crossings (all-or-nothing: release on partial exhaustion,
+table+pool untouched) and returning the `slot(pos) = blocks_[pos/bs]·bs + pos%bs`
+mapping for the batch, `Truncate`/`FreeAll` returning blocks to the pool (RAII);
+per paged-kv-cache.md §7: growth across boundaries, hand-verified prefill/decode
+slot mappings incl. the straddle and boundary-crossing-decode-allocates cases,
+blocks returned to the pool on free — stats-checked).
