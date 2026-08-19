@@ -1108,22 +1108,55 @@ behind an existing subsystem):
   `-Wmissing-designated-field-initializers`-clean (untouched), with an in-header
   `NOLINT(readability-redundant-member-init)` resolving the span-`{}` tidy
   conflict; both backends reject a non-empty batch with `Unimplemented` until
-  M9-T06/T07 (`BatchInputs::MakeForwardRequest` builds the batched request).
+  M9-T07 (`BatchInputs::MakeForwardRequest` builds the batched request).
   CMake: `engine_engine` gains `batch.cpp`, `engine::tensor` PRIVATE→PUBLIC +
   `engine::memory` added (no ADR amendment). +16 tests (`batch_test` 13 `engine`;
   reference/optimized `ForwardRejectsBatchedRequest`, opt ×SCALAR_PASS) → **1295
   green**. design scheduler-runtime.md §8.2 + optimized-cpu-execution.md §6.3 "as
   built"/discharge; format + scoped tidy clean (model.h header edit → full
-  includer set swept).
+  includer set swept). T06 varlen batched prefill attention (2026-08-19):
+  `kernels::PrefillAttentionVarlenF32` (`src/kernels/attention.{h,cpp}`) — the
+  ragged-batch prefill kernel, running the **unchanged** per-sequence
+  `PrefillAttentionF32` recurrence over each sequence of a batch delimited by
+  `cu_seqlens`, so each sequence's output is **bit-identical** to a standalone
+  run (the acceptance guarantee). Realized **without any new per-ISA code, new
+  arithmetic, or new template**: the varlen entry reuses the already-dispatched
+  `PrefillUnits` variant *verbatim* and adds only sequence-major unit bookkeeping
+  in `attention.cpp` (M8-T05 reuse argument, one step further), so there is **no
+  `{isa}/*` varlen TU** and SCALAR_PASS covers the shipped bytes — a deliberate
+  deviation from the ticket's "(+ per-ISA TUs)" shorthand (as-built in §8.4). K/V
+  come in as **per-sequence pointer arrays** (`const float* const* k_seqs/v_seqs`
+  + `l_dims[]`), matching §8.3's per-sequence `caches[b]->view(layer)` read the
+  T07 model loop will feed; `cu_seqlens` is `int32` (matches
+  `ForwardRequest`/`BatchInputs`); continuation `P_b>0` is the standalone `(P,T)`
+  case per sequence. Sequence-major unit space (sequence `b` owns
+  `[S_b, S_b+H·⌈T_b/kAttnQb⌉)`), split by `detail::PrefillVarlenUnits` (test seam)
+  which synthesizes the *same* `PrefillArgs` a standalone call builds → per-seq
+  bit-identity + thread/chunk invariance by construction. **Model wiring deferred
+  to M9-T07** (the batched `forward` — per-seq K/V append + prefill/decode kernel
+  branches; both backends keep the `Unimplemented` batch guard until then). New
+  `internal::PrefillVarlenArgs`; no `src/` consumer change, no link-edge change,
+  no BASELINES entry (no perf claim; whole-step number is T08). +8 gtest
+  (`varlen_attention_kernel_test` ×2 SCALAR_PASS: headline {5,64,129} case, mixed
+  past/block-boundary, GQA×head-dims, B==1, thread/chunk invariance, oracle
+  Class-T ~1e-6, B==0 no-op) → **1311 ctest green**. design scheduler-runtime.md
+  §8.4 "as built" + optimized-cpu-execution.md §8 landed-note; format + scoped
+  tidy clean (three attention headers edited → full includer set swept).
 
-Next up: **M9-T06** (varlen batched prefill attention) — add
-`PrefillAttentionVarlenF32` to `src/kernels/attention.{h,cpp}` (+ per-ISA TUs):
-extend prefill attention to ragged batches using `cu_seqlens`, looping the
-**unchanged** per-sequence `PrefillAttentionF32` recurrence over each sequence's
-`[Hkv, L_b, d]` slab (roadmap "shared kernels loop over sequences; still
-naive-but-correct"), threaded over (sequence, query-block, head). No new ADR
-edge (additive kernel entry over the existing `kvcache → kernels`/`model →
-kernels` edges). Conform to `docs/design/scheduler-runtime.md` §8.4. Acceptance
-(§13 M9-T06): a batch of {3 sequences, lengths 5/64/129} produces per-sequence
-outputs **bit-identical** to three standalone `PrefillAttentionF32` runs;
-thread-count invariance; `SCALAR_PASS`. Per ROADMAP M9-T06.
+Next up: **M9-T07** (batched decode execution) — the batched decode step:
+N sequences × 1 token through the full model. Add `PagedDecodeAttentionBatchedF32`
+to `src/kernels/attention.{h,cpp}` (reusing the M8-T05 `PagedDecodeAttentionF32`
+recurrence per sequence over row `b` of the `[B, max_blocks]` block-table tensor,
+`−1` padding skipped, threaded over (sequence, kv head); bit-identical to a
+sequential single-sequence decode of each member), then land the batched
+`forward` in **both** backends: per-sequence K/V append sliced by `cu_seqlens`
+through each `caches[b]->append(layer)` (§8.3), prefill branch →
+`PrefillAttentionVarlenF32` (M9-T06), decode branch → the new batched kernel;
+`[B, V]` logits feed `BatchedSampler` (M7-T06). The reference backend can realize
+its batched forward as "run the single-sequence forward per member and
+concatenate logits" — bit-identical by construction and the cheapest oracle for
+the optimized batched path. Drop the `Unimplemented` batch guards. Conform to
+`docs/design/scheduler-runtime.md` §8.3/§8.4. Acceptance (§13 M9-T07): batched
+decode logits **bit-identical** to sequential single-sequence decode per member;
+heterogeneous cache lengths + `−1` block-table padding covered; `SCALAR_PASS`.
+Per ROADMAP M9-T07.

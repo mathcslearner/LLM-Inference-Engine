@@ -3056,3 +3056,67 @@ CMake: `engine_engine` gains `batch.cpp`; `engine::tensor` PRIVATE→PUBLIC and
 `engine::memory` added (no ADR amendment). design scheduler-runtime.md §8.2 "as
 built" + optimized-cpu-execution.md §6.3 discharge note added. Format + scoped
 tidy clean (model.h header edit → full includer set swept).
+
+### M9-T06 — Varlen batched prefill attention (2026-08-19)
+
+`kernels::PrefillAttentionVarlenF32` (`src/kernels/attention.{h,cpp}`): the
+ragged-batch prefill attention kernel. Runs the **unchanged** per-sequence
+`PrefillAttentionF32` recurrence over each sequence of a batch delimited by
+`cu_seqlens` — "shared kernels loop over sequences; still naive-but-correct"
+(roadmap). Each sequence's output is **bit-identical** to a standalone
+`PrefillAttentionF32` run on that sequence (the acceptance guarantee).
+
+**Realized choices.**
+
+- **No new per-ISA code, no new arithmetic, no new template.** "Unchanged
+  per-sequence recurrence" is realized *literally*: the varlen entry reuses the
+  already-dispatched `PrefillUnits` variant (`scalar`/`neon`/`avx2`) verbatim and
+  adds only sequence-major unit bookkeeping in `attention.cpp` (the M8-T05
+  paged-decode reuse argument taken one step further). So there is **no
+  `{isa}/*` varlen TU** and **no new `internal::*Impl`** — the blind AVX2 path is
+  covered by construction and SCALAR_PASS exercises the shipped scalar bytes
+  through the same variant. This is a deliberate deviation from the ticket's
+  "(+ per-ISA TUs)" shorthand (recorded in scheduler-runtime.md §8.4 as-built).
+- **Per-sequence K/V as pointer arrays, not one concatenated slab.** The
+  signature takes `const float* const* k_seqs/v_seqs` + a per-sequence
+  `l_dims[]` (each sequence's own gathered `[Hkv, L_b, d]` head-major slab), which
+  is exactly the per-layer `vector<KvView>` the M9-T07 model loop will hold when
+  it reads each sequence via `caches[b]->view(layer)` (§8.3). `cu_seqlens` is
+  `int32` to match `ForwardRequest::cu_seqlens`/`BatchInputs`. Continuation from a
+  non-empty cache (`P_b = L_b − T_b > 0`) is exactly the standalone kernel's
+  `(P, T)` case, applied per sequence.
+- **Sequence-major unit space.** Sequence `b` owns the contiguous global units
+  `[S_b, S_b + H·⌈T_b/kAttnQb⌉)`; the public entry parallelizes over the total
+  `U = Σ_b U_b` with grain 1 (the single-sequence work item). The chunk splitter
+  `detail::PrefillVarlenUnits` (the test seam, declared in
+  `internal/attention_impl.h`) walks sequences O(B) allocation-free and, for each
+  overlapping the requested `[begin, end)`, synthesizes the *same* `PrefillArgs`
+  a standalone call would build and hands the variant the local sub-range — so
+  the fp32 arithmetic order per output row is unchanged from a standalone run.
+  This yields per-sequence bit-identity **and** thread/chunk invariance by
+  construction. New `internal::PrefillVarlenArgs` in `attention_common.h`.
+- **Model wiring deferred to M9-T07.** The batched `forward` (per-sequence K/V
+  append sliced by `cu_seqlens`, prefill branch → this kernel, decode branch →
+  `PagedDecodeAttentionBatchedF32`) lands with T07, where it is exercised
+  end-to-end; both backends keep rejecting a non-empty batch with `Unimplemented`
+  until then (the "until M9-T06/T07" guards/comments retargeted to "until
+  M9-T07" across model.h, reference_model.cpp, optimized_model.cpp, batch.h, and
+  the two `ForwardRejectsBatchedRequest` tests). No `src/` consumer change; no
+  `kvcache`/`model` link edge change; no BASELINES entry (no perf claim — the
+  per-sequence recurrence is unchanged; the whole-step number is the T08
+  throughput-sanity criterion).
+
+**Tests.** New `tests/unit/varlen_attention_kernel_test.cpp` (8 cases, `kernels`
+label, **SCALAR_PASS**), registered alongside `attention_kernel_test`: the
+headline acceptance case (batch {5, 64, 129} bit-identical per sequence to three
+standalone runs, output NaN-poisoned so an un-written row is caught); mixed
+past/block-boundary lengths {1,31,32,33,64,65,129,200} × P {0,3,64,100,...}
+(incl. a `T=1` decode-shaped member and continuation `P>0`), distinct seeds so
+cross-sequence leakage would surface; GQA {(4,4),(4,2),(8,1)} × d {18,24,64,128};
+B==1 bit-identical to the non-varlen entry; thread/chunk invariance (threaded
+entry vs one serial `detail::PrefillVarlenUnits` walk vs a manual odd chunking
+straddling sequence boundaries, all 0-tolerance); Class-T tie to the
+`cpu::attention` oracle per sequence (observed max_abs_diff ~7e-7…1e-6); the B==0
+no-op. 1295 → **1311 ctest green**. Format + scoped tidy clean (three attention
+headers edited → full includer set swept; the avx2 TU is the known arm64-DB gap,
+CI-proven).

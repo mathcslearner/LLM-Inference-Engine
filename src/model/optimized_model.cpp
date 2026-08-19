@@ -361,12 +361,12 @@ core::Status OptimizedModel::ForwardLayer(const ForwardRequest& request,
 core::StatusOr<tensor::Tensor> OptimizedModel::forward(
     const ForwardRequest& request) {
   // The ragged/batched forward (cu_seqlens + per-sequence caches) lands in
-  // M9-T06/T07; reject a non-empty batch rather than silently ignore it
+  // M9-T07; reject a non-empty batch rather than silently ignore it
   // (scheduler-runtime.md §8.1), matching ReferenceModel::forward.
   if (!request.cu_seqlens.empty() || !request.caches.empty()) {
     return core::UnimplementedError(
         "OptimizedModel::forward: batched (cu_seqlens/caches) forward is not "
-        "implemented until M9-T06/T07");
+        "implemented until M9-T07");
   }
   // Front-load every input check (§5.3) so a failure never touches the cache —
   // identical to ReferenceModel::forward (the error-path tests match 1:1).

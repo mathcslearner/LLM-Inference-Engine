@@ -1139,7 +1139,7 @@ preallocated staging buffers (no per-step allocation).
 **Acceptance criteria:**
 - Unit tests: assembled metadata hand-verified for scenarios (2 prefills of different lengths, 3 decodes, mixed), tensor contents exact.
 
-### M9-T06 · Varlen batched prefill attention
+### M9-T06 · Varlen batched prefill attention — ✅ DONE (2026-08-19)
 Extend prefill attention to ragged batches using cu_seqlens (per-sequence lengths,
 shared kernels loop over sequences; still naive-but-correct).
 **Depends on:** M9-T05.

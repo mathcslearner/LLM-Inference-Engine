@@ -15,7 +15,7 @@
 
 // Batch assembly (M9-T05; design: docs/design/scheduler-runtime.md §8.1/§8.2).
 // Flattens the per-step scheduled work into the staged inputs a batched forward
-// (M9-T06/T07) consumes: concatenated token ids, per-token absolute positions,
+// (M9-T07) consumes: concatenated token ids, per-token absolute positions,
 // the `[B+1]` `cu_seqlens` prefix sums, the per-sequence caches, the
 // per-request sampling metadata, and — for a decode step — the `[B,
 // max_blocks]` block-table tensor and per-sequence lengths.

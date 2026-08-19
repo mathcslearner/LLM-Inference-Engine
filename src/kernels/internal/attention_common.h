@@ -57,6 +57,32 @@ struct PrefillArgs {
   float scale;
 };
 
+// One varlen (ragged-batch) prefill-attention call, flattened to raw pointers +
+// dims (design scheduler-runtime.md §8.4, M9-T06). Sequence b's queries are
+// rows [cu_seqlens[b], cu_seqlens[b + 1]) of q/out ([ΣT, H, d], token-major);
+// its K/V are the head-major [Hkv, L_b, d] slabs k_seqs[b]/v_seqs[b] with L_b =
+// l_dims[b] (P_b = L_b − T_b past keys, so a resumed/continued prefill is just
+// L_b > T_b — the same (P, T) choice as the standalone kernel). The
+// per-sequence recurrence is the **unchanged** PrefillUnitsImpl driven on a
+// PrefillArgs synthesized per sequence, so each sequence's output is
+// bit-identical to a standalone PrefillAttentionF32 run (the M9-T06 acceptance
+// guarantee): the varlen entry adds only sequence-major unit bookkeeping around
+// the existing per-ISA PrefillUnits variant — no new arithmetic, no new per-ISA
+// TU.
+struct PrefillVarlenArgs {
+  const float* q;                  // [ΣT, H, d]
+  const std::int32_t* cu_seqlens;  // [B + 1] prefix sums of T_b
+  const float* const* k_seqs;      // [B] each [Hkv, L_b, d]
+  const float* const* v_seqs;      // [B] each [Hkv, L_b, d]
+  const std::int64_t* l_dims;      // [B] L_b = P_b + T_b
+  float* out;                      // [ΣT, H, d]
+  std::int64_t num_seqs;           // B
+  std::int64_t heads;              // H query heads
+  std::int64_t d;                  // head_dim
+  std::int64_t group;              // H / Hkv (GQA group size)
+  float scale;
+};
+
 // The blocked online-softmax recurrence for units [unit_begin, unit_end)
 // (design §8). `Ops` supplies the ISA arithmetic:
 //   float DotScoreRow(q, k_block, n, d, scale, scores)

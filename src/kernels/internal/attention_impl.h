@@ -57,6 +57,17 @@ using PrefillUnitsFn = void (*)(const internal::PrefillArgs&, std::int64_t,
                                 std::int64_t);
 [[nodiscard]] PrefillUnitsFn PrefillAttentionVariant(Isa isa);
 
+// The whole varlen prefill kernel minus dispatch + threading (M9-T06 test
+// seam): runs sequence-major units [unit_begin, unit_end) by walking the
+// sequences of `a` and invoking the per-ISA PrefillUnits variant `fn` on a
+// PrefillArgs synthesized per sequence. Sequence b owns H·ceil(T_b/kAttnQb)
+// contiguous units; the per-sequence call is byte-for-byte what a standalone
+// PrefillAttentionF32(seq_b) would run, so thread/chunk invariance and
+// per-sequence bit-identity hold by construction. No ISA content here — the
+// arithmetic lives entirely in `fn`.
+void PrefillVarlenUnits(const internal::PrefillVarlenArgs& a, PrefillUnitsFn fn,
+                        std::int64_t unit_begin, std::int64_t unit_end);
+
 // Test seam: the DecodeUnits variant Select would return for `isa`.
 using DecodeUnitsFn = void (*)(const internal::DecodeArgs&, std::int64_t,
                                std::int64_t);

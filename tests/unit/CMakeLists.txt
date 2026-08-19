@@ -410,7 +410,8 @@ engine_add_tests(TREE unit SOURCES
 # engine::model (goldens); SCALAR_PASS runs them under forced-scalar too (design
 # §9). activation_kernel also carries the residual-add (kernels::AddF32)
 # acceptance; decode_attention_kernel asserts bit-identity with the prefill
-# path. `kernels` label.
+# path. varlen_attention_kernel (M9-T06) asserts each sequence of a ragged batch
+# is bit-identical to a standalone PrefillAttentionF32 run. `kernels` label.
 engine_add_tests(TREE unit SOURCES
   norm_kernel_test.cpp
   activation_kernel_test.cpp
@@ -418,6 +419,7 @@ engine_add_tests(TREE unit SOURCES
   rope_kernel_test.cpp
   attention_kernel_test.cpp
   decode_attention_kernel_test.cpp
+  varlen_attention_kernel_test.cpp
   DEPS engine::kernels engine::cpu engine::model
   LABELS kernels
   SCALAR_PASS)

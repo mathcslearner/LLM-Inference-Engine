@@ -72,4 +72,46 @@ void DecodeAttentionF32(const float* q, const float* k, const float* v,
                         float* out, std::int64_t heads, std::int64_t kv_heads,
                         std::int64_t d, std::int64_t l_dim, float scale);
 
+// Varlen (ragged-batch) prefill attention (M9-T06; design:
+// docs/design/scheduler-runtime.md §8.4). Runs `PrefillAttentionF32` for each
+// sequence of a ragged batch delimited by `cu_seqlens`, sharing the
+// **unchanged** per-sequence recurrence — "shared kernels loop over sequences;
+// still naive-but-correct" (roadmap). Each sequence's K/V is its own gathered
+// head-major slab (the M8-T06 `cache.view(layer)` read path, §8.3), so K/V come
+// in as per-sequence pointer arrays rather than one concatenated slab.
+//
+// Contract:
+//   q       : [ΣT, H, d]   contiguous fp32, token-major. Sequence b's queries
+//             are rows [cu_seqlens[b], cu_seqlens[b + 1]).
+//   cu_seqlens: [B + 1] int32 prefix sums of the per-sequence query counts T_b
+//             (cu_seqlens[0] == 0; T_b = cu_seqlens[b + 1] − cu_seqlens[b] ≥
+//             1).
+//   k_seqs,
+//   v_seqs  : [B] arrays of pointers; k_seqs[b]/v_seqs[b] is that sequence's
+//             [Hkv, L_b, d] head-major slab (L_b cached+new keys).
+//   l_dims  : [B] the L_b = P_b + T_b per sequence (P_b = L_b − T_b past keys).
+//   out     : [ΣT, H, d]   contiguous fp32, caller-allocated, fully
+//   overwritten. scale   : multiplies the completed q·k dot (HF order).
+//
+// GQA, causal masking, and continuation-from-a-non-empty-cache (P_b > 0) are
+// all exactly the standalone `PrefillAttentionF32` behavior applied per
+// sequence.
+// **Each sequence's output is bit-identical to a standalone
+// `PrefillAttentionF32` run on that sequence** (M9-T06 acceptance) — the batch
+// only reorders which (head, query-block) unit a thread picks up; no
+// cross-sequence value ever enters a sequence's recurrence. Bit-identical
+// across thread counts; Class T vs the oracle and across ISAs (inherited from
+// the per-sequence kernel, §10).
+//
+// Raw-pointer entry: all preconditions are the CALLER's (non-null contiguous
+// fp32 operands; B, H, Hkv, d ≥ 1; H a multiple of Hkv; T_b ≥ 1; L_b ≥ T_b;
+// cu_seqlens monotone from 0). B == 0 is a no-op. `out` must not alias q/k/v.
+void PrefillAttentionVarlenF32(const float* q, const std::int32_t* cu_seqlens,
+                               std::int64_t num_seqs,
+                               const float* const* k_seqs,
+                               const float* const* v_seqs,
+                               const std::int64_t* l_dims, float* out,
+                               std::int64_t heads, std::int64_t kv_heads,
+                               std::int64_t d, float scale);
+
 }  // namespace engine::kernels

@@ -849,7 +849,7 @@ TEST(OptimizedModelTest, ForwardRejectsMalformedInputs) {
 }
 
 // The ragged/batched forward (cu_seqlens + per-sequence caches) is rejected
-// with Unimplemented until M9-T06/T07, matching ReferenceModel (M9-T05;
+// with Unimplemented until M9-T07, matching ReferenceModel (M9-T05;
 // scheduler-runtime.md §8.1).
 TEST(OptimizedModelTest, ForwardRejectsBatchedRequest) {
   std::unique_ptr<Model> opt = Optimized(kLlama);

@@ -93,7 +93,7 @@ struct ForwardRequest {
   // [B] one KV cache per sequence (each its own PagedKvCache over the shared
   // pool). K/V for sequence b is appended to caches[b] (§8.3). When non-empty,
   // `cache` is ignored and the forward runs the ragged batch. The batched
-  // forward lands in M9-T06/T07; until then both backends reject a non-empty
+  // forward lands in M9-T07; until then both backends reject a non-empty
   // batch with `Unimplemented` (never silently ignore it). `{}` as above.
   std::span<kvcache::KvCache* const>
       caches{};  // NOLINT(readability-redundant-member-init)

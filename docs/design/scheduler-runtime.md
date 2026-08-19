@@ -895,6 +895,41 @@ sequence exhaustion boundary and gain nothing (the scatter is per-token regardle
   computed exactly as a standalone prefill, the batch's per-sequence outputs are
   **identical** to running each sequence alone (M9-T06 acceptance: batch of
   lengths {5,64,129} matches per-sequence runs exactly).
+
+  **As built (M9-T06):** `src/kernels/attention.{h,cpp}` — `PrefillAttentionVarlenF32`.
+  Realized choices:
+  - **No new per-ISA code, no new arithmetic.** The "unchanged per-sequence
+    recurrence" is realized *literally*: the varlen entry reuses the existing
+    dispatched `PrefillUnits` variant (`scalar`/`neon`/`avx2`) verbatim — it adds
+    only sequence-major unit bookkeeping in `attention.cpp` (the M8-T05
+    argument taken one step further). So there is **no `{isa}/*` varlen TU** and
+    **no new `internal::*Impl` template**; the blind AVX2 path is covered by
+    construction and SCALAR_PASS exercises the shipped scalar bytes through the
+    same variant. This differs from the ticket's "(+ per-ISA TUs)" shorthand,
+    recorded here.
+  - **Per-sequence K/V as pointer arrays, not one concatenated slab.** §8.3 reads
+    each sequence's K/V through its own `caches[b]->view(layer)` — B separate
+    gathered `[Hkv, L_b, d]` tensors — so the signature takes `const float* const*
+    k_seqs/v_seqs` + a per-sequence `l_dims[]`, exactly the per-layer `vector<KvView>`
+    the T07 model loop will hold. `cu_seqlens` is `int32` to match
+    `ForwardRequest::cu_seqlens`/`BatchInputs`.
+  - **Sequence-major unit space.** Sequence `b` owns the contiguous global units
+    `[S_b, S_b + H·⌈T_b/kAttnQb⌉)`; the public entry parallelizes over the total
+    `U = Σ_b U_b` with grain 1 (the single-sequence work item). The chunk splitter
+    `detail::PrefillVarlenUnits` (the test seam) walks sequences (O(B), allocation-
+    free) and, for each one overlapping the requested `[begin,end)`, synthesizes
+    the *same* `PrefillArgs` a standalone call would build and hands the variant
+    the local sub-range — so the fp32 arithmetic order per output row is unchanged
+    from a standalone run. This gives per-sequence bit-identity **and** thread/chunk
+    invariance by construction (both asserted with 0-tolerance allclose).
+  - **`ForwardRequest`/model wiring is M9-T07.** The batched `forward` (per-sequence
+    K/V append sliced by `cu_seqlens`, prefill branch → this kernel, decode branch →
+    `PagedDecodeAttentionBatchedF32`) lands with T07, where it can be exercised
+    end-to-end; both backends keep rejecting a non-empty batch with `Unimplemented`
+    until then. No `src/` consumer change and no BASELINES entry in T06 (no perf
+    claim — the per-sequence recurrence is unchanged; the whole-step number is the
+    T08 throughput-sanity criterion). +8 gtest cases (×2 with SCALAR_PASS,
+    `varlen_attention_kernel_test`) → 1311 ctest green.
 - **`PagedDecodeAttentionBatchedF32`** (M9-T07): the batched decode kernel. Loops
   over sequences, running the **unchanged** per-sequence `PagedDecodeAttentionF32`
   recurrence for each, reading row `b` of the `[B, max_blocks]` block-table tensor

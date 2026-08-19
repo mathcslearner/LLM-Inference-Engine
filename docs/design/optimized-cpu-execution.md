@@ -993,7 +993,9 @@ the merge gate is cross-*thread* bit-identity + cross-ISA tolerance, cpu-backend
 - **M9 (batching):** `ForwardRequest` grows `cu_seqlens`/slot-mapping fields
   (model-execution.md §5.4); the optimized forward loops over sequences *above*
   the kernels (the kernels already take per-sequence `q`/`k`/`v`), and varlen
-  prefill (M9-T06) tiles across the ragged batch. The packed weights, workspace,
+  prefill (M9-T06, landed: `kernels::PrefillAttentionVarlenF32` loops the
+  unchanged per-sequence prefill recurrence over `cu_seqlens`) tiles across the
+  ragged batch. The packed weights, workspace,
   and micro-kernels are unchanged. The scheduler, batch assembly, and loop that
   drive this are `docs/design/scheduler-runtime.md` (M9-T01); §6.3's deferred
   "pre-size the workspace from `--max-num-batched-tokens`" note is discharged
