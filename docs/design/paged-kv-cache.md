@@ -908,7 +908,8 @@ sequences and skipping `−1` entries. The single-sequence signature above is th
 `B = 1` case; the batched entry (`PagedDecodeAttentionBatchedF32`) is added in
 M9, not here. Flagged so the single-sequence layout does not paint M9 into a
 corner (the block-table pointer + strides already generalize to a padded 2-D
-tensor).
+tensor). The batch assembly that fills this tensor and the scheduler that drives
+it are specified in `docs/design/scheduler-runtime.md` (§8.2, §8.4).
 
 ---
 
@@ -1012,7 +1013,8 @@ before surfacing the error.
   (`BlockTable::FreeAll`), sets it PREEMPTED, and re-prefills prompt+generated on
   resume (the re-prefill equivalence is the KV invariant again). No storage
   change — M9 adds a scheduler and the batched kernel entry, both on seams
-  reserved here.
+  reserved here. Specified in `docs/design/scheduler-runtime.md` (M9-T01):
+  admission §6, preemption §10, batched forward §8.
 - **M11 (prefix caching).** `Share`/`Release` refcounts and the immutability
   invariant (§6.3/§6.4) are the whole foundation: M11 adds a content-hash index
   (`prefix_index.h`), hashes full blocks as they fill (a hook in

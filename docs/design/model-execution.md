@@ -447,7 +447,9 @@ So the contract is chosen to admit them without a signature break:
 
 - **M9 batching:** token-major activations + `cu_seqlens` field; `forward`
   processes a ragged batch, output `[Σ_selected, V]`. v0's 2-D `[T, E]` flow is
-  the single-sequence special case.
+  the single-sequence special case. The additive `ForwardRequest` fields, the
+  per-sequence-append rule, and the batch-invariance guarantee are specified in
+  `docs/design/scheduler-runtime.md` §8.
 - **M12 decode allocation-free:** the `kLast`/`T==1` path must be
   heap-allocation-free once M6 provides workspaces (M12-T05). v0 allocates
   freely — clarity first — but the *interface* (caller owns logits, cache

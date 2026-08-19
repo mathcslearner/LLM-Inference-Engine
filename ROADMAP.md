@@ -1092,7 +1092,7 @@ heart of the engine — the design doc matters more here than anywhere else.
 
 **Architecture documents:** `docs/design/scheduler-runtime.md` (M9-T01).
 
-### M9-T01 · Design doc: request lifecycle, scheduler & runtime
+### M9-T01 · Design doc: request lifecycle, scheduler & runtime — ✅ DONE (2026-08-19)
 Write `docs/design/scheduler-runtime.md`: request/sequence state machine
 (WAITING→RUNNING→(PREEMPTED)→FINISHED), the step loop, scheduling policy v1 (FCFS,
 token budget, block-availability admission, decode-priority), batch composition

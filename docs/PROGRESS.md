@@ -2670,3 +2670,94 @@ already-held lock). Docs: paged-kv-cache.md §6.2 (metrics fields + as-built),
 reporting), §12 (test bullet); model-execution.md §10 (mid-generation
 `ResourceExhausted` note). Format clean; scoped tidy clean on the edited TUs and
 the `block_pool.h`/`generator.h` header-includer sets.
+
+## Milestone 9 — Continuous Batching Scheduler & Runtime
+
+### M9-T01 — Design doc: request lifecycle, scheduler & runtime (2026-08-19)
+
+Docs-only. Wrote **`docs/design/scheduler-runtime.md`** — the working contract
+M9-T02…T10 (and the M10/M11/M12/M15/M16 interactions) build on: the runtime that
+turns the M5–M8 single-request `engine::Generate` into a multi-request,
+continuously-batched system (submission queue → single engine thread → per-request
+channels), the pure scheduler that decides each step's prefill/decode/preempt set,
+the ragged extension of the M5 `ForwardRequest`/`Model` contract, and the two
+batched attention-kernel entries. The architectural-heart milestone, so the doc
+carries the state machine, step-loop pseudocode, and explicit invariants the ticket
+demands.
+
+What the doc fixes (the non-obvious decisions):
+
+- **Scheduler stays a `core`-only leaf (ADR-002 rule 4).** The single most
+  important layout decision: `scheduler` sits beside `engine`, `runtime` mediates,
+  and — crucially — since `Request`/`Sequence` live in `runtime` (*above* the
+  scheduler), the scheduler cannot see them. It consumes plain descriptor structs
+  the runtime fills (`PoolSnapshot{free_blocks, block_size, total}` + per-seq
+  `{id, arrival_index, num_computed_tokens, num_prompt_tokens, blocks_held}`) and
+  returns a plain `SchedulerOutput` of ids+lengths. ADR-002 would *permit*
+  `scheduler → kvcache`, but the block arithmetic (`blocks_needed = ⌈(cur+add)/bs⌉
+  − ⌈cur/bs⌉`) is reproduced from `block_size` alone, so the whole scheduler is
+  table-testable with no pool/model/allocator. No new ADR edge anywhere in M9 —
+  only edges already on the diagram.
+- **Two passes per step, not a mixed forward** (the roadmap's "choose and
+  justify"): one ragged prefill forward, then one batched decode forward. The two
+  phases use different attention kernels (blocked-causal-gather vs paged-block-
+  table); mixing buys nothing on CPU (no kernel-launch overhead to amortize);
+  decode-priority is a *scheduling* property (every running seq decodes every
+  step), not an execution-order one. Prefill runs first so a newly admitted
+  sequence samples its first token (from prefill's `kLast` logits) the same step
+  and joins the decode batch next step.
+- **Batch-invariance guaranteed bit-for-bit on a fixed ISA** — the continuous-
+  batching correctness invariant (N concurrent == N sequential, M9-T08). Every
+  forward op is row-local (embedding/RMSNorm/SiLU/add/RoPE) or sequence-local
+  (attention: each seq attends only its own cache); the one cross-row op, GEMM, is
+  bit-identical to the single-row GEMV per row — *verified today* by
+  `packed_gemm_test.GemvMatchesGemmRow` (`EXPECT_EQ` every row). Batched sampling
+  is bit-identical by construction (M7-T06's shared `detail::SampleRow`). This
+  pre-answers **M17-T04**'s open "is batch-invariance guaranteed?" — yes on a fixed
+  ISA, Class T across ISAs (orthogonal to batching).
+- **Scheduling policy v1:** decode-first (unconditional up to memory → no
+  starvation), preempt the **latest-arrived** running sequence to fit the decode
+  set (documented victim; least sunk cost), then admit WAITING FCFS under
+  `max_num_seqs` / `max_num_batched_tokens` / block availability. Admission
+  reserves **prompt blocks only** — growth is handled by the per-step decode check
+  + preemption (optimistic admission, preemption as the safety valve), the
+  trade-off stated for M11/M12 to revisit.
+- **Preemption = evict-and-recompute**, resting on the M8-T08 resumable-error seam
+  promoted to a scheduler action: free the victim's blocks (`BlockTable::FreeAll`),
+  keep `generated_ids`+sampler+stop state, requeue at the **head** of WAITING, and
+  on resume re-prefill `prompt ++ generated` into a fresh cache — bit-identical
+  next token by the KV invariant (M8-T08 proved `delivered ++ resumed ==
+  uninterrupted`). No swap-out: on CPU host RAM *is* the pool. Liveness argued: the
+  oldest-alone sequence always fits `max_model_len` (config-guaranteed) so it is
+  never preempted → forward progress every step.
+- **Per-request failure isolation** (M9-T10): a sampler edge case or a per-sequence
+  `forward` error fails only that sequence (FAILED + close channel + free blocks);
+  the loop survives (ADR-003 — request data is recoverable `Status`, never
+  `CHECK`). Flagged a required additive change: `BatchedSampler::Sample` must return
+  a **per-row** status (today it returns only the lowest-index error and leaves
+  `out` unspecified) so one bad row does not discard the batch.
+- **Full state machine** (WAITING→RUNNING→(PREEMPTED)→FINISHED, plus CANCELLED/
+  FAILED) with an exhaustive legal-transition table enforced by one
+  `Sequence::Transition` that `CHECK`s illegal (from,to) pairs (M9-T02's "illegal
+  transition = CHECK"); **step-loop pseudocode**; per-request **unbounded** SPSC
+  channel (mutex+condvar, backpressure deferred to M10); the **explicit invariant
+  list** (block sufficiency, single mutator, batch invariance, streaming fidelity,
+  no leaks, resume equivalence, ≤1-step cancel, FCFS-among-equals) — the three
+  acceptance criteria.
+
+Also planned in the doc: the additive `ForwardRequest` fields (`cu_seqlens`,
+per-seq `caches`), per-sequence K/V append inside the batched forward (preserving
+the M8 layer protocol + exhaustion seam), the two batched kernels
+(`PrefillAttentionVarlenF32`, `PagedDecodeAttentionBatchedF32` — both looping the
+unchanged per-sequence recurrence), staging-buffer reuse (discharging
+optimized-cpu-execution.md §6.3's deferred workspace pre-sizing), config knobs
+(`max_num_seqs`/`max_num_batched_tokens`/`max_model_len`), and the M10/M11/M12/M15/
+M16 seams. Per-ticket testing strategy maps every M9-T02…T10 acceptance criterion
+to a suite (mock-model stress for T03, tiny-pool forced preemption for T09, the
+8-concurrent-vs-sequential identity test for T08).
+
+Cross-doc edits in the same change: paged-kv-cache.md §9.4/§11 (pointers to the new
+doc for batch assembly/admission/preemption); model-execution.md §5.4 (the batched
+`ForwardRequest`/append/invariance pointer); optimized-cpu-execution.md §11 (the
+scheduler/loop pointer + the §6.3 workspace-presizing discharge). No `src/` change;
+1207 tests unchanged. Format clean (docs-only; no build/tidy delta).

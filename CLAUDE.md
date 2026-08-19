@@ -950,15 +950,49 @@ behind an existing subsystem):
   claim). design paged-kv-cache.md §6.2/§10.2/§12 + model-execution.md §10;
   format + scoped tidy clean.
 
-Next up: **M9-T01** (design doc: request lifecycle, scheduler & runtime) — write
-`docs/design/scheduler-runtime.md`: the request/sequence state machine
-(WAITING→RUNNING→(PREEMPTED)→FINISHED), the step loop, scheduling policy v1
-(FCFS, token budget, block-availability admission against `BlockPool::stats()` /
-`free_blocks()` / `blocks_needed()`, decode-priority), batch composition
-(separate vs mixed prefill/decode — choose and justify), the threading model
-(client threads → queue → single engine thread → per-request output channels),
-preemption policy (evict-and-recompute, resting on the M8-T08 resumable-error
-seam and the KV invariant), and cancellation. Docs-only; opens Milestone 9
-(continuous batching scheduler & runtime). Acceptance: state-machine diagram with
-every legal transition, step-loop pseudocode, explicit invariants. Per ROADMAP
-M9-T01.
+- **M9 (continuous batching scheduler & runtime) — in progress**: T01
+  `docs/design/scheduler-runtime.md` — the contract M9-T02…T10 (and the
+  M10/M11/M12/M15/M16 interactions) build on: the runtime that turns the M5–M8
+  single-request `engine::Generate` into a multi-request, continuously-batched
+  system. **Docs-only.** Fixes: the **scheduler stays a `core`-only leaf**
+  (ADR-002 rule 4 — it sits beside `engine`, `runtime` mediates; since
+  `Request`/`Sequence` live in `runtime` *above* it, the scheduler consumes plain
+  descriptor structs — `PoolSnapshot` + per-seq `{arrival, num_computed,
+  num_prompt, blocks_held}` — and returns a plain `SchedulerOutput`, so the whole
+  policy is table-testable with no pool/model/allocator; `blocks_needed` reproduced
+  from `block_size`; **no new ADR edge in all of M9**); **two passes per step, not
+  a mixed forward** (prefill-then-decode: different kernels, no CPU launch overhead
+  to amortize, decode-priority is a scheduling not execution-order property;
+  prefill first so a new seq samples its first token the same step); **batch
+  invariance guaranteed bit-for-bit on a fixed ISA** — the CB correctness invariant
+  (N concurrent == N sequential) reduces to every op being row-/sequence-local plus
+  GEMM==GEMV-row (verified today by `packed_gemm_test.GemvMatchesGemmRow`), which
+  pre-answers M17-T04's open batch-invariance question; **policy v1** (decode-first
+  → no starvation, preempt latest-arrived, FCFS admission reserving prompt blocks
+  only with per-step decode-check + preemption as the safety valve); **preemption =
+  evict-and-recompute** resting on the M8-T08 resumable-error seam (free blocks,
+  keep generated ids/sampler/stop state, requeue at head, resume by re-prefilling
+  `prompt ++ generated` → bit-identical by the KV invariant; no swap-out on CPU;
+  liveness argued via oldest-alone-always-fits); **per-request failure isolation**
+  (a bad row/forward fails only that sequence, loop survives — flags a required
+  additive `BatchedSampler` per-row-status change); full **state machine** +
+  legal-transition table (`CHECK`-enforced) + **step-loop pseudocode** + the
+  **explicit invariant list** (the three acceptance criteria). Also planned: the
+  additive `ForwardRequest` fields (`cu_seqlens`, per-seq `caches`), per-sequence
+  K/V append inside the batched forward, the two batched kernels
+  (`PrefillAttentionVarlenF32`, `PagedDecodeAttentionBatchedF32`), staging-buffer
+  reuse (discharges optimized-cpu-execution.md §6.3 workspace pre-sizing), config
+  knobs, and per-ticket testing. Cross-doc pointers added in paged-kv-cache.md
+  §9.4/§11, model-execution.md §5.4, optimized-cpu-execution.md §11. No `src/`
+  change (1207 tests unchanged).
+
+Next up: **M9-T02** (request & sequence abstractions) — write
+`src/runtime/request.h`: `Request` (id, prompt ids, `SamplingParams`, arrival
+time), `Sequence` (state, token ids, block-table handle, generation progress),
+and a thread-safe per-request output channel (tokens + finish info) supporting
+blocking and polling consumption. Conform to `docs/design/scheduler-runtime.md`
+§3 (state machine + the `CHECK`-enforced legal-transition table) and §4 (the
+SPSC `OutputChannel`). Acceptance: unit tests — illegal state transition =
+`CHECK` failure, output channel delivers in order across threads, channel close
+semantics on finish/cancel. First implementation ticket of Milestone 9. Per
+ROADMAP M9-T02.

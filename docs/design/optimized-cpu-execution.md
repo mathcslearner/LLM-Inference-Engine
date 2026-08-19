@@ -984,7 +984,10 @@ the merge gate is cross-*thread* bit-identity + cross-ISA tolerance, cpu-backend
   (model-execution.md §5.4); the optimized forward loops over sequences *above*
   the kernels (the kernels already take per-sequence `q`/`k`/`v`), and varlen
   prefill (M9-T06) tiles across the ragged batch. The packed weights, workspace,
-  and micro-kernels are unchanged.
+  and micro-kernels are unchanged. The scheduler, batch assembly, and loop that
+  drive this are `docs/design/scheduler-runtime.md` (M9-T01); §6.3's deferred
+  "pre-size the workspace from `--max-num-batched-tokens`" note is discharged
+  there (§8.2 — the staging buffers are sized by the batch-token budget).
 - **M12 (tuning/fusions):** tile/grain constants tuned with a sweep (M12-T02);
   flash-decoding cache split via `parallel_reduce` (M12-T03, preserving §5's
   cross-thread bit-identity); RoPE+KV-write / residual+norm / SwiGLU fusions
