@@ -254,6 +254,19 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::engine engine::tokenizer
   LABELS engine)
 
+# request_test / channel_test (M9-T02): the runtime's per-request abstractions —
+# the Sequence state machine (every legal transition succeeds, every illegal one
+# CHECK-fails), front-loaded sampler/stop validation and RAII block reclamation
+# over a real BlockPool, and the thread-safe SPSC OutputChannel (ordered
+# cross-thread delivery, blocking/polling reads, close-once, drain-after-close).
+# Pure bookkeeping + threading — no model, kernel, or forward, so no SCALAR_PASS.
+# `runtime` label.
+engine_add_tests(TREE unit SOURCES
+  channel_test.cpp
+  request_test.cpp
+  DEPS engine::runtime engine::kvcache engine::tensor
+  LABELS runtime)
+
 # qwen2_family_test (M5-T10): the Qwen-family reference path on the shared M5
 # modules — the tiny-qwen2 fixture (q/k/v biases, head_dim decoupled from
 # hidden/heads, tied embeddings) validated against its HF golden: config/loader

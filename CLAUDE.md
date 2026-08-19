@@ -984,15 +984,37 @@ behind an existing subsystem):
   reuse (discharges optimized-cpu-execution.md §6.3 workspace pre-sizing), config
   knobs, and per-ticket testing. Cross-doc pointers added in paged-kv-cache.md
   §9.4/§11, model-execution.md §5.4, optimized-cpu-execution.md §11. No `src/`
-  change (1207 tests unchanged).
+  change (1207 tests unchanged). T02 request & sequence abstractions
+  (2026-08-19): the `runtime` module's first real content (was anchor-only) —
+  `src/runtime/request.h` + `sequence.cpp` (`Request` = immutable client
+  description; `Sequence` = mutable execution state: the §3.2 state machine,
+  `generated_ids`, this sequence's own `PagedKvCache`, per-sequence
+  `Sampler`/`StopChecker`; `SeqState` 6-state enum with 3 terminals;
+  `FinishInfo` reusing the M7-T04 `FinishReason`/`StopTrigger` taxonomy +
+  runtime-only `kCancelled`/`kFailed`) and `src/runtime/channel.{h,cpp}`
+  (`OutputChannel` — SPSC mutex+condvar queue, unbounded, closed once with a
+  `FinishInfo`; `Push`/`Close`(→bool, first-wins) producer, `Next`(blocking)/
+  `TryNext`(polling)/`finish()` consumer; `OutputItem` mirrors `TokenEvent` by
+  value). Decisions: **`Sequence::Create(req, pool) → StatusOr<Sequence>`** a
+  fallible factory front-loading sampler/stop validation (move-only, out-of-line
+  dtor over a forward-declared `OutputChannel`); **`IsLegalTransition` a public
+  `constexpr` predicate** (the §3.2 table in one place, `Transition` `CHECK`s it
+  — "illegal transition = CHECK failure"); cache created eagerly (empty = zero
+  blocks) with `ReleaseCache`/`EnsureCache` for M9-T09; `Push`-after-close a
+  `CHECK`; channel outlives the `Sequence` via `shared_ptr`. Namespace footgun
+  recorded: the `engine::engine` finish taxonomy needs a leading-`::`
+  using-decl from `engine::runtime`; tests deref optionals via an explicit-guard
+  `Require` helper (`bugprone-unchecked-optional-access` doesn't model gtest
+  `ASSERT_TRUE`). `engine_runtime` links `PUBLIC core/engine/sampling/kvcache/
+  tokenizer` — no new ADR edge. design §3/§4 gained an "as built" note. +25
+  tests (`channel_test` 12, `request_test` 13; `runtime` label, no SCALAR_PASS)
+  → **1232 green**; format + scoped tidy clean.
 
-Next up: **M9-T02** (request & sequence abstractions) — write
-`src/runtime/request.h`: `Request` (id, prompt ids, `SamplingParams`, arrival
-time), `Sequence` (state, token ids, block-table handle, generation progress),
-and a thread-safe per-request output channel (tokens + finish info) supporting
-blocking and polling consumption. Conform to `docs/design/scheduler-runtime.md`
-§3 (state machine + the `CHECK`-enforced legal-transition table) and §4 (the
-SPSC `OutputChannel`). Acceptance: unit tests — illegal state transition =
-`CHECK` failure, output channel delivers in order across threads, channel close
-semantics on finish/cancel. First implementation ticket of Milestone 9. Per
-ROADMAP M9-T02.
+Next up: **M9-T03** (engine API & request queue) — write
+`src/runtime/engine.{h,cpp}`: the public async API (`submit`/`cancel`/handle),
+the thread-safe submission queue, `Engine::step()`, and the loop-thread
+scaffold. Conform to `docs/design/scheduler-runtime.md` §5. Acceptance (§13
+M9-T03): a mock `Model` (canned logits) drives submit/consume/cancel from
+multiple client threads; `Step()`-driven determinism; a stress test (many
+submitters, random cancels, concurrent consumers) with no deadlock and every
+channel closed. No real forward yet. Per ROADMAP M9-T03.

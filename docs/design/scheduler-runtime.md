@@ -372,6 +372,34 @@ Design points:
   threads — tested with a producer thread pushing a known sequence and a consumer
   asserting order and the terminal `FinishInfo`.
 
+> **As built (M9-T02).** `src/runtime/request.h` (`Request`/`Sequence`,
+> `SeqState`, `IsLegalTransition`, `FinishInfo`) + `src/runtime/sequence.cpp`,
+> and `src/runtime/channel.{h,cpp}` (`OutputItem`/`OutputChannel`). Deviations
+> from the sketch above, all deliberate:
+> - **`Sequence::Create(const Request&, BlockPool*) → StatusOr<Sequence>`** is a
+>   factory, not a public constructor: the `Sampler` and `StopChecker` come from
+>   `StatusOr` factories, so construction is fallible and front-loads their
+>   validation (bad params, or `stop_strings` without a tokenizer → the
+>   `InvalidArgument` surfaces at `Create`, cache untouched). `Sequence` is
+>   move-only with an out-of-line destructor/move-ctor (`OutputChannel` is
+>   forward-declared in the header; its complete type lives in `sequence.cpp`).
+> - **`IsLegalTransition(from, to)` is a public `constexpr` predicate** so the
+>   test can enumerate the whole 6×6 matrix; `Sequence::Transition` is the one
+>   caller that `CHECK`s it. The cache is created eagerly at `Create` (an empty
+>   `PagedKvCache` holds zero blocks, so a `WAITING` sequence still owns nothing);
+>   `ReleaseCache()`/`EnsureCache(pool)` make the preemption drop/rebuild explicit
+>   for M9-T09.
+> - **`OutputChannel::Close` returns `bool`** (the first close wins, later closes
+>   are no-ops returning `false`), so the loop can tell whether it won the close
+>   under a finish + late-cancel race. `Push` after close is a `CHECK` (the single
+>   producer never pushes on a closed channel — the loop checks `closed()` first).
+> - **Namespace footgun recorded:** `FinishReason`/`StopTrigger`/`StopChecker`
+>   live in the sibling `engine::engine` namespace; from `engine::runtime` a
+>   leading-`::` using-declaration (`using ::engine::engine::FinishReason;`) is
+>   required — a bare `engine::engine::X` misresolves (§2's note). Tests deref
+>   optionals via an explicit-guard `Require` helper, not `ASSERT_TRUE` + `->`,
+>   to satisfy `bugprone-unchecked-optional-access`.
+
 ---
 
 ## 5. Public API & threading model (M9-T03)

@@ -1103,7 +1103,7 @@ channels), preemption policy (evict-and-recompute), and cancellation semantics.
 **Acceptance criteria:**
 - State machine diagram with every legal transition; step-loop pseudocode; explicit invariants (e.g. "a RUNNING sequence always holds all blocks it needs for its next token").
 
-### M9-T02 · Request & sequence abstractions
+### M9-T02 · Request & sequence abstractions — ✅ DONE (2026-08-19)
 `src/runtime/request.h`: `Request` (id, prompt ids, `SamplingParams`, arrival time),
 `Sequence` (state, token ids, block table handle, generation progress), and a
 thread-safe per-request output channel (tokens + finish info) supporting

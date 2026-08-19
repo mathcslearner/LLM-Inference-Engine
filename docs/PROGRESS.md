@@ -2761,3 +2761,62 @@ doc for batch assembly/admission/preemption); model-execution.md §5.4 (the batc
 `ForwardRequest`/append/invariance pointer); optimized-cpu-execution.md §11 (the
 scheduler/loop pointer + the §6.3 workspace-presizing discharge). No `src/` change;
 1207 tests unchanged. Format clean (docs-only; no build/tidy delta).
+
+### M9-T02 — Request & sequence abstractions (2026-08-19)
+
+First implementation ticket of Milestone 9: the two per-request objects the
+step loop will fan out over, plus the per-request output channel. The
+`runtime` module was anchor-only (`runtime.cpp`) before this; T02 replaces the
+anchor with real content. New:
+
+- **`src/runtime/request.h` + `sequence.cpp`** — `Request` (the immutable
+  client description: id, prompt ids, `SamplingParams`, model `eos_ids`,
+  tokenizer, `arrival_index`) and `Sequence` (the mutable execution state: the
+  §3.2 state machine, `generated_ids`, this sequence's own `PagedKvCache`, and
+  the per-sequence `Sampler`/`StopChecker` lifted off the single-sequence
+  `Generate` loop). `SeqState{kWaiting,kRunning,kPreempted,kFinished,kCancelled,
+  kFailed}` with `kFinished`/`kCancelled`/`kFailed` terminal; `FinishInfo`
+  reuses the M7-T04 `FinishReason`/`StopTrigger` taxonomy verbatim, adding the
+  two runtime-only terminals `Generate` lacked.
+- **`src/runtime/channel.{h,cpp}`** — `OutputChannel`, a single-producer/
+  single-consumer queue (mutex + condvar, unbounded) closed exactly once with a
+  `FinishInfo`. `Push`/`Close` (engine thread), `Next` (blocking) / `TryNext`
+  (polling) / `finish()` (consumer). `OutputItem` mirrors `TokenEvent` by value
+  (id + owned text delta + optional `StepLogprobs`).
+
+Non-obvious decisions:
+
+- **`Sequence::Create(const Request&, BlockPool*) → StatusOr<Sequence>`** is a
+  fallible factory, not a constructor — the `Sampler`/`StopChecker` come from
+  `StatusOr` factories, so construction front-loads their validation (bad
+  params, or `stop_strings` without a tokenizer, fail at `Create` with the cache
+  untouched). Move-only with an out-of-line dtor/move-ctor (`OutputChannel`
+  forward-declared in the header, complete only in `sequence.cpp`).
+- **`IsLegalTransition(from, to)` is a public `constexpr` predicate** — the one
+  place the §3.2 table lives; `Sequence::Transition` is the single caller that
+  `CHECK`s it (M9-T02 "illegal transition = CHECK failure"). The test enumerates
+  the whole 6×6 matrix against it.
+- **Cache created eagerly at `Create`** (an empty `PagedKvCache` holds zero
+  blocks, so a `WAITING` sequence owns nothing); `ReleaseCache()`/`EnsureCache`
+  make the M9-T09 preemption drop/rebuild explicit. RAII: dropping the sequence
+  drops the cache, returning every block — the "no block leaks" basis, tested.
+- **`OutputChannel::Close` returns `bool`** (first close wins; late closes are
+  no-ops) so the loop can tell whether it won the close under a finish +
+  late-cancel race; `Push`-after-close is a `CHECK` (single producer). Delivery
+  is FIFO across threads; the channel outlives the `Sequence` via a
+  `shared_ptr` the handle holds.
+- **Namespace footgun (design §2):** `FinishReason`/`StopTrigger`/`StopChecker`
+  live in the sibling `engine::engine`; from `engine::runtime` a leading-`::`
+  using-declaration is required (`using ::engine::engine::FinishReason;`). Tests
+  deref optionals through an explicit-guard `Require` helper (not `ASSERT_TRUE`
+  + `->`) to satisfy `bugprone-unchecked-optional-access` — the analyzer models
+  an `if (!has_value()) return;` guard but not gtest's `ASSERT_TRUE` macro (the
+  batched_sampler_test idiom).
+
+CMake: `engine_runtime` links `PUBLIC engine::core engine::engine
+engine::sampling engine::kvcache engine::tokenizer` (all in the public headers);
+no new ADR edge — every dependency is already below `runtime` on the diagram.
++25 tests (new `channel_test` 12, `request_test` 13; label `runtime`, no
+SCALAR_PASS — pure bookkeeping + threading, no model/kernel/forward) →
+**1232 green**. Design scheduler-runtime.md §3/§4 gained an "as built" note;
+format + scoped tidy clean.
