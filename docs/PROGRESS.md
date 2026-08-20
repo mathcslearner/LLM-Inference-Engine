@@ -3273,3 +3273,69 @@ batched-forward path (per-member append + `[B, V]` one-hot, mirroring
 loop. **1335 → 1345 ctest green** (+2 mock cases; +4 fixture cases ×2 SCALAR_PASS).
 design scheduler-runtime.md §9.4 "as built" + §5.2 cancel note; format + scoped
 tidy clean (`engine.h` header edit → its three includers swept).
+
+### M9-T09 — Preemption & recomputation (2026-08-19)
+
+Completed the preemption story. The *mechanics* — evict-and-recompute
+(`ReleaseCache` → `kPreempted` → head of `waiting_`), resume by re-prefilling
+`prompt ++ generated` — landed in M9-T04 (the scheduler could already emit a
+`preempt` and `Engine::Step` had to act on it), so T09 is the **config-sizing
+liveness guarantees**, a preemption **counter**, and the **acceptance under the
+batched loop**. No new files, no kernel, no ADR edge; ~40 lines in
+`src/runtime/`.
+
+**Liveness enforced where it was previously only argued (§10.2, §10.3).**
+- `Engine::Submit` now rejects `peak > max_num_batched_tokens` — peak =
+  `prompt_len + max_tokens - 1`, the longest single prefill pass a sequence can
+  reach — rather than the old `prompt_len > …`. A preempted sequence resumes by
+  re-prefilling `prompt ++ generated` in one pass bounded by the same budget, so
+  if the *peak* re-prefill could not fit, an admitted-then-preempted sequence
+  could never resume and would stall at the head of `waiting_` forever. This is
+  the exact per-request form of §10.2's "config validation flags this" — chosen
+  over a blanket `max_num_batched_tokens ≥ max_model_len` config inequality,
+  which would wholesale-reject a large-context model whose individual requests
+  all fit the budget (recorded as the §6.4/§10.4 as-built deviation). Since
+  `peak ≥ prompt_len`, it subsumes the prompt-only ceiling; the existing
+  `SubmitRejectsPromptOverTokenBudget` still trips (via peak) unchanged.
+- `Engine::Create` now rejects an **explicitly pinned** `max_model_len`
+  exceeding the pool's token capacity (`num_blocks · block_size`): the pool must
+  hold one full-length sequence so the oldest-alone sequence never needs
+  preemption to fit its own next token (§10.3). An *auto-resolved* `max_model_len`
+  (from `max_position_embeddings`) is deliberately **not** checked here — a
+  large-context model over a small test pool is legitimate, and `Submit`'s
+  per-request peak-vs-pool-capacity check enforces the same guarantee per
+  admitted request — so the ~30 existing `CannedModel` Create tests (mpe 4096
+  over small pools) are untouched.
+
+**Counter.** `Engine::num_preemptions()` (a monotonic engine-thread counter
+bumped in the §9.1 step-4 apply loop) makes the forced-preemption acceptance
+non-vacuous and is the counter M16 exports (§12).
+
+**Scope clarification (§10.4 / §11.2 as-built).** The M9-T08 code comments
+forward-referenced the *reactive* decode-exhaustion → preemption routing to
+"M9-T09"; T09 corrects them to **M9-T10**. For the engine's own pool the
+scheduler's block accounting is exact (decode demand is charged against
+`free_blocks` before admission), so a decode append never exhausts and no
+reactive path fires — it is reachable only under a pool shared with an external
+allocator that drains it between the scheduler snapshot and the append, and is
+deterministically testable only alongside M9-T10's per-row `BatchedSampler`
+status and isolation harness (§11.2, where the design already places it). So the
+routing is genuinely T10 work, not a T09 omission — the ROADMAP T09 acceptance
+is entirely proactive preemption.
+
+**Tests (+9 registrations, 1345 → 1354 ctest green).** `runtime_batching_test`
+(real fixtures, **SCALAR_PASS**): `RunPreemptionInvariant` on both tiny-llama and
+tiny-qwen2 — a 4-block (bs=8, 32-slot) pool that holds one full-length sequence
+but not eight at once forces the scheduler to cycle 8 concurrent requests through
+preemption; every request completes with output **identical** to its standalone
+`Generate` (resume-equivalence bit-exact via the KV invariant), `num_preemptions()
+> 0`, `pool.stats().used == 0` (+4: 2 cases ×2 for the forced-scalar pass).
+`runtime_engine_test` (mock): `RepeatedPreemptionsAllComplete` (three sequences on
+a 2-block pool, repeated forced preemptions, all match + no leaks),
+`SubmitRejectsPeakOverTokenBudget` / `SubmitAcceptsPeakAtTokenBudget` (the §10.2
+check + boundary), `CreateRejectsExplicitMaxModelLenOverPoolCapacity` /
+`CreateAcceptsExplicitMaxModelLenFittingPool` (the §10.3 check + boundary); the
+existing single-preemption `PreemptionResumesWithIdenticalOutput` now also asserts
+`num_preemptions() == 1`. design scheduler-runtime.md §6.4 + §10.4 "as built" +
+§11.2 reassignment note; format + scoped tidy clean (`engine.h` header edit → its
+three includers swept, EXIT=0 no project diagnostics).

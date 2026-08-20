@@ -668,6 +668,19 @@ is the posture M12-T06 relaxes: chunked prefill splits the prompt across steps, 
 `max_num_batched_tokens` bounds per-step work without bounding prompt length.
 Recorded here so the M12 change is a planned relaxation, not a surprise.
 
+**As built (M9-T09): the ceiling is on the *peak* length, not the prompt.** A
+preempted sequence resumes by re-prefilling `prompt ++ generated` (§10.2), itself
+a single prefill pass bounded by the same budget, and the longest such re-prefill
+a sequence can reach is its peak `prompt_len + max_tokens - 1`. So `submit`
+rejects `peak > max_num_batched_tokens` (not merely `prompt_len > …`) — otherwise
+a request could be admitted, run, be preempted after generating enough tokens, and
+then never fit a resume, stalling forever at the head of `waiting_`. Since
+`peak ≥ prompt_len`, the peak check subsumes the prompt-only ceiling. This
+realizes §10.2's "config validation flags this" as an *exact per-request* check
+rather than a blanket `max_num_batched_tokens ≥ max_model_len` config inequality
+(which would reject a large-context model whose individual requests all fit the
+budget). M12-T06 chunked prefill relaxes both the prompt and the resume case.
+
 ### 6.5 Seams reserved for later scheduler versions
 
 - **M11 (prefix reuse):** admission (step 3) gains a hook, before counting prompt
@@ -1212,6 +1225,46 @@ progress each step, and every sequence eventually becomes the oldest and complet
 M9-T09 acceptance (all requests complete despite forced preemptions on a tiny pool)
 exercises exactly this.
 
+### 10.4 As built (M9-T09)
+
+The preemption *mechanics* (evict-and-recompute, requeue-at-head, resume by
+re-prefill) landed in M9-T04 (§6.6) because the scheduler could already emit a
+`preempt` and the engine had to act on it. M9-T09 completes the section:
+
+- **Config-sizing liveness enforced (§10.2, §10.3).** Two checks make the
+  liveness argument hold rather than assume it:
+  - `Submit` rejects `peak > max_num_batched_tokens` (§6.4 as-built) so a
+    preempted sequence's resume re-prefill always fits the budget — the exact
+    per-request form of §10.2's "config validation flags this".
+  - `Create` rejects an **explicitly pinned** `max_model_len` that exceeds the
+    pool's token capacity (`num_blocks · block_size`): the pool must hold one
+    full-length sequence so the oldest-alone sequence never needs preemption to
+    fit its own next token. An *auto-resolved* `max_model_len` (from the model's
+    `max_position_embeddings`) is **not** checked at `Create` — a large-context
+    model over a small pool is legitimate, and `Submit`'s per-request
+    peak-vs-pool-capacity check enforces the same guarantee for every admitted
+    request.
+- **A preemption counter** (`Engine::num_preemptions()`, bumped in the step-4
+  apply loop) makes the forced-preemption acceptance test non-vacuous and is the
+  counter M16 exports (§12).
+- **Acceptance validated under the batched loop** on both real fixtures
+  (`runtime_batching_test`, SCALAR_PASS) and the mock (`runtime_engine_test`): a
+  tiny pool that cannot hold all sequences at once forces repeated preemptions,
+  every request completes with output **identical** to its standalone `Generate`
+  (the resume-equivalence invariant, bit-exact via the KV invariant on the real
+  backend), `num_preemptions() > 0`, and `pool.stats().used == 0` at the end (no
+  leaks).
+- **Reactive decode-exhaustion routing (§11.2) is *not* part of M9-T09.** For
+  the engine's own pool the scheduler's block accounting is exact — decode demand
+  is charged against `free_blocks` before admission (§6.2) — so a decode append
+  never exhausts and no reactive path fires. A decode-time `ResourceExhausted` is
+  only reachable when the pool is shared with an external allocator that drains it
+  between the scheduler snapshot and the append; routing that to graceful
+  preemption instead of per-request failure belongs to M9-T10, where §11.2 places
+  it alongside the per-row `BatchedSampler` status change and the isolation tests
+  (and where it is deterministically testable). The M9-T08 code comments that
+  forward-referenced this to "M9-T09" were corrected to M9-T10.
+
 ---
 
 ## 11. Cancellation & per-request failure isolation (M9-T10)
@@ -1259,6 +1312,11 @@ never `CHECK`). Two sources:
   not failure, when the scheduler can free blocks by preempting a younger sequence;
   it becomes a failure only if the sequence is the sole occupant and genuinely
   cannot fit (the front-loaded-vs-mid-generation distinction of paged §10.2).
+  *(This decode-exhaustion routing lands in M9-T10, not M9-T09: for the engine's
+  own pool the scheduler is exact so it never fires — it is only reachable under a
+  shared/externally-drained pool — and it is deterministically testable only
+  alongside the per-row `BatchedSampler` status and the isolation harness here.
+  §10.4 records the reassignment from the M9-T08 forward-reference.)*
 
 A genuinely engine-internal invariant violation (a wrong-rank tensor the engine
 built itself, an illegal state transition) remains a `CHECK` — those are bugs, not

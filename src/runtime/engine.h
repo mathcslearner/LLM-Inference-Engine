@@ -41,8 +41,14 @@
 //     engine-thread state, and `Step()` applies the resulting prefill / decode
 //     / preempt decisions (§6.2). Preemption is evict-and-recompute
 //     (`ReleaseCache` → re-prefill `prompt ++ generated` on re-admission, the
-//     §10.2 resumable seam); the batched loop that validates it under memory
-//     pressure is M9-T09.
+//     §10.2 resumable seam), validated under memory pressure by M9-T09's
+//     tiny-pool acceptance (all requests complete despite forced preemptions,
+//     each preempted request's output bit-identical to an uninterrupted run).
+//     M9-T09 also adds the §10.2/§10.3 config-sizing liveness guarantees: a
+//     request's peak length (`prompt + max_tokens - 1`) must fit the per-step
+//     token budget so a preempted sequence can always resume (`Submit`), and an
+//     explicit `max_model_len` must fit the pool so the oldest-alone sequence
+//     never needs preemption (`Create`).
 //   * execution runs at most two batched `model::forward`s per step — one
 //     ragged prefill over the admitted sequences, then one batched decode over
 //     the running set (§7 two passes) — via the M9-T05 `BatchAssembler` and the
@@ -134,10 +140,12 @@ class Engine {
   //   * empty `prompt_ids` → InvalidArgument.
   //   * an invalid / not-yet-supported `params`, or `stop_strings` without a
   //     tokenizer → InvalidArgument (from `Sequence::Create`).
-  //   * `prompt_len > max_num_batched_tokens` → InvalidArgument (the v1
-  //     no-chunked-prefill ceiling, §6.4).
-  //   * `prompt_len + max_tokens - 1` above `max_model_len` or the pool's token
-  //     capacity → ResourceExhausted.
+  //   * peak length `prompt_len + max_tokens - 1 > max_num_batched_tokens` →
+  //     InvalidArgument (the v1 no-chunked-prefill ceiling; the peak is the
+  //     binding case since a preempted sequence's resume re-prefills
+  //     `prompt ++ generated`, §6.4/§10.2).
+  //   * peak length above `max_model_len` or the pool's token capacity →
+  //     ResourceExhausted.
   //   * after `Stop` → FailedPrecondition.
   // On success `request.id` and `arrival_index` are engine-assigned (monotonic,
   // in submission order).
@@ -169,6 +177,12 @@ class Engine {
   [[nodiscard]] std::size_t num_waiting() const { return waiting_.size(); }
   [[nodiscard]] std::size_t num_running() const { return running_.size(); }
   [[nodiscard]] std::size_t num_live() const { return requests_.size(); }
+  // Total preemptions applied since construction (design §10). Monotonic; the
+  // counter M16 exports (§12). Same engine-thread-state caveat as the counts
+  // above.
+  [[nodiscard]] std::uint64_t num_preemptions() const {
+    return preemption_count_;
+  }
 
  private:
   Engine(model::Model& model, kvcache::BlockPool& pool, EngineConfig config,
@@ -237,8 +251,9 @@ class Engine {
 
   // Engine-thread-owned state (no lock — single mutator, §5.3).
   std::unordered_map<RequestId, std::unique_ptr<Entry>> requests_;
-  std::deque<RequestId> waiting_;   // FCFS order (preempted at head, §3.2)
-  std::vector<RequestId> running_;  // sequences being decoded
+  std::deque<RequestId> waiting_;       // FCFS order (preempted at head, §3.2)
+  std::vector<RequestId> running_;      // sequences being decoded
+  std::uint64_t preemption_count_ = 0;  // total preemptions (diagnostics, §10)
 
   // Reused batched-execution machinery (§5.2): the engine thread owns one
   // assembler and one batched sampler, plus the per-pass scratch — all grown on

@@ -1165,7 +1165,7 @@ they're produced.
 - Requests arriving mid-flight join batching without disturbing running sequences (test with staggered submission).
 - Throughput sanity: 8 concurrent requests complete in well under 8× single-request time (recorded).
 
-### M9-T09 · Preemption & recomputation
+### M9-T09 · Preemption & recomputation — ✅ DONE (2026-08-19)
 On block exhaustion during decode: preempt victim sequences (free their blocks,
 state→PREEMPTED, back to queue head), resume later by re-prefilling
 prompt+generated-so-far. Wire scheduler preemption decisions to engine actions.

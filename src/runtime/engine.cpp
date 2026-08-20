@@ -98,6 +98,26 @@ core::StatusOr<std::unique_ptr<Engine>> Engine::Create(model::Model& model,
         pg.num_layers, pg.num_kv_heads, pg.head_dim, mg.num_layers,
         mg.num_kv_heads, mg.head_dim);
   }
+  // §10.3 liveness: preemption can only guarantee progress if the pool can
+  // hold at least one full-length sequence — then the oldest-alone sequence
+  // always fits its own next token and is never preempted, so at least one
+  // sequence advances every step. When the caller pins `max_model_len`
+  // explicitly, verify the pool can hold it. (When it is auto-resolved from the
+  // model's positional limit below, that limit can far exceed a small pool
+  // while every actual request still fits — `Submit`'s per-request
+  // peak-vs-pool-capacity check enforces the same guarantee per request, so the
+  // auto-resolved case is not rejected wholesale here.)
+  if (config.max_model_len > 0) {
+    const std::int64_t pool_capacity = pool.num_blocks() * pool.block_size();
+    if (config.max_model_len > pool_capacity) {
+      return core::InvalidArgumentError(
+          "max_model_len {} exceeds the block pool's token capacity {} "
+          "(num_blocks {} x block_size {}); the pool cannot hold one "
+          "max-length sequence, so preemption cannot guarantee progress",
+          config.max_model_len, pool_capacity, pool.num_blocks(),
+          pool.block_size());
+    }
+  }
   // Resolve the length ceiling: explicit config, else the model's positional
   // limit. (`Submit` also bounds by the pool's token capacity.)
   std::int64_t max_model_len = config.max_model_len;
@@ -124,19 +144,32 @@ core::StatusOr<RequestHandle> Engine::Submit(Request request) {
     return core::InvalidArgumentError("prompt_ids must be non-empty");
   }
   const auto prompt_len = static_cast<std::int64_t>(request.prompt_ids.size());
-  if (prompt_len > config_.max_num_batched_tokens) {
-    return core::InvalidArgumentError(
-        "prompt length {} exceeds max_num_batched_tokens {} (chunked prefill "
-        "is not implemented until M12-T06)",
-        prompt_len, config_.max_num_batched_tokens);
-  }
   // Worst-case peak length (no early stop): prompt + one appended token per
   // decode step; the final produced token is never appended, so the peak is
-  // `prompt_len + max_tokens - 1` (matching `Generate`). Bound it by both the
-  // model's length ceiling and the pool's token capacity — a request that can
-  // never fit even an empty pool is rejected here, cache untouched.
+  // `prompt_len + max_tokens - 1` (matching `Generate`).
   const std::int64_t max_tokens = request.params.max_tokens;
   const std::int64_t peak = prompt_len + (max_tokens > 0 ? max_tokens - 1 : 0);
+  // A single prefill pass — a fresh prompt, or a preempted sequence's resume
+  // re-prefill of `prompt ++ generated` (§10.2) — cannot exceed the per-step
+  // token budget (no chunked prefill until M12-T06). The binding case is the
+  // resume at peak length: if that would not fit the budget, a preempted
+  // sequence could never be re-admitted and would stall at the head of the
+  // queue forever, so reject it up front (the §10.2 config-sizing guarantee,
+  // enforced exactly per request rather than as a blanket
+  // `max_num_batched_tokens >= max_model_len` inequality, which would reject a
+  // large-context model whose individual requests all fit the budget). Since
+  // `peak >= prompt_len`, this subsumes the fresh-prompt prefill ceiling too.
+  if (peak > config_.max_num_batched_tokens) {
+    return core::InvalidArgumentError(
+        "peak length {} (prompt {} + up to {} generated) exceeds "
+        "max_num_batched_tokens {}; a preempted sequence could not resume "
+        "(chunked prefill is not implemented until M12-T06)",
+        peak, prompt_len, (max_tokens > 0 ? max_tokens - 1 : 0),
+        config_.max_num_batched_tokens);
+  }
+  // Bound the peak by the model's length ceiling and the pool's token capacity
+  // — a request that can never fit even an empty pool is rejected here, cache
+  // untouched.
   if (max_model_len_ > 0 && peak > max_model_len_) {
     return core::ResourceExhaustedError(
         "prompt {} + {} new tokens exceeds max_model_len {} (peak {})",
@@ -249,6 +282,7 @@ bool Engine::Step() {
     entry.seq->Transition(SeqState::kPreempted);
     std::erase(running_, id);
     waiting_.push_front(id);
+    ++preemption_count_;
   }
 
   // 5. Prefill pass over the admitted sequences (design §9.1 step 5). A newly
@@ -461,7 +495,13 @@ void Engine::RunBatchPass(bool prefill) {
   // Snapshot each cache's committed length before the forward, so a mid-batch
   // forward fault can roll every member back to a clean state before the
   // per-sequence re-run (§11.2). (The forward appends K/V per sequence inside
-  // itself, so a fault can leave one cache mid-append.)
+  // itself, so a fault can leave one cache mid-append.) For the engine's own
+  // pool the scheduler's block accounting is exact (decode demand is charged
+  // before admission), so a decode append never exhausts here; routing a
+  // decode-time `ResourceExhausted` — reachable only when the pool is shared
+  // with an external allocator — to graceful preemption rather than
+  // per-request failure is M9-T10, where it pairs with the per-row
+  // `BatchedSampler` status and the isolation tests (§11.2).
   pass_pre_len_.clear();
   for (Entry* e : pass_entries_) {
     pass_pre_len_.push_back(e->seq->cache()->length());
@@ -509,8 +549,9 @@ void Engine::RecoverForwardFailure(bool prefill) {
   // pre-forward length (clearing any partial append state), then re-run each as
   // a standalone single-sequence forward: healthy members deliver
   // bit-identically (§8.5), and only the genuinely faulting member fails
-  // (ADR-003, §11.2). Routing a decode-time pool exhaustion to preemption
-  // rather than failure is M9-T09.
+  // (ADR-003, §11.2). Routing a shared-pool decode-time exhaustion to graceful
+  // preemption rather than per-request failure is M9-T10 (§11.2; a private
+  // pool never exhausts on decode — the scheduler is exact).
   for (std::size_t b = 0; b < pass_entries_.size(); ++b) {
     Entry& entry = *pass_entries_[b];
     // `truncate` to a length <= the current committed length always succeeds
@@ -585,8 +626,10 @@ void Engine::ExecuteAndDeliver(Entry& entry, bool prefill) {
   if (!logits.ok()) {
     // A per-request forward fault (bad id, position overflow, or this
     // sequence's own append exhausting the pool) fails only this sequence, not
-    // the loop (ADR-003; §11.2). Graceful preemption of a decode exhaustion is
-    // M9-T09; here it surfaces as a per-request failure.
+    // the loop (ADR-003; §11.2). For a private pool the scheduler preempts
+    // proactively so a decode append never exhausts here; routing a shared-pool
+    // decode exhaustion to graceful preemption instead of failure is
+    // M9-T10 (§11.2).
     seq.set_error(logits.status());
     seq.Transition(SeqState::kFailed);
     return;

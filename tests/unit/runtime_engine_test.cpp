@@ -296,6 +296,27 @@ TEST(EngineTest, CreateSucceeds) {
   ASSERT_NE(engine, nullptr);
 }
 
+// §10.3 liveness: an explicitly pinned `max_model_len` the pool cannot hold is
+// rejected at Create — otherwise the oldest-alone sequence could not fit and
+// preemption could not guarantee progress. (The auto-resolved case, where the
+// model's positional limit may dwarf a tiny test pool, is not rejected — every
+// other Create test uses a CannedModel with max_position_embeddings=4096 over a
+// small pool and must still succeed.)
+TEST(EngineTest, CreateRejectsExplicitMaxModelLenOverPoolCapacity) {
+  CannedModel model;
+  BlockPool pool = MakePool(/*num_blocks=*/2);  // 2 × 8 = 16 token capacity
+  EXPECT_TRUE(IsInvalidArgument(
+      Engine::Create(model, pool, EngineConfig{.max_model_len = 17}).status()));
+}
+
+TEST(EngineTest, CreateAcceptsExplicitMaxModelLenFittingPool) {
+  CannedModel model;
+  BlockPool pool = MakePool(/*num_blocks=*/2);  // 16 token capacity
+  auto engine =
+      Unwrap(Engine::Create(model, pool, EngineConfig{.max_model_len = 16}));
+  ASSERT_NE(engine, nullptr);  // peak capacity == max_model_len (boundary)
+}
+
 // --- Submit validation ------------------------------------------------------
 
 TEST(EngineTest, SubmitRejectsEmptyPrompt) {
@@ -314,6 +335,31 @@ TEST(EngineTest, SubmitRejectsPromptOverTokenBudget) {
       Engine::Create(model, pool, EngineConfig{.max_num_batched_tokens = 4}));
   EXPECT_TRUE(IsInvalidArgument(
       engine->Submit(GreedyRequest({1, 2, 3, 4, 5})).status()));
+}
+
+// §10.2 config-sizing: a small prompt with a large `max_tokens` whose resume
+// re-prefill peak (`prompt + max_tokens - 1`) exceeds the token budget is
+// rejected up front — a preempted such sequence could never be re-admitted (no
+// chunked prefill until M12-T06) and would stall the queue forever.
+TEST(EngineTest, SubmitRejectsPeakOverTokenBudget) {
+  CannedModel model;
+  BlockPool pool = MakePool(/*num_blocks=*/256);  // ample blocks
+  auto engine = Unwrap(
+      Engine::Create(model, pool, EngineConfig{.max_num_batched_tokens = 16}));
+  // peak = 2 + (20 - 1) = 21 > 16 → rejected, even though the prompt (2) fits.
+  EXPECT_TRUE(IsInvalidArgument(
+      engine->Submit(GreedyRequest({1, 2}, /*max_tokens=*/20)).status()));
+  EXPECT_EQ(engine->num_live(), 0U);
+  EXPECT_EQ(pool.stats().used, 0);
+}
+
+TEST(EngineTest, SubmitAcceptsPeakAtTokenBudget) {
+  CannedModel model;
+  BlockPool pool = MakePool(/*num_blocks=*/256);
+  auto engine = Unwrap(
+      Engine::Create(model, pool, EngineConfig{.max_num_batched_tokens = 16}));
+  // peak = 2 + (15 - 1) = 16 == budget → admitted (boundary).
+  EXPECT_TRUE(engine->Submit(GreedyRequest({1, 2}, /*max_tokens=*/15)).ok());
 }
 
 TEST(EngineTest, SubmitRejectsPromptOverPoolCapacity) {
@@ -493,7 +539,44 @@ TEST(EngineTest, PreemptionResumesWithIdenticalOutput) {
   EXPECT_EQ(DrainTokens(h2), reference);
   EXPECT_EQ(h1.await_completion().terminal, SeqState::kFinished);
   EXPECT_EQ(h2.await_completion().terminal, SeqState::kFinished);
-  EXPECT_EQ(pool.stats().used, 0);  // no leaks after resume
+  EXPECT_EQ(engine->num_preemptions(), 1U);  // exactly one preemption occurred
+  EXPECT_EQ(pool.stats().used, 0);           // no leaks after resume
+}
+
+// M9-T09 acceptance (§13): an artificially tiny pool shared by more sequences
+// than it can hold at once forces the scheduler to preempt and re-admit
+// repeatedly. Every request still completes with output identical to its
+// standalone `Generate`, and the pool is fully reclaimed at the end (no leaks).
+TEST(EngineTest, RepeatedPreemptionsAllComplete) {
+  CannedModel model;
+  // 2 blocks × 8 = 16 token slots. Three sequences each reach a peak of
+  // 4 + (8 - 1) = 11 tokens → up to 2 blocks apiece, so a single sequence can
+  // consume the whole pool: the three cannot coexist and must be cycled through
+  // via preemption. Liveness holds — the oldest-alone peak (11) fits the pool
+  // capacity (16), so the oldest always makes progress (§10.3).
+  BlockPool pool = MakePool(/*num_blocks=*/2);
+  auto engine = Unwrap(Engine::Create(
+      model, pool, EngineConfig{.max_num_batched_tokens = 4096}));
+
+  const std::vector<std::vector<std::int32_t>> prompts = {
+      {1, 2, 3, 4}, {2, 3, 4, 5}, {3, 4, 5, 6}};
+  constexpr std::int64_t kMaxTokens = 8;
+  std::vector<RequestHandle> handles;
+  handles.reserve(prompts.size());
+  for (const auto& p : prompts) {
+    handles.push_back(Unwrap(engine->Submit(GreedyRequest(p, kMaxTokens))));
+  }
+  RunToIdle(*engine);
+
+  EXPECT_GT(engine->num_preemptions(), 0U);  // preemptions were forced
+  for (std::size_t i = 0; i < prompts.size(); ++i) {
+    EXPECT_EQ(DrainTokens(handles[i]),
+              ReferenceTokens(model, prompts[i], kMaxTokens))
+        << "sequence " << i << " diverged after preemption";
+    EXPECT_EQ(handles[i].await_completion().terminal, SeqState::kFinished);
+  }
+  EXPECT_EQ(engine->num_live(), 0U);
+  EXPECT_EQ(pool.stats().used, 0);  // no leaks
 }
 
 // --- Cancellation -----------------------------------------------------------

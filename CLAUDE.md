@@ -1206,19 +1206,49 @@ behind an existing subsystem):
   §9.3), pool `used==0`; `runtime_engine_test.cpp` +2 mock CB cases and a batched
   `CannedModel` path so its whole 28-case suite runs on the batched loop. **1335
   → 1345 ctest green.** design scheduler-runtime.md §9.4 "as built"; format +
-  scoped tidy clean.
+  scoped tidy clean. T09 preemption & recomputation (2026-08-19): completed the
+  preemption story — the *mechanics* (evict-and-recompute → resume by re-prefill
+  `prompt ++ generated`) already landed in M9-T04, so T09 is the **config-sizing
+  liveness** guarantees, a preemption **counter**, and **acceptance under the
+  batched loop** (~40 lines in `src/runtime/`, no new file/kernel/ADR edge).
+  `Engine::Submit` now rejects **peak** `prompt_len + max_tokens - 1 >
+  max_num_batched_tokens` (not just `prompt_len`) so a preempted sequence's
+  resume re-prefill always fits the budget (§10.2's "config validation flags
+  this", enforced exactly per request rather than a blanket
+  `max_num_batched_tokens ≥ max_model_len` inequality — which would reject a
+  large-context model whose requests all fit; peak subsumes the prompt ceiling).
+  `Engine::Create` now rejects an **explicitly pinned** `max_model_len` over the
+  pool's token capacity (§10.3 — the pool must hold one full-length sequence so
+  the oldest-alone never preempts); an auto-resolved `max_model_len` is *not*
+  checked (a big-mpe model over a tiny pool is legit — `Submit`'s per-request
+  peak-vs-capacity check covers it), so the existing `CannedModel` Create tests
+  are untouched. New `Engine::num_preemptions()` counter (bumped in the §9.1
+  step-4 apply loop; the M16 metric). **Scope correction:** the M9-T08 code
+  comments forward-referencing the *reactive* decode-exhaustion → preemption
+  routing to "M9-T09" are corrected to **M9-T10** — for the engine's own pool the
+  scheduler is exact (decode demand charged before admission) so a decode append
+  never exhausts; the reactive path is reachable only under an externally-drained
+  shared pool and is testable only alongside M9-T10's per-row `BatchedSampler`
+  status + isolation harness (§11.2 already places it there). +9 tests → **1354
+  ctest green**: `runtime_batching_test` `RunPreemptionInvariant` (both fixtures,
+  ×2 SCALAR_PASS — 4-block pool cycles 8 concurrent requests through preemption,
+  each output **identical** to standalone `Generate`, `num_preemptions()>0`,
+  `used==0`); `runtime_engine_test` repeated-preemption + the §10.2/§10.3 checks
+  and boundaries; `PreemptionResumesWithIdenticalOutput` now asserts
+  `num_preemptions()==1`. design scheduler-runtime.md §6.4 + §10.4 "as built" +
+  §11.2 reassignment; format + scoped tidy clean.
 
-Next up: **M9-T09** (preemption & recomputation) — validate preemption under the
-now-batched loop and add the pool-sizing config check. The scheduler/engine
-preemption mechanics already landed in M9-T04 (`scheduler` emits `preempt`;
-`Engine::Step` applies `ReleaseCache` → `kPreempted` → head of `waiting_`, and
-the prefill pass re-prefills `prompt ++ generated` so a resumed sequence's next
-token is bit-identical to an uninterrupted run — the §10.2 resumable seam). T09
-adds: the config-sizing **liveness** guarantee (§10.3 — the pool holds at least
-one `max_model_len` sequence, so the oldest-alone sequence never preempts,
-enforced where the pool is sized, not in the pure policy), and the acceptance
-test (§13 M9-T09 / ROADMAP): an **artificially tiny block pool** forces repeated
-preemptions, all requests still complete correctly, each preempted request's
-greedy output is **identical** to an unpreempted run, and `pool.stats().used == 0`
-at end (no block leaks). Conform to `docs/design/scheduler-runtime.md` §10. Per
-ROADMAP M9-T09.
+Next up: **M9-T10** (cancellation & per-request failure isolation) — the final M9
+ticket. Cancel promptly frees blocks and closes the channel with `kCancelled`
+(cancel-during-WAITING/-prefill/-decode all reclaim resources, stats-verified);
+a per-request fault fails only that request, never the engine loop. Landing here:
+the **additive `BatchedSampler` per-row status return** (§11.2, §14 — write each
+row's `Status` into `out[b]` and always fill every row, so one bad row no longer
+discards the batch; the engine currently re-derives per-row status in
+`RecoverSampleFailure`), and the **reactive decode-exhaustion → preemption
+routing** deferred from T09 (§10.4 / §11.2 — a shared-pool decode `ResourceExhausted`
+routed to graceful preemption when a younger sequence can be evicted, a failure
+only for the sole-occupant case). Acceptance (§13 M9-T10 / ROADMAP): cancel in
+each state reclaims blocks (`pool.stats()` verified); an injected per-request
+sampler fault leaves every other concurrent request's output unchanged. Conform
+to `docs/design/scheduler-runtime.md` §11. Per ROADMAP M9-T10.

@@ -155,6 +155,57 @@ TEST(RuntimeBatchingTest, QwenEightConcurrentMatchesSequential) {
   RunBatchingInvariant(kQwen);
 }
 
+// M9-T09 acceptance (§10, §13): a deliberately tiny block pool forces the
+// scheduler to preempt and re-admit sequences repeatedly, yet every request
+// completes with output identical to its standalone `Generate`, and no blocks
+// leak. The pool is sized to hold one full-length sequence (the §10.3 liveness
+// floor) but far less than all eight at once, so preemption is unavoidable —
+// asserted via `num_preemptions()`. Exercised on the real optimized backend so
+// the re-prefill resume path is bit-exact (the KV invariant), not just the
+// mock.
+void RunPreemptionInvariant(const std::string& fixture) {
+  std::unique_ptr<Model> model = OptimizedModel(fixture);
+  const std::vector<std::int32_t> eos = model->config().eos_token_ids;
+  // bs=8, 4 blocks = 32 token slots. A single sequence at peak
+  // (prompt ≤ 4 + (16 - 1) = 19 tokens → 3 blocks) fits (§10.3 liveness); eight
+  // concurrent sequences cannot, so the scheduler must cycle them through.
+  BlockPool pool =
+      Unwrap(BlockPool::Create(model->cache_geometry(), 8, 4, nullptr));
+  auto engine = Unwrap(Engine::Create(
+      *model, pool, EngineConfig{.max_num_batched_tokens = 512}));
+
+  const auto prompts = EightPrompts();
+  constexpr std::int64_t kMaxTokens = 16;
+  std::vector<RequestHandle> handles;
+  handles.reserve(prompts.size());
+  for (const auto& p : prompts) {
+    handles.push_back(
+        Unwrap(engine->Submit(GreedyRequest(p, eos, kMaxTokens))));
+  }
+  RunToIdle(*engine);
+
+  EXPECT_GT(engine->num_preemptions(), 0U)
+      << fixture << ": tiny pool did not force any preemption";
+  for (std::size_t i = 0; i < prompts.size(); ++i) {
+    const std::vector<std::int32_t> got = DrainTokens(handles[i]);
+    const std::vector<std::int32_t> want =
+        SequentialGreedy(*model, prompts[i], eos, kMaxTokens);
+    EXPECT_EQ(got, want) << fixture << " sequence " << i
+                         << " diverged from its standalone Generate after "
+                            "preemption";
+    EXPECT_TRUE(handles[i].await_completion().terminal == SeqState::kFinished);
+  }
+  EXPECT_EQ(pool.stats().used, 0);  // no leaks after all resumes
+}
+
+TEST(RuntimeBatchingTest, LlamaTinyPoolPreemptionMatchesSequential) {
+  RunPreemptionInvariant(kLlama);
+}
+
+TEST(RuntimeBatchingTest, QwenTinyPoolPreemptionMatchesSequential) {
+  RunPreemptionInvariant(kQwen);
+}
+
 // Staggered submission: requests arriving mid-flight join batching without
 // perturbing running sequences (§9.2). Submit four, step several times, then
 // submit four more; every request's output still equals its standalone run.
