@@ -902,14 +902,24 @@ no divergence):
 
 ### 9.4 Batched shape (reserved for M9)
 
-M9-T07's batched decode needs a `[B, max_blocks]` int32 block-table tensor
-(rows padded with `−1`) and a `[B]` lengths vector, with the kernel looping
-sequences and skipping `−1` entries. The single-sequence signature above is the
-`B = 1` case; the batched entry (`PagedDecodeAttentionBatchedF32`) is added in
-M9, not here. Flagged so the single-sequence layout does not paint M9 into a
-corner (the block-table pointer + strides already generalize to a padded 2-D
-tensor). The batch assembly that fills this tensor and the scheduler that drives
-it are specified in `docs/design/scheduler-runtime.md` (§8.2, §8.4).
+M9-T07's batched decode needs each sequence's block table + cached length. The
+single-sequence signature above is the `B = 1` case; the batched entry
+(`PagedDecodeAttentionBatchedF32`) is added in M9, not here. Flagged so the
+single-sequence layout does not paint M9 into a corner (the block-table pointer +
+strides already generalize).
+
+**As built (M9-T07):** the `[B, max_blocks]` `−1`-padded block-table tensor this
+section (and scheduler-runtime.md §8.2) reserved was **not** used. Block growth
+happens *inside* the forward — layer 0's per-sequence `append` allocates a new
+block when a decode token crosses a block boundary — so a block-table tensor
+snapshotted before the forward is stale exactly for those sequences.
+`PagedDecodeAttentionBatchedF32` instead takes **per-sequence pointer arrays**
+(`const int32_t* const* block_tables`, `const int64_t* lengths`) that the model
+sources from each sequence's `paged_view(layer)` *after* the append, plus the
+shared `k_slab`/`v_slab`/`block_stride`/`block_size` (all sequences share one
+`BlockPool`). No `−1` padding, no stale rows. See scheduler-runtime.md §8.4
+as-built. The batch assembly and scheduler that drive it are in
+`docs/design/scheduler-runtime.md` (§8.2, §8.4).
 
 ---
 

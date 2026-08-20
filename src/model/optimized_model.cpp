@@ -21,7 +21,9 @@
 #include "tensor/shape.h"
 #include "tensor/tensor.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -257,8 +259,7 @@ core::StatusOr<std::unique_ptr<OptimizedModel>> OptimizedModel::Create(
 
 core::Status OptimizedModel::ForwardLayer(const ForwardRequest& request,
                                           const Layer& layer, int layer_index,
-                                          std::int64_t t_dim,
-                                          std::int64_t /*p_len*/, float scale) {
+                                          std::int64_t t_dim, float scale) {
   const std::int64_t e = config_.hidden_size;
 
   // Workspace prefix views (value types over shared storage — writing through
@@ -289,50 +290,58 @@ core::Status OptimizedModel::ForwardLayer(const ForwardRequest& request,
                         rope_.cos().data_ptr<float>(),
                         rope_.sin().data_ptr<float>());
 
-  // Append this call's K/V (token-major [T, Hkv, d]).
-  ASSIGN_OR_RETURN(
-      const tensor::Tensor k3,
-      k.reshape(tensor::Shape{t_dim, config_.num_kv_heads, config_.head_dim}));
-  ASSIGN_OR_RETURN(
-      const tensor::Tensor v3,
-      v.reshape(tensor::Shape{t_dim, config_.num_kv_heads, config_.head_dim}));
-  RETURN_IF_ERROR(request.cache->append(layer_index, k3, v3));
+  // Attention: append this layer's K/V and read the accumulated cache back.
+  if (!request.caches.empty()) {
+    // Batched/ragged path (M9-T07): per-sequence append + batched attention.
+    RETURN_IF_ERROR(
+        BatchedAttention(request, layer_index, k, v, q, ctx, scale, t_dim));
+  } else {
+    // Single-sequence path. Append this call's K/V (token-major [T, Hkv, d]).
+    ASSIGN_OR_RETURN(const tensor::Tensor k3,
+                     k.reshape(tensor::Shape{t_dim, config_.num_kv_heads,
+                                             config_.head_dim}));
+    ASSIGN_OR_RETURN(const tensor::Tensor v3,
+                     v.reshape(tensor::Shape{t_dim, config_.num_kv_heads,
+                                             config_.head_dim}));
+    RETURN_IF_ERROR(request.cache->append(layer_index, k3, v3));
 
-  // ctx [T, H, d] (contiguous with the [T, H·d] ctx slot). Decode (T == 1)
-  // prefers the zero-copy paged fast path (paged-kv-cache.md §8.3): reading K/V
-  // through the block table avoids the per-step full-history gather `view()`
-  // performs, which is what keeps M8-T07 under the ≤10% decode regression
-  // bound. On a non-paged cache (`SimpleKvCache` → `Unimplemented`) it falls
-  // back to `view()` + the contiguous decode kernel, so nothing changes for
-  // that path. Prefill always gathers `[Hkv, P+T, d]` head-major via `view()`
-  // (the M8-T06 read path; a block-walking paged prefill kernel is M12).
-  if (t_dim == 1) {
-    core::StatusOr<kvcache::PagedKvView> paged =
-        request.cache->paged_view(layer_index);
-    if (paged.ok()) {
-      const kvcache::PagedKvView& pv = *paged;
-      kernels::PagedDecodeAttentionF32(
-          q.data_ptr<float>(), pv.k_slab, pv.v_slab, pv.block_table,
-          pv.num_blocks, pv.length, config_.num_heads, config_.num_kv_heads,
-          config_.head_dim, pv.block_size, pv.block_stride, scale,
-          ctx.data_ptr<float>());
-    } else if (core::IsUnimplemented(paged.status())) {
+    // ctx [T, H, d] (contiguous with the [T, H·d] ctx slot). Decode (T == 1)
+    // prefers the zero-copy paged fast path (paged-kv-cache.md §8.3): reading
+    // K/V through the block table avoids the per-step full-history gather
+    // `view()` performs, which is what keeps M8-T07 under the ≤10% decode
+    // regression bound. On a non-paged cache (`SimpleKvCache` →
+    // `Unimplemented`) it falls back to `view()` + the contiguous decode
+    // kernel, so nothing changes for that path. Prefill always gathers `[Hkv,
+    // P+T, d]` head-major via `view()` (the M8-T06 read path; a block-walking
+    // paged prefill kernel is M12).
+    if (t_dim == 1) {
+      core::StatusOr<kvcache::PagedKvView> paged =
+          request.cache->paged_view(layer_index);
+      if (paged.ok()) {
+        const kvcache::PagedKvView& pv = *paged;
+        kernels::PagedDecodeAttentionF32(
+            q.data_ptr<float>(), pv.k_slab, pv.v_slab, pv.block_table,
+            pv.num_blocks, pv.length, config_.num_heads, config_.num_kv_heads,
+            config_.head_dim, pv.block_size, pv.block_stride, scale,
+            ctx.data_ptr<float>());
+      } else if (core::IsUnimplemented(paged.status())) {
+        ASSIGN_OR_RETURN(const kvcache::KvView kv,
+                         request.cache->view(layer_index));
+        kernels::DecodeAttentionF32(
+            q.data_ptr<float>(), kv.k.data_ptr<float>(), kv.v.data_ptr<float>(),
+            ctx.data_ptr<float>(), config_.num_heads, config_.num_kv_heads,
+            config_.head_dim, kv.k.shape().dim(1), scale);
+      } else {
+        return paged.status();
+      }
+    } else {
       ASSIGN_OR_RETURN(const kvcache::KvView kv,
                        request.cache->view(layer_index));
-      kernels::DecodeAttentionF32(q.data_ptr<float>(), kv.k.data_ptr<float>(),
-                                  kv.v.data_ptr<float>(), ctx.data_ptr<float>(),
-                                  config_.num_heads, config_.num_kv_heads,
-                                  config_.head_dim, kv.k.shape().dim(1), scale);
-    } else {
-      return paged.status();
+      kernels::PrefillAttentionF32(
+          q.data_ptr<float>(), kv.k.data_ptr<float>(), kv.v.data_ptr<float>(),
+          ctx.data_ptr<float>(), t_dim, config_.num_heads, config_.num_kv_heads,
+          config_.head_dim, kv.k.shape().dim(1), scale);
     }
-  } else {
-    ASSIGN_OR_RETURN(const kvcache::KvView kv,
-                     request.cache->view(layer_index));
-    kernels::PrefillAttentionF32(q.data_ptr<float>(), kv.k.data_ptr<float>(),
-                                 kv.v.data_ptr<float>(), ctx.data_ptr<float>(),
-                                 t_dim, config_.num_heads, config_.num_kv_heads,
-                                 config_.head_dim, kv.k.shape().dim(1), scale);
   }
   RETURN_IF_ERROR(layer.o_proj->forward(ctx, tmp));
 
@@ -358,15 +367,141 @@ core::Status OptimizedModel::ForwardLayer(const ForwardRequest& request,
   return core::OkStatus();
 }
 
+core::Status OptimizedModel::BatchedAttention(
+    const ForwardRequest& request, int layer_index, const tensor::Tensor& k,
+    const tensor::Tensor& v, const tensor::Tensor& q, const tensor::Tensor& ctx,
+    float scale, std::int64_t t_dim) {
+  const auto num_seqs = static_cast<std::int64_t>(request.caches.size());
+  const std::int64_t hkv = config_.num_kv_heads;
+  const std::int64_t d = config_.head_dim;
+  const std::int64_t heads = config_.num_heads;
+  const std::int32_t* cu = request.cu_seqlens.data();  // [B+1]
+
+  // 1. Per-sequence K/V append, sliced from the flattened [ΣT, Hkv·d] rows by
+  // cu_seqlens (§8.3). Each sequence appends through its own PagedKvCache, so
+  // the M8 per-forward layer protocol, slot growth, and exhaustion seam are
+  // unchanged — batching is a loop around the existing append.
+  for (std::int64_t b = 0; b < num_seqs; ++b) {
+    const std::int64_t t0 = cu[b];
+    const std::int64_t t1 = cu[b + 1];
+    ASSIGN_OR_RETURN(const tensor::Tensor k_b, k.slice(0, t0, t1));
+    ASSIGN_OR_RETURN(const tensor::Tensor v_b, v.slice(0, t0, t1));
+    ASSIGN_OR_RETURN(const tensor::Tensor k3,
+                     k_b.reshape(tensor::Shape{t1 - t0, hkv, d}));
+    ASSIGN_OR_RETURN(const tensor::Tensor v3,
+                     v_b.reshape(tensor::Shape{t1 - t0, hkv, d}));
+    RETURN_IF_ERROR(request.caches[static_cast<std::size_t>(b)]->append(
+        layer_index, k3, v3));
+  }
+
+  // 2. Decode fast path: every sequence contributes one token (ΣT == B) and the
+  // caches are paged. Read each sequence's block table + length through the
+  // zero-copy paged_view AFTER the append (so a boundary-crossing token's fresh
+  // block is included — a pre-forward snapshot could not carry it), and run the
+  // batched paged decode kernel over the shared slabs.
+  if (t_dim == num_seqs) {
+    core::StatusOr<kvcache::PagedKvView> pv0 =
+        request.caches[0]->paged_view(layer_index);
+    if (pv0.ok()) {
+      batch_block_tables_.clear();
+      batch_lengths_.clear();
+      const float* k_slab = pv0->k_slab;
+      const float* v_slab = pv0->v_slab;
+      const std::int64_t bs = pv0->block_size;
+      const std::int64_t stride = pv0->block_stride;
+      for (std::int64_t b = 0; b < num_seqs; ++b) {
+        ASSIGN_OR_RETURN(
+            const kvcache::PagedKvView pv,
+            request.caches[static_cast<std::size_t>(b)]->paged_view(
+                layer_index));
+        // All sequences share one BlockPool, so the layer slabs/strides must
+        // match; the kernel takes one shared slab pair (§8.4).
+        if (pv.k_slab != k_slab || pv.v_slab != v_slab || pv.block_size != bs ||
+            pv.block_stride != stride) {
+          return core::InvalidArgumentError(
+              "OptimizedModel: batched decode requires all sequences to share "
+              "one block pool (layer {}, sequence {})",
+              layer_index, b);
+        }
+        batch_block_tables_.push_back(pv.block_table);
+        batch_lengths_.push_back(pv.length);
+      }
+      kernels::PagedDecodeAttentionBatchedF32(
+          q.data_ptr<float>(), k_slab, v_slab, batch_block_tables_.data(),
+          batch_lengths_.data(), num_seqs, heads, hkv, d, bs, stride, scale,
+          ctx.data_ptr<float>());
+      return core::OkStatus();
+    }
+    if (!core::IsUnimplemented(pv0.status())) {
+      return pv0.status();  // a real cache failure is not masked.
+    }
+    // Unimplemented → non-paged caches in a decode batch: fall through to the
+    // varlen path (bit-identical: varlen prefill with T_b == 1 == decode).
+  }
+
+  // 3. Varlen path (any T_b > 1, or the non-paged decode fallback). Gather each
+  // sequence's [Hkv, L_b, d] head-major history via view(layer) and run the
+  // ragged prefill kernel over the per-sequence pointer arrays (§8.4).
+  batch_views_.clear();
+  batch_views_.reserve(static_cast<std::size_t>(num_seqs));
+  for (std::int64_t b = 0; b < num_seqs; ++b) {
+    ASSIGN_OR_RETURN(
+        kvcache::KvView kv,
+        request.caches[static_cast<std::size_t>(b)]->view(layer_index));
+    batch_views_.push_back(std::move(kv));
+  }
+  batch_k_ptrs_.clear();
+  batch_v_ptrs_.clear();
+  batch_l_dims_.clear();
+  for (std::int64_t b = 0; b < num_seqs; ++b) {
+    const kvcache::KvView& kv = batch_views_[static_cast<std::size_t>(b)];
+    batch_k_ptrs_.push_back(kv.k.data_ptr<float>());
+    batch_v_ptrs_.push_back(kv.v.data_ptr<float>());
+    batch_l_dims_.push_back(kv.k.shape().dim(1));
+  }
+  kernels::PrefillAttentionVarlenF32(
+      q.data_ptr<float>(), cu, num_seqs, batch_k_ptrs_.data(),
+      batch_v_ptrs_.data(), batch_l_dims_.data(), ctx.data_ptr<float>(), heads,
+      hkv, d, scale);
+  return core::OkStatus();
+}
+
+core::StatusOr<tensor::Tensor> OptimizedModel::RunStack(
+    const ForwardRequest& request, std::int64_t t_dim) {
+  ActivationHook* hook = request.hook;
+  const std::int64_t hidden = config_.hidden_size;
+  const auto scale = static_cast<float>(
+      1.0 / std::sqrt(static_cast<double>(config_.head_dim)));
+
+  // Embedding → residual stream x [ΣT, E].
+  tensor::Tensor x = workspace_.x(t_dim);
+  RETURN_IF_ERROR(embed_.forward(request.token_ids, x));
+  Emit(hook, "embeddings", -1, x);
+
+  for (std::size_t i = 0; i < layers_.size(); ++i) {
+    RETURN_IF_ERROR(
+        ForwardLayer(request, layers_[i], static_cast<int>(i), t_dim, scale));
+    if (hook != nullptr) {
+      const std::string name = "layers." + std::to_string(i);
+      const tensor::Tensor xv = workspace_.x(t_dim);
+      Emit(hook, name, static_cast<int>(i), xv);
+    }
+  }
+
+  // Final norm over all ΣT positions (matches the golden / reference; §5.2).
+  tensor::Tensor normed = workspace_.h(t_dim);
+  kernels::RmsNormF32(x.data_ptr<float>(), final_norm_.scale.data_ptr<float>(),
+                      final_norm_.eps, t_dim, hidden, normed.data_ptr<float>());
+  Emit(hook, "final_norm", -1, normed);
+  return normed;
+}
+
 core::StatusOr<tensor::Tensor> OptimizedModel::forward(
     const ForwardRequest& request) {
-  // The ragged/batched forward (cu_seqlens + per-sequence caches) lands in
-  // M9-T07; reject a non-empty batch rather than silently ignore it
-  // (scheduler-runtime.md §8.1), matching ReferenceModel::forward.
+  // The ragged/batched forward (cu_seqlens + per-sequence caches, §8) runs its
+  // own validation + logits gather.
   if (!request.cu_seqlens.empty() || !request.caches.empty()) {
-    return core::UnimplementedError(
-        "OptimizedModel::forward: batched (cu_seqlens/caches) forward is not "
-        "implemented until M9-T07");
+    return ForwardBatched(request);
   }
   // Front-load every input check (§5.3) so a failure never touches the cache —
   // identical to ReferenceModel::forward (the error-path tests match 1:1).
@@ -429,31 +564,9 @@ core::StatusOr<tensor::Tensor> OptimizedModel::forward(
   RETURN_IF_ERROR(workspace_.EnsureCapacity(t_dim));
 
   ActivationHook* hook = request.hook;
-  const std::int64_t hidden = config_.hidden_size;
   const std::int64_t vocab = config_.vocab_size;
-  const auto scale = static_cast<float>(
-      1.0 / std::sqrt(static_cast<double>(config_.head_dim)));
 
-  // Embedding → residual stream x [T, E].
-  tensor::Tensor x = workspace_.x(t_dim);
-  RETURN_IF_ERROR(embed_.forward(request.token_ids, x));
-  Emit(hook, "embeddings", -1, x);
-
-  for (std::size_t i = 0; i < layers_.size(); ++i) {
-    RETURN_IF_ERROR(ForwardLayer(request, layers_[i], static_cast<int>(i),
-                                 t_dim, p_len, scale));
-    if (hook != nullptr) {
-      const std::string name = "layers." + std::to_string(i);
-      const tensor::Tensor xv = workspace_.x(t_dim);
-      Emit(hook, name, static_cast<int>(i), xv);
-    }
-  }
-
-  // Final norm over all T positions (matches the golden / reference; §5.2).
-  const tensor::Tensor normed = workspace_.h(t_dim);
-  kernels::RmsNormF32(x.data_ptr<float>(), final_norm_.scale.data_ptr<float>(),
-                      final_norm_.eps, t_dim, hidden, normed.data_ptr<float>());
-  Emit(hook, "final_norm", -1, normed);
+  ASSIGN_OR_RETURN(const tensor::Tensor normed, RunStack(request, t_dim));
 
   // lm_head projection. kLast projects only the last position (GEMV); kAll
   // projects every position (GEMM). Logits are freshly allocated, caller-owned
@@ -465,6 +578,131 @@ core::StatusOr<tensor::Tensor> OptimizedModel::forward(
                      tensor::ops::zeros(tensor::Shape{1, vocab},
                                         tensor::DataType::kFloat32));
     RETURN_IF_ERROR(lm_head_->forward(last, logits));
+    Emit(hook, "logits", -1, logits);
+    return logits;
+  }
+  ASSIGN_OR_RETURN(tensor::Tensor logits,
+                   tensor::ops::zeros(tensor::Shape{t_dim, vocab},
+                                      tensor::DataType::kFloat32));
+  RETURN_IF_ERROR(lm_head_->forward(normed, logits));
+  Emit(hook, "logits", -1, logits);
+  return logits;
+}
+
+core::StatusOr<std::int64_t> OptimizedModel::ValidateBatched(
+    const ForwardRequest& request) const {
+  // Front-load every batch check (§5.3, §8) so a failure never touches a cache.
+  const auto num_seqs = static_cast<std::int64_t>(request.caches.size());
+  if (num_seqs == 0 || request.cu_seqlens.empty()) {
+    return core::InvalidArgumentError(
+        "OptimizedModel::forward: a batched forward needs non-empty "
+        "caches and cu_seqlens");
+  }
+  const auto n_cu = static_cast<std::int64_t>(request.cu_seqlens.size());
+  if (n_cu != num_seqs + 1) {
+    return core::InvalidArgumentError(
+        "OptimizedModel::forward: cu_seqlens length {} must be caches "
+        "length + 1 = {}",
+        n_cu, num_seqs + 1);
+  }
+  if (request.cu_seqlens[0] != 0) {
+    return core::InvalidArgumentError(
+        "OptimizedModel::forward: cu_seqlens[0] must be 0, got {}",
+        request.cu_seqlens[0]);
+  }
+  for (std::int64_t b = 0; b < num_seqs; ++b) {
+    if (request.cu_seqlens[static_cast<std::size_t>(b + 1)] <=
+        request.cu_seqlens[static_cast<std::size_t>(b)]) {
+      return core::InvalidArgumentError(
+          "OptimizedModel::forward: cu_seqlens must be strictly increasing "
+          "(each sequence has >= 1 token); violated at {}",
+          b);
+    }
+  }
+  const std::int64_t t_dim =
+      request.cu_seqlens[static_cast<std::size_t>(num_seqs)];  // ΣT
+  const auto n_tok = static_cast<std::int64_t>(request.token_ids.size());
+  const auto n_pos = static_cast<std::int64_t>(request.positions.size());
+  if (n_tok != t_dim || n_pos != t_dim) {
+    return core::InvalidArgumentError(
+        "OptimizedModel::forward: token_ids/positions length must equal "
+        "cu_seqlens.back() = {}",
+        t_dim);
+  }
+  for (std::int64_t t = 0; t < t_dim; ++t) {
+    const std::int32_t id = request.token_ids[static_cast<std::size_t>(t)];
+    if (id < 0 || id >= config_.vocab_size) {
+      return core::InvalidArgumentError(
+          "OptimizedModel::forward: token_ids[{}] = {} out of range [0, {})", t,
+          id, config_.vocab_size);
+    }
+    const std::int32_t pos = request.positions[static_cast<std::size_t>(t)];
+    if (pos < 0 || pos >= config_.max_position_embeddings) {
+      return core::InvalidArgumentError(
+          "OptimizedModel::forward: positions[{}] = {} out of range [0, {})", t,
+          pos, config_.max_position_embeddings);
+    }
+  }
+  for (std::int64_t b = 0; b < num_seqs; ++b) {
+    kvcache::KvCache* cache = request.caches[static_cast<std::size_t>(b)];
+    if (cache == nullptr) {
+      return core::InvalidArgumentError(
+          "OptimizedModel::forward: caches[{}] is null", b);
+    }
+    const kvcache::CacheGeometry cg = cache->geometry();
+    if (cg.num_layers != geometry_.num_layers ||
+        cg.num_kv_heads != geometry_.num_kv_heads ||
+        cg.head_dim != geometry_.head_dim || cg.dtype != geometry_.dtype) {
+      return core::InvalidArgumentError(
+          "OptimizedModel::forward: caches[{}] geometry does not match the "
+          "model's",
+          b);
+    }
+    const std::int64_t t_b =
+        request.cu_seqlens[static_cast<std::size_t>(b + 1)] -
+        request.cu_seqlens[static_cast<std::size_t>(b)];
+    if (cache->length() + t_b > cache->capacity()) {
+      return core::ResourceExhaustedError(
+          "OptimizedModel::forward: caches[{}] length {} + {} new tokens "
+          "exceeds capacity {}",
+          b, cache->length(), t_b, cache->capacity());
+    }
+  }
+  return t_dim;
+}
+
+core::StatusOr<tensor::Tensor> OptimizedModel::ForwardBatched(
+    const ForwardRequest& request) {
+  ASSIGN_OR_RETURN(const std::int64_t t_dim, ValidateBatched(request));
+  const auto num_seqs = static_cast<std::int64_t>(request.caches.size());
+
+  RETURN_IF_ERROR(workspace_.EnsureCapacity(t_dim));
+
+  ActivationHook* hook = request.hook;
+  const std::int64_t hidden = config_.hidden_size;
+  const std::int64_t vocab = config_.vocab_size;
+
+  ASSIGN_OR_RETURN(const tensor::Tensor normed, RunStack(request, t_dim));
+
+  // lm_head. kLast → [B, V]: gather each sequence's last hidden row
+  // (cu_seqlens[b+1]−1) into a [B, E] buffer (the free `tmp` slot), one GEMM.
+  // kAll → [ΣT, V]. Row m of a batched GEMM is bit-identical to the
+  // single-row GEMV of that row (packed_gemm_test.GemvMatchesGemmRow), so a
+  // sequence's logits match a standalone run (§8.5). Logits are caller-owned.
+  if (request.logits_mode == LogitsMode::kLast) {
+    const tensor::Tensor gathered = workspace_.tmp(num_seqs);  // [B, E]
+    auto* dst = gathered.data_ptr<float>();
+    const auto* src = normed.data_ptr<float>();
+    for (std::int64_t b = 0; b < num_seqs; ++b) {
+      const std::int64_t last =
+          request.cu_seqlens[static_cast<std::size_t>(b + 1)] - 1;
+      const float* row = src + (last * hidden);
+      std::copy(row, row + hidden, dst + (b * hidden));
+    }
+    ASSIGN_OR_RETURN(tensor::Tensor logits,
+                     tensor::ops::zeros(tensor::Shape{num_seqs, vocab},
+                                        tensor::DataType::kFloat32));
+    RETURN_IF_ERROR(lm_head_->forward(gathered, logits));
     Emit(hook, "logits", -1, logits);
     return logits;
   }

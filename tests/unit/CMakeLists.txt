@@ -295,19 +295,19 @@ engine_add_tests(TREE unit SOURCES
   DEPS engine::scheduler engine::kvcache engine::tensor
   LABELS scheduler)
 
-# batch_test (M9-T05): the batch assembler (engine/batch.{h,cpp}) — hand-verified
-# assembled metadata (token_ids/positions/cu_seqlens/caches/sample_rows) for
-# prefill and decode, the [B, max_blocks] −1-padded block-table tensor and
-# seq_lens over real PagedKvCaches, the empty pass, front-loaded validation
-# (null cache/sampler, empty tokens, multi-token decode, Unimplemented from a
-# SimpleKvCache's paged_view), the additive ForwardRequest wiring, and
-# allocation-free staging after warm-up (a counting allocator + staging_bytes).
+# batch_test (M9-T05, updated M9-T07): the batch assembler (engine/batch.{h,cpp})
+# — hand-verified assembled metadata (token_ids/positions/cu_seqlens/caches/
+# sample_rows) for prefill and decode over real PagedKvCaches, the empty pass,
+# front-loaded validation (null cache/sampler, empty tokens, multi-token
+# decode), the additive ForwardRequest wiring, and allocation-free staging after
+# warm-up (staging_bytes stability). The batched decode kernel self-sources block
+# tables post-append (§8.4), so no block-table tensor is staged here.
 # Pure orchestration over real caches — no kernel/forward, so no SCALAR_PASS.
 # `engine` label.
 engine_add_tests(TREE unit SOURCES
   batch_test.cpp
   DEPS engine::engine engine::kvcache engine::sampling engine::model
-       engine::memory engine::tensor
+       engine::tensor
   LABELS engine)
 
 # qwen2_family_test (M5-T10): the Qwen-family reference path on the shared M5
@@ -436,6 +436,22 @@ engine_add_tests(TREE unit SOURCES
 # the end-to-end case. `kernels` label.
 engine_add_tests(TREE unit SOURCES
   paged_decode_attention_kernel_test.cpp
+  DEPS engine::kernels engine::cpu engine::model engine::kvcache engine::memory
+  LABELS kernels
+  SCALAR_PASS)
+
+# paged_decode_attention_batched_kernel_test (M9-T07): PagedDecodeAttentionBatchedF32
+# — decodes B sequences together over per-sequence block tables + the shared
+# slabs — asserted **bit-identical** to a sequential single-sequence
+# PagedDecodeAttentionF32 of each member, across block sizes {8,16,32,64},
+# heterogeneous + exact-boundary lengths, GQA ratios, head dims, batch sizes,
+# and thread counts; plus an end-to-end pass through real PagedKvCaches sharing
+# one BlockPool, a B==0 no-op, and a bs∤64 death test. Reuses the same per-ISA
+# PagedDecodeUnits as the single-sequence kernel, so SCALAR_PASS exercises the
+# shipped bytes. Adds engine::kvcache/engine::memory for the end-to-end case.
+# `kernels` label.
+engine_add_tests(TREE unit SOURCES
+  paged_decode_attention_batched_kernel_test.cpp
   DEPS engine::kernels engine::cpu engine::model engine::kvcache engine::memory
   LABELS kernels
   SCALAR_PASS)

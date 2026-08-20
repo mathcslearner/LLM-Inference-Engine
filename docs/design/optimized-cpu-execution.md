@@ -990,16 +990,20 @@ the merge gate is cross-*thread* bit-identity + cross-ISA tolerance, cpu-backend
   `[Hkv, L, d]` K/V slab** (from `view` today, from an M8 gather tomorrow) — the
   kernel signature does not change, only who fills the slab. This is why §8 quantifies
   the `view` gather cost now: M8 removes exactly that.
-- **M9 (batching):** `ForwardRequest` grows `cu_seqlens`/slot-mapping fields
-  (model-execution.md §5.4); the optimized forward loops over sequences *above*
-  the kernels (the kernels already take per-sequence `q`/`k`/`v`), and varlen
-  prefill (M9-T06, landed: `kernels::PrefillAttentionVarlenF32` loops the
-  unchanged per-sequence prefill recurrence over `cu_seqlens`) tiles across the
-  ragged batch. The packed weights, workspace,
-  and micro-kernels are unchanged. The scheduler, batch assembly, and loop that
-  drive this are `docs/design/scheduler-runtime.md` (M9-T01); §6.3's deferred
-  "pre-size the workspace from `--max-num-batched-tokens`" note is discharged
-  there (§8.2 — the staging buffers are sized by the batch-token budget).
+- **M9 (batching, landed T05–T07):** `ForwardRequest` grew `cu_seqlens`/`caches`
+  fields (model-execution.md §5.4); the optimized forward runs the flattened
+  `[ΣT, E]` workspace through the unchanged norm/GEMM/RoPE/SiLU/add kernels and
+  branches only the attention section (`OptimizedModel::BatchedAttention`):
+  per-sequence K/V append sliced by `cu_seqlens`, then `PrefillAttentionVarlenF32`
+  (M9-T06, ragged prefill) or `PagedDecodeAttentionBatchedF32` (M9-T07, batched
+  decode over post-append per-sequence `paged_view`s). `kLast` logits gather each
+  sequence's last hidden row into `[B, E]` → one lm_head GEMM → `[B, V]`
+  (row-bitwise equal to the per-sequence GEMV by `GemvMatchesGemmRow`). The packed
+  weights, workspace, and micro-kernels are unchanged. The scheduler, batch
+  assembly, and loop that drive this are `docs/design/scheduler-runtime.md`
+  (M9-T01); §6.3's deferred "pre-size the workspace from
+  `--max-num-batched-tokens`" note is discharged there (§8.2 — the staging
+  buffers are sized by the batch-token budget).
 - **M12 (tuning/fusions):** tile/grain constants tuned with a sweep (M12-T02);
   flash-decoding cache split via `parallel_reduce` (M12-T03, preserving §5's
   cross-thread bit-identity); RoPE+KV-write / residual+norm / SwiGLU fusions

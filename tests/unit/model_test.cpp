@@ -40,7 +40,6 @@ namespace {
 namespace ops = engine::tensor::ops;
 using engine::core::IsInvalidArgument;
 using engine::core::IsResourceExhausted;
-using engine::core::IsUnimplemented;
 using engine::core::StatusOr;
 using engine::kvcache::BlockPool;
 using engine::kvcache::CacheGeometry;
@@ -766,33 +765,115 @@ TEST(ReferenceModelTest, ForwardRejectsMalformedInputs) {
   }
 }
 
-// The ragged/batched forward (cu_seqlens + per-sequence caches) is rejected
-// with Unimplemented until M9-T07 — never silently ignored (M9-T05;
-// scheduler-runtime.md §8.1).
-TEST(ReferenceModelTest, ForwardRejectsBatchedRequest) {
-  const std::unique_ptr<ReferenceModel> model = BuildTiny();
-  const std::vector<std::int32_t> ids = PromptIds();
+// ------------------------------------------------------ batched forward (M9)
+// --
+
+// Runs one single-sequence forward on a fresh SimpleKvCache and returns the
+// logits — the per-member oracle for the batched forward.
+[[nodiscard]] Tensor SingleForward(ReferenceModel& model,
+                                   std::span<const std::int32_t> ids,
+                                   LogitsMode mode) {
+  SimpleKvCache cache = Unwrap(SimpleKvCache::Create(ModelGeometry(), kMaxPos));
   const std::vector<std::int32_t> pos =
       Iota(static_cast<std::int64_t>(ids.size()));
-  const std::vector<std::int32_t> cu = {0,
-                                        static_cast<std::int32_t>(ids.size())};
+  return Unwrap(model.forward({.token_ids = ids,
+                               .positions = pos,
+                               .cache = &cache,
+                               .logits_mode = mode}));
+}
 
-  SimpleKvCache cache = Unwrap(SimpleKvCache::Create(ModelGeometry(), kMaxPos));
-  // Non-empty cu_seqlens → Unimplemented.
-  EXPECT_TRUE(IsUnimplemented(model
-                                  ->forward({.token_ids = ids,
-                                             .positions = pos,
-                                             .cache = &cache,
-                                             .cu_seqlens = cu})
-                                  .status()));
-  // Non-empty caches → Unimplemented.
-  std::vector<engine::kvcache::KvCache*> caches = {&cache};
-  EXPECT_TRUE(IsUnimplemented(model
-                                  ->forward({.token_ids = ids,
-                                             .positions = pos,
-                                             .cache = &cache,
-                                             .caches = caches})
-                                  .status()));
+// The batched reference forward (per-member single-seq, concatenated) is
+// bit-identical to running each member standalone — kLast → [B, V] rows, kAll →
+// [ΣT, V] rows. Heterogeneous prompt lengths (§8.5 as the oracle).
+TEST(ReferenceModelTest, BatchedPrefillMatchesConcatenatedSingle) {
+  std::unique_ptr<ReferenceModel> model = BuildTiny();
+  const std::vector<std::int32_t> a = {5, 6, 7};        // T=3
+  const std::vector<std::int32_t> b = {2, 3, 4, 8, 9};  // T=5
+
+  for (const LogitsMode mode : {LogitsMode::kLast, LogitsMode::kAll}) {
+    std::vector<std::int32_t> ids = a;
+    ids.insert(ids.end(), b.begin(), b.end());
+    std::vector<std::int32_t> pos = Iota(static_cast<std::int64_t>(a.size()));
+    const std::vector<std::int32_t> posb =
+        Iota(static_cast<std::int64_t>(b.size()));
+    pos.insert(pos.end(), posb.begin(), posb.end());
+    const std::vector<std::int32_t> cu = {
+        0, static_cast<std::int32_t>(a.size()),
+        static_cast<std::int32_t>(a.size() + b.size())};
+
+    SimpleKvCache ca = Unwrap(SimpleKvCache::Create(ModelGeometry(), kMaxPos));
+    SimpleKvCache cb = Unwrap(SimpleKvCache::Create(ModelGeometry(), kMaxPos));
+    std::vector<engine::kvcache::KvCache*> caches = {&ca, &cb};
+    const Tensor batched = Unwrap(model->forward({.token_ids = ids,
+                                                  .positions = pos,
+                                                  .logits_mode = mode,
+                                                  .cu_seqlens = cu,
+                                                  .caches = caches}));
+
+    const Tensor la = SingleForward(*model, a, mode);
+    const Tensor lb = SingleForward(*model, b, mode);
+    const std::int64_t rows_a = mode == LogitsMode::kLast ? 1 : 3;
+    const std::int64_t rows_b = mode == LogitsMode::kLast ? 1 : 5;
+    EXPECT_EQ(batched.shape().dim(0), rows_a + rows_b);
+    const Tensor top = Unwrap(batched.slice(0, 0, rows_a));
+    const Tensor bot = Unwrap(batched.slice(0, rows_a, rows_a + rows_b));
+    EXPECT_TRUE(Unwrap(ops::allclose(top, la, 0.0, 0.0)).allclose);
+    EXPECT_TRUE(Unwrap(ops::allclose(bot, lb, 0.0, 0.0)).allclose);
+  }
+}
+
+// Front-loaded batch validation: malformed cu_seqlens / mismatched
+// caches / out-of-range id are InvalidArgument; an over-capacity member is
+// ResourceExhausted — all before any cache is mutated.
+TEST(ReferenceModelTest, BatchedForwardValidation) {
+  std::unique_ptr<ReferenceModel> model = BuildTiny();
+  const std::vector<std::int32_t> ids = {5, 6, 7, 2, 3};
+  const std::vector<std::int32_t> pos = {0, 1, 2, 0, 1};
+  SimpleKvCache ca = Unwrap(SimpleKvCache::Create(ModelGeometry(), kMaxPos));
+  SimpleKvCache cb = Unwrap(SimpleKvCache::Create(ModelGeometry(), kMaxPos));
+  std::vector<engine::kvcache::KvCache*> caches = {&ca, &cb};
+  const std::vector<std::int32_t> cu = {0, 3, 5};
+
+  // caches length + 1 != cu_seqlens length.
+  const std::vector<std::int32_t> cu_bad = {0, 5};
+  EXPECT_TRUE(IsInvalidArgument(model
+                                    ->forward({.token_ids = ids,
+                                               .positions = pos,
+                                               .cu_seqlens = cu_bad,
+                                               .caches = caches})
+                                    .status()));
+
+  // Non-increasing cu_seqlens.
+  const std::vector<std::int32_t> cu_flat = {0, 3, 3};
+  EXPECT_TRUE(IsInvalidArgument(model
+                                    ->forward({.token_ids = ids,
+                                               .positions = pos,
+                                               .cu_seqlens = cu_flat,
+                                               .caches = caches})
+                                    .status()));
+
+  // An out-of-range token id.
+  std::vector<std::int32_t> bad_ids = ids;
+  bad_ids[3] = static_cast<std::int32_t>(kVocab);  // == vocab, out of range
+  EXPECT_TRUE(IsInvalidArgument(model
+                                    ->forward({.token_ids = bad_ids,
+                                               .positions = pos,
+                                               .cu_seqlens = cu,
+                                               .caches = caches})
+                                    .status()));
+
+  // A too-small cache for its member's tokens → ResourceExhausted.
+  SimpleKvCache tiny = Unwrap(SimpleKvCache::Create(ModelGeometry(), 1));
+  std::vector<engine::kvcache::KvCache*> small = {&ca, &tiny};
+  EXPECT_TRUE(IsResourceExhausted(model
+                                      ->forward({.token_ids = ids,
+                                                 .positions = pos,
+                                                 .cu_seqlens = cu,
+                                                 .caches = small})
+                                      .status()));
+  // No member was mutated (validation is front-loaded).
+  EXPECT_EQ(ca.length(), 0);
+  EXPECT_EQ(cb.length(), 0);
 }
 
 TEST(ReferenceModelTest, ForwardRejectsOverCapacityCacheUnchanged) {

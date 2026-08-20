@@ -46,6 +46,20 @@ class ReferenceModel final : public Model {
   }
 
  private:
+  // The ragged/batched forward (M9-T07; scheduler-runtime.md §8): the oracle
+  // realizes it as "run the single-sequence forward per member and concatenate
+  // logits" — bit-identical to standalone runs by construction, and the
+  // cheapest reference for the optimized batched path. Validates the whole
+  // batch before touching any cache.
+  [[nodiscard]] core::StatusOr<tensor::Tensor> ForwardBatched(
+      const ForwardRequest& request);
+
+  // Front-loads every batch check (§5.3, §8) — cu_seqlens well-formedness,
+  // token/position lengths + ranges, and per-member cache null/geometry/
+  // capacity — returning ΣT on success. On error nothing is mutated.
+  [[nodiscard]] core::StatusOr<std::int64_t> ValidateBatched(
+      const ForwardRequest& request) const;
+
   ReferenceModel(ModelConfig config, kvcache::CacheGeometry geometry,
                  Embedding embed, std::vector<DecoderLayer> layers,
                  RmsNorm final_norm, std::unique_ptr<Linear> lm_head)

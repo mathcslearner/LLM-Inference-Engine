@@ -135,6 +135,36 @@ void PagedDecodeGroupSlice(const PagedDecodeArgs& a, std::int64_t head_off,
   }
 }
 
+// One batched paged decode-attention call (scheduler-runtime.md §8.4, M9-T07).
+// B sequences, one query per query head each, decoded together in a single
+// forward. All sequences' layer K/V live in the SAME per-layer slabs (they
+// share one BlockPool, so `paged_view(layer)` returns identical
+// `k_slab`/`v_slab`/`block_size`/`block_stride` for every sequence); only the
+// block table and cached length differ per sequence — hence the shared slabs
+// plus the per-sequence `block_tables`/`lengths` arrays. `q`/`out` are the
+// flattened `[B, H, d]` batch-major blocks (sequence b at `+ b·H·d`). The
+// per-sequence recurrence is the **unchanged** `PagedDecodeUnitsImpl` driven on
+// a `PagedDecodeArgs` synthesized per sequence, so each sequence's output is
+// **bit-identical** to a standalone `PagedDecodeAttentionF32` run on it (the
+// M9-T07 acceptance) — the batch only reorders which (sequence, kv-head) unit a
+// thread picks up; no cross-sequence value enters a sequence's recurrence.
+struct PagedDecodeBatchedArgs {
+  const float* q;       // [B, H, d]
+  const float* k_slab;  // shared layer K slab base [num_blocks, Hkv, bs, d]
+  const float* v_slab;  // shared layer V slab base
+  const std::int32_t* const* block_tables;  // [B] logical→physical per sequence
+  const std::int64_t* lengths;              // [B] cached keys L_b per sequence
+  float* out;                               // [B, H, d]
+  std::int64_t num_seqs;                    // B
+  std::int64_t heads;                       // H query heads
+  std::int64_t kv_heads;                    // Hkv
+  std::int64_t d;                           // head_dim
+  std::int64_t group;                       // H / Hkv (GQA group size)
+  std::int64_t block_size;                  // bs (divides kAttnKb)
+  std::int64_t block_stride;                // Hkv·bs·d — one block id's span
+  float scale;
+};
+
 // The paged decode online-softmax recurrence for kv heads [unit_begin,
 // unit_end) (design §9.2, M8-T05). Parallelized over kv heads (the public
 // entry), exactly like DecodeUnitsImpl: a unit is one kv head's `group` query

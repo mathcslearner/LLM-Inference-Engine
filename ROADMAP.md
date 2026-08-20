@@ -1146,7 +1146,7 @@ shared kernels loop over sequences; still naive-but-correct).
 **Acceptance criteria:**
 - Tests: batch of {3 sequences, lengths 5/64/129} matches per-sequence single runs exactly (same outputs sequence-by-sequence).
 
-### M9-T07 · Batched decode execution
+### M9-T07 · Batched decode execution — ✅ DONE (2026-08-19)
 Batched decode step: N sequences × 1 token through the full model using the paged
 decode kernel over a batched block-table tensor; batched sampling (M7-T06) consumes
 the result.

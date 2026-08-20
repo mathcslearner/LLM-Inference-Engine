@@ -445,11 +445,15 @@ bug, not a partial commit — validation is front-loaded per ADR-003).
 
 So the contract is chosen to admit them without a signature break:
 
-- **M9 batching:** token-major activations + `cu_seqlens` field; `forward`
-  processes a ragged batch, output `[Σ_selected, V]`. v0's 2-D `[T, E]` flow is
-  the single-sequence special case. The additive `ForwardRequest` fields, the
+- **M9 batching (landed T05–T07):** token-major activations + `cu_seqlens` +
+  `caches` fields; `forward` processes a ragged batch, output `[B, V]` for kLast /
+  `[Σ T_b, V]` for kAll. v0's 2-D `[T, E]` flow is the single-sequence special
+  case (both new spans empty). The additive `ForwardRequest` fields, the
   per-sequence-append rule, and the batch-invariance guarantee are specified in
-  `docs/design/scheduler-runtime.md` §8.
+  `docs/design/scheduler-runtime.md` §8. Both backends implement it: the reference
+  runs each member as a single-sequence forward and concatenates (the oracle); the
+  optimized backend runs the flattened batch through the kernels with a
+  per-sequence attention section (varlen prefill / batched paged decode).
 - **M12 decode allocation-free:** the `kLast`/`T==1` path must be
   heap-allocation-free once M6 provides workspaces (M12-T05). v0 allocates
   freely — clarity first — but the *interface* (caller owns logits, cache

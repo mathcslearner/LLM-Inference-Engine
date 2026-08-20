@@ -1,16 +1,10 @@
 #include "engine/batch.h"
 
 #include "core/status.h"
-#include "tensor/device.h"
-#include "tensor/dtype.h"
-#include "tensor/shape.h"
-#include "tensor/tensor.h"
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <span>
-#include <utility>
 #include <vector>
 
 namespace engine::engine {
@@ -40,9 +34,6 @@ model::ForwardRequest BatchInputs::MakeForwardRequest(
   };
 }
 
-BatchAssembler::BatchAssembler(memory::Allocator* allocator)
-    : allocator_(allocator) {}
-
 core::Status BatchAssembler::Flatten(std::span<const BatchSeqInput> seqs,
                                      bool decode) {
   inputs_.token_ids.clear();
@@ -50,8 +41,6 @@ core::Status BatchAssembler::Flatten(std::span<const BatchSeqInput> seqs,
   inputs_.cu_seqlens.clear();
   inputs_.caches.clear();
   inputs_.sample_rows.clear();
-  inputs_.seq_lens.clear();
-  inputs_.block_table = tensor::Tensor{};
 
   inputs_.cu_seqlens.push_back(0);
   std::int32_t running = 0;
@@ -97,75 +86,20 @@ core::Status BatchAssembler::Flatten(std::span<const BatchSeqInput> seqs,
 core::Status BatchAssembler::AssemblePrefill(
     std::span<const BatchSeqInput> seqs) {
   return Flatten(seqs, /*decode=*/false);
-  // block_table stays undefined and seq_lens empty: prefill attention reads K/V
-  // through caches[b]->view(layer), so it needs neither (§8.3).
-}
-
-core::StatusOr<std::int32_t*> BatchAssembler::EnsureBlockTable(
-    std::int64_t count) {
-  if (block_table_capacity_ < count) {
-    ASSIGN_OR_RETURN(
-        block_table_storage_,
-        tensor::Tensor::empty(tensor::Shape{count}, tensor::DataType::kInt32,
-                              tensor::Device::Cpu(), allocator_));
-    block_table_capacity_ = count;
-  }
-  return block_table_storage_.data_ptr<std::int32_t>();
 }
 
 core::Status BatchAssembler::AssembleDecode(
     std::span<const BatchSeqInput> seqs) {
-  RETURN_IF_ERROR(Flatten(seqs, /*decode=*/true));
-
-  const auto num_seqs = static_cast<std::int64_t>(seqs.size());
-  if (num_seqs == 0) {
-    return core::OkStatus();  // empty pass: block_table undefined, seq_lens []
-  }
-
-  // Gather each sequence's paged view (block table + length) and the row width.
-  struct RowView {
-    const std::int32_t* blocks = nullptr;
-    std::int64_t num_blocks = 0;
-  };
-  std::vector<RowView> views;
-  views.reserve(seqs.size());
-  inputs_.seq_lens.reserve(seqs.size());
-  std::int64_t max_blocks = 0;
-  for (const BatchSeqInput& s : seqs) {
-    ASSIGN_OR_RETURN(kvcache::PagedKvView view, s.cache->paged_view(0));
-    views.push_back(
-        RowView{.blocks = view.block_table, .num_blocks = view.num_blocks});
-    inputs_.seq_lens.push_back(static_cast<std::int32_t>(view.length));
-    max_blocks = std::max(max_blocks, view.num_blocks);
-  }
-
-  // Build the [B, max_blocks] block-table tensor: row b = its blocks, −1
-  // padded.
-  const std::int64_t total = num_seqs * max_blocks;
-  ASSIGN_OR_RETURN(std::int32_t* data, EnsureBlockTable(total));
-  for (std::int64_t b = 0; b < num_seqs; ++b) {
-    std::int32_t* row = data + (b * max_blocks);
-    const RowView& v = views[static_cast<std::size_t>(b)];
-    for (std::int64_t j = 0; j < v.num_blocks; ++j) {
-      row[j] = v.blocks[j];
-    }
-    for (std::int64_t j = v.num_blocks; j < max_blocks; ++j) {
-      row[j] = -1;
-    }
-  }
-  ASSIGN_OR_RETURN(const tensor::Tensor flat,
-                   block_table_storage_.slice(0, 0, total));
-  ASSIGN_OR_RETURN(inputs_.block_table,
-                   flat.reshape(tensor::Shape{num_seqs, max_blocks}));
-  return core::OkStatus();
+  // Decode differs only in the T_b == 1 constraint (Flatten enforces it). The
+  // batched decode kernel self-sources block tables + lengths post-append
+  // (§8.4 as-built), so no paged view is read at assembly time.
+  return Flatten(seqs, /*decode=*/true);
 }
 
 std::size_t BatchAssembler::staging_bytes() const {
   return VectorBytes(inputs_.token_ids) + VectorBytes(inputs_.positions) +
          VectorBytes(inputs_.cu_seqlens) + VectorBytes(inputs_.caches) +
-         VectorBytes(inputs_.sample_rows) + VectorBytes(inputs_.seq_lens) +
-         (static_cast<std::size_t>(block_table_capacity_) *
-          sizeof(std::int32_t));
+         VectorBytes(inputs_.sample_rows);
 }
 
 }  // namespace engine::engine

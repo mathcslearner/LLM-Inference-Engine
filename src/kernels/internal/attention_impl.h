@@ -78,6 +78,19 @@ using PagedDecodeUnitsFn = void (*)(const internal::PagedDecodeArgs&,
                                     std::int64_t, std::int64_t);
 [[nodiscard]] PagedDecodeUnitsFn PagedDecodeAttentionVariant(Isa isa);
 
+// The whole batched paged-decode kernel minus dispatch + threading (M9-T07 test
+// seam): runs batch-major units [unit_begin, unit_end) — one (sequence, kv
+// head) pair per unit (sequence b = u / Hkv, kv head = u % Hkv) — by
+// synthesizing the per-sequence PagedDecodeArgs and invoking the per-ISA
+// PagedDecodeUnits variant `fn` on that sequence's single kv head. Each
+// per-sequence call is byte-for-byte what a standalone
+// PagedDecodeAttentionF32(seq_b) would run for that kv head, so thread/chunk
+// invariance and per-sequence bit-identity hold by construction. No ISA content
+// here — the arithmetic lives entirely in `fn`.
+void PagedDecodeBatchedUnits(const internal::PagedDecodeBatchedArgs& a,
+                             PagedDecodeUnitsFn fn, std::int64_t unit_begin,
+                             std::int64_t unit_end);
+
 }  // namespace detail
 
 }  // namespace engine::kernels

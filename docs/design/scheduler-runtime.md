@@ -801,15 +801,15 @@ the optimized doc — and this closes that doc's deferred "pre-size from
 token budget):
 
 ```cpp
-struct BatchInputs {
+struct BatchInputs {                     // identical for prefill and decode
   std::vector<std::int32_t> token_ids;   // flattened
   std::vector<std::int32_t> positions;   // per-seq absolute positions
   std::vector<std::int32_t> cu_seqlens;  // [B+1]
   std::vector<kvcache::KvCache*> caches; // [B]
   std::vector<BatchRow> sample_rows;     // [B] sampler + context per seq
-  // decode path: the batched block-table tensor (§8.3), [B, max_blocks] int32
-  tensor::Tensor block_table;
-  std::vector<std::int32_t> seq_lens;    // [B] cache lengths (decode)
+  // (M9-T05 also staged a [B, max_blocks] block_table + seq_lens for decode;
+  //  M9-T07 removed them — the batched decode kernel self-sources per-sequence
+  //  tables post-append, §8.4 as-built.)
 };
 ```
 
@@ -823,11 +823,16 @@ Assembled fields, hand-verifiable (M9-T05 acceptance — exact tensor contents f
 - **`sample_rows`**: `BatchRow{&seq.sampler, seq.context()}` per sequence — the
   batched-sampler input (§8.4), letting one batch freely mix greedy/stochastic,
   temperatures, penalties, and logprob requests (M7-T06).
-- **`block_table`** (decode only): `[B, max_blocks]` int32, row `b` = sequence
-  `b`'s `BlockTable::blocks()` padded with `−1` to `max_blocks = max_b
-  ⌈len_b/bs⌉` — the shape paged-kv-cache.md §9.4 reserved.
+- ~~**`block_table`** (decode only): `[B, max_blocks]` int32~~ — **retired in
+  M9-T07.** A pre-forward block-table snapshot is stale for any sequence whose
+  decode token crosses a block boundary (the new block is allocated *inside* the
+  forward, §8.3/§8.4 as-built), so the batched decode kernel self-sources
+  per-sequence tables post-append instead. The assembly stages no block-table
+  tensor or `seq_lens`; `BatchInputs` is the flattened
+  token/position/cu_seqlens/caches/sample_rows bundle for both passes.
 
-**As built (M9-T05):** `src/engine/batch.{h,cpp}` — `BatchAssembler` +
+**As built (M9-T05, block-table field retired M9-T07):**
+`src/engine/batch.{h,cpp}` — `BatchAssembler` +
 `BatchInputs` (`engine::engine`). Realized choices, matching the acceptance
 tests:
 
@@ -849,17 +854,19 @@ tests:
   `PagedKvCache::append` (which computes its own slots and owns the exhaustion
   seam), so the batch carries no batch-level slot mapping — the roadmap's "slot
   mappings" line is subsumed by per-sequence append, recorded here.
-- **`block_table` via the abstract `paged_view(0)`** (all layers share one
-  table): row `b` = its block ids `−1`-padded to `max_blocks`; a non-paged cache
-  (`SimpleKvCache`) propagates `paged_view`'s `Unimplemented` (the batched
-  runtime uses paged caches). **Allocation-free after warm-up:** the staging
-  vectors keep capacity across steps and the block-table tensor storage grows to
-  a high-water mark (`staging_bytes()` is the stability metric); the `[B,
-  max_blocks]` tensor is a zero-copy `slice`→`reshape` view over that storage.
+- ~~**`block_table` via the abstract `paged_view(0)`**~~ — **removed in M9-T07**
+  (the T05 decode assembly built a `[B, max_blocks]` block-table tensor + a
+  `seq_lens` snapshot; the batched decode kernel now self-sources per-sequence
+  tables post-append, so both are gone, see §8.4 as-built). **Allocation-free
+  after warm-up:** the staging vectors keep capacity across steps
+  (`staging_bytes()` is the stability metric); no tensor allocation remains, so
+  the assembler dropped its `memory::Allocator` and `engine`'s public surface no
+  longer names a tensor type (the M9-T05 `engine::tensor` PUBLIC→PRIVATE,
+  `engine::memory` dropped).
 - **Additive `ForwardRequest` fields landed with T05** (§8.1): `cu_seqlens` +
   `caches` (empty ⇒ the single-sequence path). Both backends
-  (`ReferenceModel`/`OptimizedModel`) reject a non-empty batch with
-  `Unimplemented` until M9-T06/T07 — never silently ignored.
+  (`ReferenceModel`/`OptimizedModel`) implement the batched forward as of M9-T07
+  (M9-T05/T06 rejected a non-empty batch with `Unimplemented`).
   `BatchInputs::MakeForwardRequest` builds the batched request over the staging.
 
 ### 8.3 K/V append stays per sequence
@@ -932,12 +939,43 @@ sequence exhaustion boundary and gain nothing (the scatter is per-token regardle
     `varlen_attention_kernel_test`) → 1311 ctest green.
 - **`PagedDecodeAttentionBatchedF32`** (M9-T07): the batched decode kernel. Loops
   over sequences, running the **unchanged** per-sequence `PagedDecodeAttentionF32`
-  recurrence for each, reading row `b` of the `[B, max_blocks]` block-table tensor
-  (skipping `−1` padding) and `seq_lens[b]`. Threaded over (sequence, kv head).
-  Per fixed (sequence, head) the arithmetic order is identical to the single-
-  sequence kernel, so it is **bit-identical** to a sequential single-sequence
-  decode of each member — the batched-decode correctness criterion (M9-T07
-  acceptance).
+  recurrence for each, reading that sequence's block table + length. Threaded over
+  (sequence, kv head). Per fixed (sequence, head) the arithmetic order is
+  identical to the single-sequence kernel, so it is **bit-identical** to a
+  sequential single-sequence decode of each member — the batched-decode
+  correctness criterion (M9-T07 acceptance).
+
+  **As built (M9-T07):** `src/kernels/paged_attention.{h,cpp}` —
+  `PagedDecodeAttentionBatchedF32`. Realized choices:
+  - **Per-sequence pointer arrays, not the `[B, max_blocks]` tensor.** The
+    original §8.2 sketch had a decode assembly stage a `−1`-padded block-table
+    tensor + `seq_lens` for this kernel. But **block growth happens inside the
+    forward** — layer 0's per-sequence `append` (§8.3) allocates a new block when
+    a decode token crosses a block boundary (`L % bs == 0`) — so a tensor
+    snapshotted *before* the forward is one block short (and `seq_lens` one token
+    short) exactly for those sequences. The model therefore self-sources each
+    sequence's `paged_view(layer)` **after** the layer's appends and passes the
+    kernel `const int32_t* const* block_tables` + `const int64_t* lengths`
+    (post-append), plus the **shared** `k_slab`/`v_slab`/`block_stride`/
+    `block_size` (all sequences share one `BlockPool`, so `paged_view` returns
+    identical slab bases; the model validates this). This is the M9-T06
+    varlen-prefill precedent (per-sequence K/V pointer arrays) applied to decode.
+    Consequently the batch assembly (§8.2) stages **no** block-table tensor or
+    lengths, and the reserved `[B, max_blocks]` shape (paged-kv-cache.md §9.4) is
+    retired as-built.
+  - **No new per-ISA code, no new arithmetic.** Unit space is batch-major
+    `B·Hkv` (one (sequence, kv head) pair per unit); `detail::PagedDecodeBatched-
+    Units` synthesizes the *same* `PagedDecodeArgs` a standalone call builds for
+    each sequence and invokes the existing dispatched `PagedDecodeUnits` variant
+    on that sequence's single kv head — so there is no `{isa}/*` batched TU and
+    SCALAR_PASS exercises the shipped bytes. Decode parallel width grows from
+    `Hkv` (single-sequence) to `B·Hkv`, partially relieving the M6-T05 idle-cores
+    note for batched decode.
+  - **Model wiring** (`OptimizedModel::BatchedAttention`): per-sequence K/V append
+    sliced by `cu_seqlens`, then — every T_b == 1 over paged caches — this kernel
+    on the post-append `paged_view`s; else (any T_b > 1, or non-paged caches) the
+    varlen prefill kernel via `view()`. The reference backend realizes its batched
+    forward as per-member single-sequence forwards concatenated (the oracle).
 - **Batched sampling** (M7-T06, already built): the `[B, V]` logits block feeds
   `BatchedSampler::Sample(logits, V, sample_rows, out)`, which picks the same
   token+logprobs the single-sequence `Sampler` would, per row, by construction

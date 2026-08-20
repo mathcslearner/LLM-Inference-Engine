@@ -99,10 +99,41 @@ class OptimizedModel final : public Model {
         workspace_(std::move(workspace)) {}
 
   // One decoder layer's forward, in place on the workspace residual stream.
+  // Handles both the single-sequence path (`request.caches` empty) and the
+  // ragged/batched path (M9-T07) — the non-attention ops run identically over
+  // the flattened `[ΣT, E]` workspace; only K/V append + the attention kernel
+  // branch (`BatchedAttention`).
   [[nodiscard]] core::Status ForwardLayer(const ForwardRequest& request,
                                           const Layer& layer, int layer_index,
-                                          std::int64_t t_dim,
-                                          std::int64_t p_len, float scale);
+                                          std::int64_t t_dim, float scale);
+
+  // The batched attention section of a layer (M9-T07): per-sequence K/V append
+  // sliced by `cu_seqlens`, then the batched paged-decode kernel (every T_b ==
+  // 1 over paged caches) or the varlen prefill kernel (any T_b > 1, or
+  // non-paged caches). `q`/`k`/`v`/`ctx` are the layer's workspace projections.
+  [[nodiscard]] core::Status BatchedAttention(
+      const ForwardRequest& request, int layer_index, const tensor::Tensor& k,
+      const tensor::Tensor& v, const tensor::Tensor& q,
+      const tensor::Tensor& ctx, float scale, std::int64_t t_dim);
+
+  // Embedding → N layers → final norm over `t_dim` flattened tokens; returns
+  // the normed `[t_dim, E]` workspace view (the `h` slot). Shared by the
+  // single-sequence and batched forward paths. Assumes validation + workspace
+  // sizing done by the caller.
+  [[nodiscard]] core::StatusOr<tensor::Tensor> RunStack(
+      const ForwardRequest& request, std::int64_t t_dim);
+
+  // The ragged/batched forward (M9-T07; scheduler-runtime.md §8): validates the
+  // batch, sizes the workspace to ΣT, runs the stack, and projects logits —
+  // `[B, V]` for kLast (last row per sequence), `[ΣT, V]` for kAll.
+  [[nodiscard]] core::StatusOr<tensor::Tensor> ForwardBatched(
+      const ForwardRequest& request);
+
+  // Front-loads every batch check (§5.3, §8) — cu_seqlens well-formedness,
+  // token/position lengths + ranges, and per-member cache null/geometry/
+  // capacity — returning ΣT on success. On error nothing is mutated.
+  [[nodiscard]] core::StatusOr<std::int64_t> ValidateBatched(
+      const ForwardRequest& request) const;
 
   ModelConfig config_;
   kvcache::CacheGeometry geometry_;
@@ -112,6 +143,17 @@ class OptimizedModel final : public Model {
   NormWeights final_norm_;
   std::unique_ptr<Linear> lm_head_;
   Workspace workspace_;
+
+  // Reusable per-layer scratch for the batched attention paths (M9-T07),
+  // cleared and refilled each layer so a steady-state batched decode allocates
+  // nothing (the Workspace/BatchedSampler discipline). The varlen path holds
+  // the B gathered K/V views alive while their data pointers feed the kernel.
+  std::vector<const std::int32_t*> batch_block_tables_;
+  std::vector<std::int64_t> batch_lengths_;
+  std::vector<kvcache::KvView> batch_views_;
+  std::vector<const float*> batch_k_ptrs_;
+  std::vector<const float*> batch_v_ptrs_;
+  std::vector<std::int64_t> batch_l_dims_;
 };
 
 }  // namespace engine::model

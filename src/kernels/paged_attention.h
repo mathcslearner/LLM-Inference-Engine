@@ -56,4 +56,57 @@ void PagedDecodeAttentionF32(const float* q, const float* k_slab,
                              std::int64_t block_stride, float scale,
                              float* out);
 
+// Batched paged decode attention (M9-T07; design:
+// docs/design/scheduler-runtime.md §8.4). Decodes B sequences (one query per
+// head each) together, running the **unchanged** per-sequence
+// `PagedDecodeAttentionF32` recurrence for each — "shared kernels loop over
+// sequences" (roadmap). The `[B, max_blocks]` `−1`-padded block-table tensor
+// the batch assembly (paged-kv-cache.md §9.4) sketched is realized here as
+// per-sequence pointer arrays (`block_tables`/`lengths`), the batched analogue
+// of the M9-T06 varlen-prefill choice: the model sources each sequence's
+// `paged_view(layer)` **after** the layer's per-sequence K/V append (§8.3), so
+// each row already includes any block a boundary-crossing token just allocated
+// — which a tensor snapshotted before the forward could not. No `−1` padding,
+// no stale rows.
+//
+// Contract:
+//   q          : [B, H, d]  contiguous fp32; sequence b's queries at q + b·H·d.
+//   k_slab,    : the layer's K/V slab bases, each `[num_blocks, Hkv, bs, d]`
+//   v_slab       fp32 — SHARED across the batch. Every sequence's K/V for this
+//                layer lives in these one pair of slabs (all sequences share
+//                one BlockPool), so `paged_view(layer)` returns identical
+//                slab/stride/bs for each; only the block table and length
+//                differ. The model validates this before calling.
+//   block_tables: [B] array of pointers; block_tables[b] is sequence b's
+//                logical→physical table (≥ ceil(lengths[b]/bs) entries read).
+//   lengths    : [B] cached keys L_b per sequence; sequence b's single query
+//                sits at L_b−1 and attends [0, L_b−1] inclusive.
+//   out        : [B, H, d]  contiguous fp32, caller-allocated, fully
+//                overwritten (sequence b's context at out + b·H·d).
+//   block_size : bs — a power of two dividing kAttnKb = 64 (pool-enforced).
+//   block_stride: Hkv·bs·d — one block id's float span.
+//   scale      : multiplies the completed q·k dot (HF order).
+//
+// GQA, block addressing, and the online-softmax numerics are exactly the
+// single-sequence `PagedDecodeAttentionF32` applied per sequence. Threaded over
+// (sequence, kv head) units — parallel width B·Hkv, wider than the
+// single-sequence Hkv, so batched decode leaves fewer cores idle (the M6-T05
+// idle-cores note relaxed for the batched case). **Each sequence's output is
+// bit-identical to a standalone `PagedDecodeAttentionF32` run** (the M9-T07
+// acceptance), bit-identical across thread counts, Class T vs the oracle and
+// across ISAs (inherited from the per-sequence kernel).
+//
+// Raw-pointer entry: all preconditions are the CALLER's (`OptimizedModel`
+// front-loads validation) — non-null contiguous fp32 operands; B, H, Hkv, d ≥
+// 1; H a multiple of Hkv; L_b ≥ 1; `ceil(L_b/bs)` entries valid in each table.
+// `out` must not alias q/k/v. `block_size` dividing kAttnKb is CHECKed at the
+// entry (the bit-identity invariant is a programmer contract). B == 0 is a
+// no-op.
+void PagedDecodeAttentionBatchedF32(
+    const float* q, const float* k_slab, const float* v_slab,
+    const std::int32_t* const* block_tables, const std::int64_t* lengths,
+    std::int64_t num_seqs, std::int64_t heads, std::int64_t kv_heads,
+    std::int64_t d, std::int64_t block_size, std::int64_t block_stride,
+    float scale, float* out);
+
 }  // namespace engine::kernels

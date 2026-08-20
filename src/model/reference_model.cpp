@@ -11,6 +11,8 @@
 #include "tensor/shape.h"
 #include "tensor/tensor.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -181,14 +183,11 @@ core::StatusOr<std::unique_ptr<ReferenceModel>> ReferenceModel::Create(
 
 core::StatusOr<tensor::Tensor> ReferenceModel::forward(
     const ForwardRequest& request) {
-  // The ragged/batched forward (cu_seqlens + per-sequence caches) lands in
-  // M9-T07; until then a non-empty batch is rejected rather than silently
-  // ignored (scheduler-runtime.md §8.1). The single-sequence path below is the
-  // B==1 special case (both spans empty).
+  // The ragged/batched forward (cu_seqlens + per-sequence caches, §8) is run
+  // per member and concatenated. The single-sequence path below is the B==1
+  // special case (both spans empty).
   if (!request.cu_seqlens.empty() || !request.caches.empty()) {
-    return core::UnimplementedError(
-        "ReferenceModel::forward: batched (cu_seqlens/caches) forward is not "
-        "implemented until M9-T07");
+    return ForwardBatched(request);
   }
   // Front-load every input check (§5.3) so a failure never touches the cache:
   // the per-layer append inside attention only runs once all of these pass.
@@ -295,6 +294,135 @@ core::StatusOr<tensor::Tensor> ReferenceModel::forward(
                                       tensor::DataType::kFloat32));
   RETURN_IF_ERROR(lm_head_->forward(normed, logits));
   Emit(hook, "logits", -1, logits);
+  return logits;
+}
+
+core::StatusOr<std::int64_t> ReferenceModel::ValidateBatched(
+    const ForwardRequest& request) const {
+  // Front-load the batch checks (§5.3, §8) so a failure never touches any
+  // cache.
+  const auto num_seqs = static_cast<std::int64_t>(request.caches.size());
+  if (num_seqs == 0 || request.cu_seqlens.empty()) {
+    return core::InvalidArgumentError(
+        "ReferenceModel::forward: a batched forward needs non-empty caches and "
+        "cu_seqlens");
+  }
+  const auto n_cu = static_cast<std::int64_t>(request.cu_seqlens.size());
+  if (n_cu != num_seqs + 1) {
+    return core::InvalidArgumentError(
+        "ReferenceModel::forward: cu_seqlens length {} must be caches length + "
+        "1 = {}",
+        n_cu, num_seqs + 1);
+  }
+  if (request.cu_seqlens[0] != 0) {
+    return core::InvalidArgumentError(
+        "ReferenceModel::forward: cu_seqlens[0] must be 0, got {}",
+        request.cu_seqlens[0]);
+  }
+  for (std::int64_t b = 0; b < num_seqs; ++b) {
+    if (request.cu_seqlens[static_cast<std::size_t>(b + 1)] <=
+        request.cu_seqlens[static_cast<std::size_t>(b)]) {
+      return core::InvalidArgumentError(
+          "ReferenceModel::forward: cu_seqlens must be strictly increasing "
+          "(each sequence has >= 1 token); violated at {}",
+          b);
+    }
+  }
+  const std::int64_t t_dim =
+      request.cu_seqlens[static_cast<std::size_t>(num_seqs)];  // ΣT
+  const auto n_tok = static_cast<std::int64_t>(request.token_ids.size());
+  const auto n_pos = static_cast<std::int64_t>(request.positions.size());
+  if (n_tok != t_dim || n_pos != t_dim) {
+    return core::InvalidArgumentError(
+        "ReferenceModel::forward: token_ids/positions length must equal "
+        "cu_seqlens.back() = {}",
+        t_dim);
+  }
+  for (std::int64_t t = 0; t < t_dim; ++t) {
+    const std::int32_t id = request.token_ids[static_cast<std::size_t>(t)];
+    if (id < 0 || id >= config_.vocab_size) {
+      return core::InvalidArgumentError(
+          "ReferenceModel::forward: token_ids[{}] = {} out of range [0, {})", t,
+          id, config_.vocab_size);
+    }
+    const std::int32_t pos = request.positions[static_cast<std::size_t>(t)];
+    if (pos < 0 || pos >= config_.max_position_embeddings) {
+      return core::InvalidArgumentError(
+          "ReferenceModel::forward: positions[{}] = {} out of range [0, {})", t,
+          pos, config_.max_position_embeddings);
+    }
+  }
+  for (std::int64_t b = 0; b < num_seqs; ++b) {
+    kvcache::KvCache* cache = request.caches[static_cast<std::size_t>(b)];
+    if (cache == nullptr) {
+      return core::InvalidArgumentError(
+          "ReferenceModel::forward: caches[{}] is null", b);
+    }
+    const kvcache::CacheGeometry cg = cache->geometry();
+    if (cg.num_layers != geometry_.num_layers ||
+        cg.num_kv_heads != geometry_.num_kv_heads ||
+        cg.head_dim != geometry_.head_dim || cg.dtype != geometry_.dtype) {
+      return core::InvalidArgumentError(
+          "ReferenceModel::forward: caches[{}] geometry does not match the "
+          "model's",
+          b);
+    }
+    const std::int64_t t_b =
+        request.cu_seqlens[static_cast<std::size_t>(b + 1)] -
+        request.cu_seqlens[static_cast<std::size_t>(b)];
+    if (cache->length() + t_b > cache->capacity()) {
+      return core::ResourceExhaustedError(
+          "ReferenceModel::forward: caches[{}] length {} + {} new tokens "
+          "exceeds capacity {}",
+          b, cache->length(), t_b, cache->capacity());
+    }
+  }
+  return t_dim;
+}
+
+core::StatusOr<tensor::Tensor> ReferenceModel::ForwardBatched(
+    const ForwardRequest& request) {
+  // Validated up front (nothing mutated on failure); per-member field checks
+  // are re-run inside each sub-forward (which pass), so only an execution error
+  // (e.g. shared-pool exhaustion) can surface mid-batch.
+  ASSIGN_OR_RETURN(const std::int64_t t_dim, ValidateBatched(request));
+  const auto num_seqs = static_cast<std::int64_t>(request.caches.size());
+  const std::int64_t vocab = config_.vocab_size;
+  const bool last_only = request.logits_mode == LogitsMode::kLast;
+  const std::int64_t out_rows = last_only ? num_seqs : t_dim;
+  ASSIGN_OR_RETURN(tensor::Tensor logits,
+                   tensor::ops::zeros(tensor::Shape{out_rows, vocab},
+                                      tensor::DataType::kFloat32));
+  auto* out = logits.data_ptr<float>();
+
+  // Run each member as a standalone single-sequence forward (recursion into the
+  // B==1 path) over its token/position subspan and its own cache; concatenate
+  // the per-member logits. Bit-identical to N standalone runs by construction
+  // (§8.5). Hooks are suppressed per member (a batched hook stream is a debug
+  // concern deferred; the oracle only needs correct logits).
+  for (std::int64_t b = 0; b < num_seqs; ++b) {
+    const std::int64_t t0 = request.cu_seqlens[static_cast<std::size_t>(b)];
+    const std::int64_t t1 = request.cu_seqlens[static_cast<std::size_t>(b + 1)];
+    const auto off = static_cast<std::size_t>(t0);
+    const auto len = static_cast<std::size_t>(t1 - t0);
+    const ForwardRequest sub{
+        .token_ids = request.token_ids.subspan(off, len),
+        .positions = request.positions.subspan(off, len),
+        .cache = request.caches[static_cast<std::size_t>(b)],
+        .logits_mode = request.logits_mode,
+        .hook = nullptr};
+    core::StatusOr<tensor::Tensor> member = forward(sub);
+    if (!member.ok()) {
+      return core::Status(member.status().code(),
+                          "ReferenceModel::forward: sequence " +
+                              std::to_string(b) + ": " +
+                              std::string(member.status().message()));
+    }
+    const auto* src = member->data_ptr<float>();
+    const std::int64_t rows = last_only ? 1 : (t1 - t0);
+    const std::int64_t base = last_only ? b : t0;
+    std::copy(src, src + (rows * vocab), out + (base * vocab));
+  }
   return logits;
 }
 

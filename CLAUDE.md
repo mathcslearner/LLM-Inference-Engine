@@ -1141,22 +1141,50 @@ behind an existing subsystem):
   past/block-boundary, GQA×head-dims, B==1, thread/chunk invariance, oracle
   Class-T ~1e-6, B==0 no-op) → **1311 ctest green**. design scheduler-runtime.md
   §8.4 "as built" + optimized-cpu-execution.md §8 landed-note; format + scoped
-  tidy clean (three attention headers edited → full includer set swept).
+  tidy clean (three attention headers edited → full includer set swept). T07
+  batched decode execution (2026-08-19): the batched forward on **both** backends.
+  New `kernels::PagedDecodeAttentionBatchedF32` (`src/kernels/paged_attention.{h,
+  cpp}` + `internal/paged_attention_common.h`) — decodes B sequences over
+  **per-sequence pointer arrays** (`block_tables[B]`/`lengths[B]`) + the shared
+  `k_slab`/`v_slab`, reusing the M8-T05 `PagedDecodeUnits` variant verbatim
+  (`detail::PagedDecodeBatchedUnits` synthesizes a per-sequence `PagedDecodeArgs`
+  and calls the variant on one kv head), so each member is **bit-identical to a
+  standalone `PagedDecodeAttentionF32`** by construction; no new per-ISA TU,
+  SCALAR_PASS covers it; parallel width `Hkv→B·Hkv`. **Design correction:** the
+  §8.2/§9.4-reserved `[B, max_blocks]` `−1`-padded block-table tensor is retired —
+  block growth happens *inside* the forward (a boundary-crossing decode token
+  allocates a new block during layer-0 append), so a pre-forward snapshot is
+  stale; the model self-sources `paged_view(layer)` **after** the append instead.
+  `BatchInputs::block_table`/`seq_lens`, `EnsureBlockTable`, and the assembler's
+  `memory::Allocator` removed (dead once self-sourced); `engine`'s `tensor` link
+  PUBLIC→PRIVATE, `engine::memory` dropped. `OptimizedModel::ForwardBatched`
+  (front-loaded `ValidateBatched`) runs the flattened `[ΣT,E]` workspace through
+  the shared `RunStack` and branches only `BatchedAttention` (per-seq append
+  sliced by `cu_seqlens` → batched paged decode when every T_b==1 over paged
+  caches, else varlen prefill via `view()`); `kLast` gathers last rows → `[B,V]`
+  GEMM (row-bitwise = per-seq GEMV, §8.5). `ReferenceModel::ForwardBatched` = per-
+  member single-seq forward concatenated (the oracle). The `Unimplemented` batch
+  guards and the `ForwardLayer` unused `p_len` param are gone. +~30 tests (new
+  `paged_decode_attention_batched_kernel_test` ×SCALAR_PASS; `optimized_model_test`
+  headline batched-decode-vs-sequential bit-exactness incl. a boundary-crossing
+  member + `[B,V]`→`BatchedSampler`; `model_test` reference concatenation +
+  validation matrix; obsolete `ForwardRejectsBatchedRequest` removed) → **1335
+  ctest green**. No BASELINES entry (whole-step throughput is M9-T08). design
+  scheduler-runtime.md §8.2/§8.4 + paged-kv-cache.md §9.4 +
+  optimized-cpu-execution.md §8 + model-execution.md §5.4 "as built"; format +
+  scoped tidy clean (six headers edited → includer sets swept).
 
-Next up: **M9-T07** (batched decode execution) — the batched decode step:
-N sequences × 1 token through the full model. Add `PagedDecodeAttentionBatchedF32`
-to `src/kernels/attention.{h,cpp}` (reusing the M8-T05 `PagedDecodeAttentionF32`
-recurrence per sequence over row `b` of the `[B, max_blocks]` block-table tensor,
-`−1` padding skipped, threaded over (sequence, kv head); bit-identical to a
-sequential single-sequence decode of each member), then land the batched
-`forward` in **both** backends: per-sequence K/V append sliced by `cu_seqlens`
-through each `caches[b]->append(layer)` (§8.3), prefill branch →
-`PrefillAttentionVarlenF32` (M9-T06), decode branch → the new batched kernel;
-`[B, V]` logits feed `BatchedSampler` (M7-T06). The reference backend can realize
-its batched forward as "run the single-sequence forward per member and
-concatenate logits" — bit-identical by construction and the cheapest oracle for
-the optimized batched path. Drop the `Unimplemented` batch guards. Conform to
-`docs/design/scheduler-runtime.md` §8.3/§8.4. Acceptance (§13 M9-T07): batched
-decode logits **bit-identical** to sequential single-sequence decode per member;
-heterogeneous cache lengths + `−1` block-table padding covered; `SCALAR_PASS`.
-Per ROADMAP M9-T07.
+Next up: **M9-T08** (engine loop integration) — wire the continuous-batching
+loop in `Engine::step` (`src/runtime/engine.cpp`): schedule → assemble (the
+M9-T05 `BatchAssembler`) → forward (prefill pass then decode pass, both via the
+M9-T07 batched `model::forward`) → sample (the M7-T06 `BatchedSampler` over the
+`[B, V]` logits) → append tokens + deliver to per-request channels → retire
+finished sequences. Replace the M9-T03/T04 placeholder per-sequence execution in
+`Step` with the two batched passes (§9.1 pseudocode). Acceptance (§13 M9-T08 /
+ROADMAP): an integration test with **8 concurrent greedy requests producing
+outputs identical to running each sequentially** (the CB invariant — guaranteed
+bit-for-bit by §8.5, already proven at the model level in M9-T07); requests
+arriving mid-flight join batching without disturbing running sequences (staggered
+submission); and a recorded throughput-sanity ratio (8 concurrent complete in
+well under 8× single-request time). Conform to `docs/design/scheduler-runtime.md`
+§9. Per ROADMAP M9-T08.

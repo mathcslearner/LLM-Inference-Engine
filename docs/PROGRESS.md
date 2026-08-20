@@ -3120,3 +3120,81 @@ straddling sequence boundaries, all 0-tolerance); Class-T tie to the
 no-op. 1295 → **1311 ctest green**. Format + scoped tidy clean (three attention
 headers edited → full includer set swept; the avx2 TU is the known arm64-DB gap,
 CI-proven).
+
+### M9-T07 — Batched decode execution (2026-08-19)
+
+The batched forward: N sequences × 1 token (decode) or N ragged prefills through
+the full model in one call, on **both** backends, with the `[B, V]` logits
+feeding `BatchedSampler`. The M9-T05/T06 `Unimplemented` batch guards are gone.
+
+**A design correction (recorded in the design docs, per the never-silently-
+diverge rule).** The M8-T01/§8.2 sketch had a decode assembly stage a
+`[B, max_blocks]` `−1`-padded block-table tensor + `seq_lens` for the batched
+decode kernel to consume. **That snapshot is unusable:** block growth happens
+*inside* the forward (layer 0's per-sequence `append`, §8.3), so for any sequence
+whose decode token crosses a block boundary (`L % bs == 0`) the pre-forward table
+is one block short and the length one token short. So the batched decode kernel
+**self-sources** each sequence's block table + length from `paged_view(layer)`
+*after* the append — the M9-T06 varlen-prefill precedent (per-sequence K/V
+pointer arrays) applied to decode. `BatchInputs::block_table`/`seq_lens`,
+`BatchAssembler::EnsureBlockTable`, and the assembler's `memory::Allocator` were
+removed (provably-dead once the kernel self-sources); `engine`'s `tensor` link
+went PUBLIC→PRIVATE and `engine::memory` was dropped (no public engine header
+names a tensor type any more). Updated: scheduler-runtime.md §8.2/§8.4,
+paged-kv-cache.md §9.4, optimized-cpu-execution.md §8, model-execution.md §5.4.
+
+**Kernel** (`src/kernels/paged_attention.{h,cpp}` + `internal/
+paged_attention_common.h`): `PagedDecodeAttentionBatchedF32(q[B,H,d], k_slab,
+v_slab, block_tables[B], lengths[B], …)` — **no new per-ISA code, no new
+arithmetic**. Batch-major unit space `B·Hkv` (one (sequence, kv head) per unit);
+`detail::PagedDecodeBatchedUnits` synthesizes the *same* `PagedDecodeArgs` a
+standalone call builds per sequence and invokes the existing dispatched
+`PagedDecodeUnits` variant on that sequence's single kv head — so each sequence's
+output is **bit-identical to a standalone `PagedDecodeAttentionF32`** by
+construction, and SCALAR_PASS exercises the shipped bytes. All sequences share
+one `BlockPool` ⇒ one shared `k_slab`/`v_slab`/`stride`/`bs`; only the table +
+length differ. Decode parallel width grows `Hkv → B·Hkv`. `CHECK(bs | kAttnKb)`
+at entry; `B==0` no-op.
+
+**Optimized backend** (`OptimizedModel`): `forward` delegates a non-empty batch
+to `ForwardBatched` → `ValidateBatched` (front-loaded: cu_seqlens well-formed,
+token/position lengths + ranges, per-member cache null/geometry/capacity — nothing
+mutated on failure) → `EnsureCapacity(ΣT)` → `RunStack` (embedding→layers→final
+norm over the flattened `[ΣT, E]` workspace, shared with the single-sequence path)
+→ logits. The one branched section is `BatchedAttention`: per-sequence K/V append
+sliced by `cu_seqlens`, then — every T_b == 1 over paged caches — the batched
+paged decode kernel on the post-append `paged_view`s (member scratch vectors,
+allocation-free steady state); else (any T_b > 1, or non-paged caches) the varlen
+prefill kernel via `view()`. `kLast` gathers each sequence's last hidden row into
+`[B, E]` (the free `tmp` slot) → one lm_head GEMM → `[B, V]` (row-bitwise equal to
+the per-sequence GEMV by `GemvMatchesGemmRow`); `kAll` → `[ΣT, V]`. Every
+non-attention op is row-local, so batch invariance holds bit-for-bit (§8.5). The
+`ForwardLayer` `p_len` param (long unused) was dropped.
+
+**Reference backend** (`ReferenceModel`): the oracle realizes the batched forward
+as "run each member as a single-sequence forward and concatenate logits" —
+bit-identical to N standalone runs by construction, front-loaded validation
+mirroring the optimized backend, hooks suppressed per member, a mid-batch
+execution error wrapped with the member index.
+
+**Tests** (+~30; 1311 → **1335 ctest green**). New
+`tests/unit/paged_decode_attention_batched_kernel_test.cpp` (kernels,
+**SCALAR_PASS**): bitwise vs per-member single-sequence decode across
+bs {8,16,32,64} × heterogeneous + exact-boundary lengths, GQA {(4,4),(4,2),(8,1),
+g=12>chunk} × d {18,24,64,128}, B {1,2,5}, a reverse-permuted shared-slab layout
+with poisoned unused/tail slots; thread/chunk invariance via `detail::
+PagedDecodeBatchedUnits`; an end-to-end pass through real `PagedKvCache`s sharing
+one `BlockPool`; `B==0` no-op; `bs∤64` death test. `optimized_model_test`
+(+6, ×SCALAR_PASS): the **headline** batched-decode-vs-sequential bit-exactness
+(both fixtures, heterogeneous lengths incl. a boundary-crossing member — the
+stale-snapshot case), batched prefill via varlen, `B==1` ≡ single-seq, SimpleKvCache
+batched-decode varlen fallback, optimized-vs-reference batched (Class T), and
+`[B,V]`→`BatchedSampler` picks the same tokens as per-row `Sampler` (greedy +
+seeded stochastic). `model_test` (reference): batched == concatenated single-seq
+(kLast + kAll) + the batch-validation matrix (front-loaded, no cache mutated).
+The two obsolete `ForwardRejectsBatchedRequest` tests and the T05
+`DecodePropagatesUnimplementedForSimpleCache` / block-table-tensor assertions
+were removed/rewritten. **No BASELINES entry** (no perf claim; the whole-step
+throughput number is the M9-T08 criterion). Format + scoped tidy clean (six
+headers edited → includer sets swept; the avx2 attention TU reuses the same Ops,
+the known arm64-DB gap, CI-proven).

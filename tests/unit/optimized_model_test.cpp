@@ -13,7 +13,9 @@
 #include "model/registry.h"
 #include "model/safetensors.h"
 #include "model/workspace.h"
+#include "sampling/batched_sampler.h"
 #include "sampling/params.h"
+#include "sampling/sampler.h"
 #include "tensor/dtype.h"
 #include "tensor/ops.h"
 #include "tensor/shape.h"
@@ -52,7 +54,6 @@ namespace {
 namespace ops = engine::tensor::ops;
 using engine::core::IsInvalidArgument;
 using engine::core::IsResourceExhausted;
-using engine::core::IsUnimplemented;
 using engine::core::StatusOr;
 using engine::engine::Generate;
 using engine::engine::GenerateOptions;
@@ -848,29 +849,354 @@ TEST(OptimizedModelTest, ForwardRejectsMalformedInputs) {
   EXPECT_EQ(cache.length(), 0);
 }
 
-// The ragged/batched forward (cu_seqlens + per-sequence caches) is rejected
-// with Unimplemented until M9-T07, matching ReferenceModel (M9-T05;
-// scheduler-runtime.md §8.1).
-TEST(OptimizedModelTest, ForwardRejectsBatchedRequest) {
+// -------------------------------------------------- batched forward (M9-T07)
+// --
+
+// Builds a length-`n` in-range prompt distinct per `seed`.
+[[nodiscard]] std::vector<std::int32_t> MakePrompt(std::int64_t n,
+                                                   std::int64_t seed,
+                                                   std::int64_t vocab) {
+  std::vector<std::int32_t> p(static_cast<std::size_t>(n));
+  for (std::int64_t i = 0; i < n; ++i) {
+    p[static_cast<std::size_t>(i)] =
+        static_cast<std::int32_t>(((i * 3) + (seed * 5) + 1) % vocab);
+  }
+  return p;
+}
+
+// **The M9-T07 acceptance headline.** A batched decode step (N sequences × 1
+// token) produces logits **bit-identical** to a sequential single-sequence
+// decode of each member. Heterogeneous cache lengths, including members at an
+// exact block-multiple length (8, 16) so the decode token crosses a block
+// boundary — the case the design's pre-forward block-table snapshot could not
+// serve, and the reason the kernel self-sources tables post-append (§8.4).
+TEST(OptimizedModelTest, BatchedDecodeMatchesSequentialSingleSequence) {
+  for (const char* fixture : {kLlama, kQwen}) {
+    SCOPED_TRACE(fixture);
+    std::unique_ptr<Model> opt = Optimized(fixture);
+    const std::int64_t vocab = opt->config().vocab_size;
+    const std::vector<std::int64_t> lens = {8, 5, 16, 3};
+    const auto num = static_cast<std::int64_t>(lens.size());
+
+    std::vector<std::vector<std::int32_t>> prompts(
+        static_cast<std::size_t>(num));
+    std::vector<std::int32_t> dec(static_cast<std::size_t>(num));
+    std::vector<std::int32_t> positions(static_cast<std::size_t>(num));
+    std::vector<std::int32_t> cu(static_cast<std::size_t>(num + 1), 0);
+    for (std::int64_t b = 0; b < num; ++b) {
+      prompts[static_cast<std::size_t>(b)] =
+          MakePrompt(lens[static_cast<std::size_t>(b)], b, vocab);
+      dec[static_cast<std::size_t>(b)] =
+          static_cast<std::int32_t>(((b * 7) + 3) % vocab);
+      positions[static_cast<std::size_t>(b)] =
+          static_cast<std::int32_t>(lens[static_cast<std::size_t>(b)]);
+      cu[static_cast<std::size_t>(b + 1)] = static_cast<std::int32_t>(b + 1);
+    }
+
+    // Batched: B paged caches on ONE shared pool, prefilled, then a batched
+    // decode step (the paged fast path — every T_b == 1).
+    BlockPool pool = FreshPool(*opt, 8, 64);
+    std::vector<PagedKvCache> caches;
+    caches.reserve(static_cast<std::size_t>(num));
+    std::vector<KvCache*> cptrs;
+    cptrs.reserve(static_cast<std::size_t>(num));
+    for (std::int64_t b = 0; b < num; ++b) {
+      caches.emplace_back(&pool);
+      (void)ForwardOnce(*opt, prompts[static_cast<std::size_t>(b)],
+                        LogitsMode::kLast, caches.back());
+      cptrs.push_back(&caches.back());
+    }
+    const ForwardRequest req{.token_ids = dec,
+                             .positions = positions,
+                             .logits_mode = LogitsMode::kLast,
+                             .cu_seqlens = cu,
+                             .caches = cptrs};
+    const Tensor batched = Unwrap(opt->forward(req));  // [B, V]
+    ASSERT_EQ(batched.shape().dim(0), num);
+
+    // Sequential: each member on its own fresh pool, prefilled + decoded alone.
+    for (std::int64_t b = 0; b < num; ++b) {
+      BlockPool bpool = FreshPool(*opt, 8, 64);
+      PagedKvCache c(&bpool);
+      (void)ForwardOnce(*opt, prompts[static_cast<std::size_t>(b)],
+                        LogitsMode::kLast, c);
+      const std::array<std::int32_t, 1> one{dec[static_cast<std::size_t>(b)]};
+      const std::array<std::int32_t, 1> pos{
+          positions[static_cast<std::size_t>(b)]};
+      const Tensor single =
+          Unwrap(opt->forward({.token_ids = one,
+                               .positions = pos,
+                               .cache = &c,
+                               .logits_mode = LogitsMode::kLast}));
+      const Tensor row = Unwrap(batched.slice(0, b, b + 1));
+      EXPECT_TRUE(Unwrap(ops::allclose(row, single, 0.0, 0.0)).allclose)
+          << "member " << b << " (len " << lens[static_cast<std::size_t>(b)]
+          << ")";
+    }
+  }
+}
+
+// A batched prefill (via the varlen kernel) matches a sequential
+// single-sequence prefill of each member, bit-exact — heterogeneous prompt
+// lengths.
+TEST(OptimizedModelTest, BatchedPrefillMatchesSequentialSingleSequence) {
+  for (const char* fixture : {kLlama, kQwen}) {
+    SCOPED_TRACE(fixture);
+    std::unique_ptr<Model> opt = Optimized(fixture);
+    const std::int64_t vocab = opt->config().vocab_size;
+    const std::vector<std::int64_t> lens = {3, 8, 5};
+    const auto num = static_cast<std::int64_t>(lens.size());
+
+    std::vector<std::vector<std::int32_t>> prompts(
+        static_cast<std::size_t>(num));
+    std::vector<std::int32_t> ids;
+    std::vector<std::int32_t> positions;
+    std::vector<std::int32_t> cu(static_cast<std::size_t>(num + 1), 0);
+    std::int32_t running = 0;
+    for (std::int64_t b = 0; b < num; ++b) {
+      auto& p = prompts[static_cast<std::size_t>(b)];
+      p = MakePrompt(lens[static_cast<std::size_t>(b)], b + 100, vocab);
+      for (std::int64_t i = 0; i < lens[static_cast<std::size_t>(b)]; ++i) {
+        ids.push_back(p[static_cast<std::size_t>(i)]);
+        positions.push_back(static_cast<std::int32_t>(i));
+      }
+      running += static_cast<std::int32_t>(lens[static_cast<std::size_t>(b)]);
+      cu[static_cast<std::size_t>(b + 1)] = running;
+    }
+
+    BlockPool pool = FreshPool(*opt, 8, 64);
+    std::vector<PagedKvCache> caches;
+    caches.reserve(static_cast<std::size_t>(num));
+    std::vector<KvCache*> cptrs;
+    cptrs.reserve(static_cast<std::size_t>(num));
+    for (std::int64_t b = 0; b < num; ++b) {
+      caches.emplace_back(&pool);
+      cptrs.push_back(&caches.back());
+    }
+    const Tensor batched =
+        Unwrap(opt->forward({.token_ids = ids,
+                             .positions = positions,
+                             .logits_mode = LogitsMode::kLast,
+                             .cu_seqlens = cu,
+                             .caches = cptrs}));  // [B, V]
+    ASSERT_EQ(batched.shape().dim(0), num);
+
+    for (std::int64_t b = 0; b < num; ++b) {
+      BlockPool bpool = FreshPool(*opt, 8, 64);
+      PagedKvCache c(&bpool);
+      const Tensor single = ForwardOnce(
+          *opt, prompts[static_cast<std::size_t>(b)], LogitsMode::kLast, c);
+      const Tensor row = Unwrap(batched.slice(0, b, b + 1));
+      EXPECT_TRUE(Unwrap(ops::allclose(row, single, 0.0, 0.0)).allclose)
+          << "member " << b;
+    }
+  }
+}
+
+// A B==1 batched forward is bit-identical to the single-sequence path.
+TEST(OptimizedModelTest, BatchedB1MatchesSingleSequence) {
   std::unique_ptr<Model> opt = Optimized(kLlama);
   const std::vector<std::int32_t> ids = PromptIds(kLlama);
-  const std::vector<std::int32_t> pos =
+  const std::vector<std::int32_t> positions =
       Iota(static_cast<std::int64_t>(ids.size()));
-  SimpleKvCache cache = FreshCache(*opt);
+
+  BlockPool p1 = FreshPool(*opt);
+  PagedKvCache c1(&p1);
+  const Tensor single = ForwardOnce(*opt, ids, LogitsMode::kLast, c1);
+
+  BlockPool p2 = FreshPool(*opt);
+  PagedKvCache c2(&p2);
   const std::vector<std::int32_t> cu = {0,
                                         static_cast<std::int32_t>(ids.size())};
-  EXPECT_TRUE(IsUnimplemented(opt->forward({.token_ids = ids,
-                                            .positions = pos,
-                                            .cache = &cache,
-                                            .cu_seqlens = cu})
-                                  .status()));
-  std::vector<KvCache*> caches = {&cache};
-  EXPECT_TRUE(IsUnimplemented(opt->forward({.token_ids = ids,
-                                            .positions = pos,
-                                            .cache = &cache,
-                                            .caches = caches})
-                                  .status()));
-  EXPECT_EQ(cache.length(), 0);
+  std::vector<KvCache*> caches = {&c2};
+  const Tensor batched = Unwrap(opt->forward({.token_ids = ids,
+                                              .positions = positions,
+                                              .logits_mode = LogitsMode::kLast,
+                                              .cu_seqlens = cu,
+                                              .caches = caches}));
+  EXPECT_TRUE(Unwrap(ops::allclose(batched, single, 0.0, 0.0)).allclose);
+}
+
+// A batched decode over non-paged SimpleKvCaches falls back to the varlen
+// kernel and still matches a sequential single-sequence decode of each member,
+// bit-exact (varlen prefill with T_b == 1 == the decode kernel).
+TEST(OptimizedModelTest, BatchedDecodeSimpleCacheFallbackMatchesSequential) {
+  std::unique_ptr<Model> opt = Optimized(kLlama);
+  const std::int64_t vocab = opt->config().vocab_size;
+  const std::vector<std::int64_t> lens = {5, 8};
+  const auto num = static_cast<std::int64_t>(lens.size());
+
+  std::vector<std::vector<std::int32_t>> prompts(static_cast<std::size_t>(num));
+  std::vector<std::int32_t> dec(static_cast<std::size_t>(num));
+  std::vector<std::int32_t> positions(static_cast<std::size_t>(num));
+  std::vector<std::int32_t> cu(static_cast<std::size_t>(num + 1), 0);
+  for (std::int64_t b = 0; b < num; ++b) {
+    prompts[static_cast<std::size_t>(b)] =
+        MakePrompt(lens[static_cast<std::size_t>(b)], b + 7, vocab);
+    dec[static_cast<std::size_t>(b)] =
+        static_cast<std::int32_t>(((b * 11) + 2) % vocab);
+    positions[static_cast<std::size_t>(b)] =
+        static_cast<std::int32_t>(lens[static_cast<std::size_t>(b)]);
+    cu[static_cast<std::size_t>(b + 1)] = static_cast<std::int32_t>(b + 1);
+  }
+
+  std::vector<SimpleKvCache> caches;
+  caches.reserve(static_cast<std::size_t>(num));
+  std::vector<KvCache*> cptrs;
+  cptrs.reserve(static_cast<std::size_t>(num));
+  for (std::int64_t b = 0; b < num; ++b) {
+    caches.push_back(FreshCache(*opt, 128));
+    (void)ForwardOnce(*opt, prompts[static_cast<std::size_t>(b)],
+                      LogitsMode::kLast, caches.back());
+    cptrs.push_back(&caches.back());
+  }
+  const Tensor batched = Unwrap(opt->forward({.token_ids = dec,
+                                              .positions = positions,
+                                              .logits_mode = LogitsMode::kLast,
+                                              .cu_seqlens = cu,
+                                              .caches = cptrs}));
+
+  for (std::int64_t b = 0; b < num; ++b) {
+    SimpleKvCache c = FreshCache(*opt, 128);
+    (void)ForwardOnce(*opt, prompts[static_cast<std::size_t>(b)],
+                      LogitsMode::kLast, c);
+    const std::array<std::int32_t, 1> one{dec[static_cast<std::size_t>(b)]};
+    const std::array<std::int32_t, 1> pos{
+        positions[static_cast<std::size_t>(b)]};
+    const Tensor single =
+        Unwrap(opt->forward({.token_ids = one,
+                             .positions = pos,
+                             .cache = &c,
+                             .logits_mode = LogitsMode::kLast}));
+    const Tensor row = Unwrap(batched.slice(0, b, b + 1));
+    EXPECT_TRUE(Unwrap(ops::allclose(row, single, 0.0, 0.0)).allclose)
+        << "member " << b;
+  }
+}
+
+// The batched decode logits [B, V] feed BatchedSampler, which picks the same
+// token per row as a standalone Sampler on that row (the "batched sampling
+// consumes the result" criterion) — greedy rows and one seeded stochastic row.
+TEST(OptimizedModelTest, BatchedDecodeFeedsBatchedSampler) {
+  namespace sampling = engine::sampling;
+  std::unique_ptr<Model> opt = Optimized(kLlama);
+  const std::int64_t vocab = opt->config().vocab_size;
+  const std::vector<std::int64_t> lens = {4, 6, 5};
+  const auto num = static_cast<std::int64_t>(lens.size());
+
+  std::vector<std::int32_t> dec(static_cast<std::size_t>(num));
+  std::vector<std::int32_t> positions(static_cast<std::size_t>(num));
+  std::vector<std::int32_t> cu(static_cast<std::size_t>(num + 1), 0);
+  BlockPool pool = FreshPool(*opt, 8, 64);
+  std::vector<PagedKvCache> caches;
+  caches.reserve(static_cast<std::size_t>(num));
+  std::vector<KvCache*> cptrs;
+  cptrs.reserve(static_cast<std::size_t>(num));
+  for (std::int64_t b = 0; b < num; ++b) {
+    const std::vector<std::int32_t> prompt =
+        MakePrompt(lens[static_cast<std::size_t>(b)], b + 3, vocab);
+    caches.emplace_back(&pool);
+    (void)ForwardOnce(*opt, prompt, LogitsMode::kLast, caches.back());
+    dec[static_cast<std::size_t>(b)] =
+        static_cast<std::int32_t>(((b * 9) + 1) % vocab);
+    positions[static_cast<std::size_t>(b)] =
+        static_cast<std::int32_t>(lens[static_cast<std::size_t>(b)]);
+    cu[static_cast<std::size_t>(b + 1)] = static_cast<std::int32_t>(b + 1);
+    cptrs.push_back(&caches.back());
+  }
+  const Tensor batched = Unwrap(opt->forward({.token_ids = dec,
+                                              .positions = positions,
+                                              .logits_mode = LogitsMode::kLast,
+                                              .cu_seqlens = cu,
+                                              .caches = cptrs}));
+
+  // Mixed samplers: greedy, temperature+top-k (seeded), greedy.
+  std::vector<sampling::Sampler> samplers;
+  samplers.reserve(static_cast<std::size_t>(num));
+  samplers.push_back(
+      Unwrap(sampling::Sampler::Create(SamplingParams::Greedy(8))));
+  SamplingParams stoch;
+  stoch.max_tokens = 8;
+  stoch.temperature = 0.8F;
+  stoch.top_k = 20;
+  stoch.seed = 1234;
+  samplers.push_back(Unwrap(sampling::Sampler::Create(stoch)));
+  samplers.push_back(
+      Unwrap(sampling::Sampler::Create(SamplingParams::Greedy(8))));
+
+  std::vector<sampling::BatchRow> rows;
+  rows.reserve(static_cast<std::size_t>(num));
+  for (std::int64_t b = 0; b < num; ++b) {
+    rows.push_back(sampling::BatchRow{
+        .sampler = &samplers[static_cast<std::size_t>(b)], .context = {}});
+  }
+  std::vector<sampling::SampleResult> out(static_cast<std::size_t>(num));
+  const std::span<const float> logits{batched.data_ptr<float>(),
+                                      static_cast<std::size_t>(num * vocab)};
+  sampling::BatchedSampler bs;
+  Unwrap0(bs.Sample(logits, vocab, rows, out));
+
+  for (std::int64_t b = 0; b < num; ++b) {
+    const std::span<const float> row{batched.data_ptr<float>() + (b * vocab),
+                                     static_cast<std::size_t>(vocab)};
+    const std::int32_t want =
+        Unwrap(samplers[static_cast<std::size_t>(b)].Sample(
+            row, sampling::SampleContext{}));
+    EXPECT_EQ(out[static_cast<std::size_t>(b)].token, want) << "row " << b;
+  }
+}
+
+// The optimized batched forward agrees with the reference (oracle) batched
+// forward within the GEMM tolerance (Class T) — ties the batched paged path to
+// the oracle's per-member concatenation.
+TEST(OptimizedModelTest, BatchedMatchesReferenceBackend) {
+  std::unique_ptr<Model> opt = Optimized(kLlama);
+  std::unique_ptr<Model> ref = Reference(kLlama);
+  const std::int64_t vocab = opt->config().vocab_size;
+  const std::vector<std::int64_t> lens = {3, 7};
+  const auto num = static_cast<std::int64_t>(lens.size());
+
+  std::vector<std::int32_t> ids;
+  std::vector<std::int32_t> positions;
+  std::vector<std::int32_t> cu(static_cast<std::size_t>(num + 1), 0);
+  std::int32_t running = 0;
+  for (std::int64_t b = 0; b < num; ++b) {
+    const std::vector<std::int32_t> p =
+        MakePrompt(lens[static_cast<std::size_t>(b)], b + 42, vocab);
+    for (std::int64_t i = 0; i < lens[static_cast<std::size_t>(b)]; ++i) {
+      ids.push_back(p[static_cast<std::size_t>(i)]);
+      positions.push_back(static_cast<std::int32_t>(i));
+    }
+    running += static_cast<std::int32_t>(lens[static_cast<std::size_t>(b)]);
+    cu[static_cast<std::size_t>(b + 1)] = running;
+  }
+
+  BlockPool pool = FreshPool(*opt, 8, 64);
+  std::vector<PagedKvCache> ocaches;
+  std::vector<SimpleKvCache> rcaches;
+  ocaches.reserve(static_cast<std::size_t>(num));
+  rcaches.reserve(static_cast<std::size_t>(num));
+  std::vector<KvCache*> optr;
+  std::vector<KvCache*> rptr;
+  for (std::int64_t b = 0; b < num; ++b) {
+    ocaches.emplace_back(&pool);
+    optr.push_back(&ocaches.back());
+    rcaches.push_back(FreshCache(*ref, 128));
+    rptr.push_back(&rcaches.back());
+  }
+  const Tensor obatched = Unwrap(opt->forward({.token_ids = ids,
+                                               .positions = positions,
+                                               .logits_mode = LogitsMode::kAll,
+                                               .cu_seqlens = cu,
+                                               .caches = optr}));
+  const Tensor rbatched = Unwrap(ref->forward({.token_ids = ids,
+                                               .positions = positions,
+                                               .logits_mode = LogitsMode::kAll,
+                                               .cu_seqlens = cu,
+                                               .caches = rptr}));
+  const ops::AllCloseResult r =
+      Unwrap(ops::allclose(obatched, rbatched, kRtol, kAtol));
+  EXPECT_TRUE(r.allclose) << r.Summary();
 }
 
 TEST(OptimizedModelTest, OverCapacityCacheLeavesCacheUnchanged) {
