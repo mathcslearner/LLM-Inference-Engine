@@ -14,7 +14,7 @@
 // control flows (internal::PrefillUnitsImpl / DecodeUnitsImpl), the shared exp
 // polynomial (avx2::Exp). Class T vs the scalar variant and the oracle;
 // bit-identical across thread counts. Written blind on the arm64 dev machine
-// and proven by CI's x86-64 build (design §9, CLAUDE.md tidy note); reviewed by
+// and proven by CI's x86-64 build (design §9, the local-only tidy gate); reviewed by
 // hand against .clang-tidy.
 
 namespace engine::kernels::avx2 {

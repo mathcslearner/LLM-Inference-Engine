@@ -1,6 +1,6 @@
 # tools/ — Python dev tooling
 
-Python lives only here — never in the engine or its build (CLAUDE.md). CI
+Python lives only here — never in the engine or its build. CI
 never runs anything in this directory: the fixtures these tools generate are
 committed under `tests/fixtures/` and consumed by the C++ test suite as
 ordinary test data.

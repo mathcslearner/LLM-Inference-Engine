@@ -11,7 +11,7 @@
 #   and HeaderFilterRegex in .clang-tidy analyzes them through it.
 #
 # tidy is a local-only gate (CI's sweep job was removed 2026-08-08 after
-# outgrowing its 15-minute timeout; scoping discipline: CLAUDE.md).
+# outgrowing its 15-minute timeout; scoped per-change instead).
 #
 # Needs a compile database; configures ${ENGINE_BUILD_DIR:-build} if missing
 # (CMAKE_EXPORT_COMPILE_COMMANDS is ON project-wide). Any TU without an

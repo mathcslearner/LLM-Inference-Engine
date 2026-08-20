@@ -58,7 +58,7 @@ in the same file for tests needing different dependencies.
 
 ## SIMD kernel tests (CPU-first, ADR-004)
 
-The correctness ladder (CLAUDE.md): HuggingFace fixtures validate the scalar
+The correctness ladder: HuggingFace fixtures validate the scalar
 reference implementations; the scalar reference validates every vectorized
 (NEON/AVX2) and optimized kernel. A kernel test therefore never invents
 expected values — it computes them with the reference implementation. The
@@ -66,4 +66,4 @@ suite runs the best ISA the host offers plus a forced-scalar pass
 (`ENGINE_FORCE_ISA=scalar`), so CI on x86-64 and the arm64 dev machine
 together cover every backend and no test is skipped for lack of hardware.
 The concrete fixture and helper patterns land with the SIMD dispatch
-infrastructure (ROADMAP.md M3-T05/T06) and will be documented here.
+infrastructure (M3-T05/T06) and will be documented here.

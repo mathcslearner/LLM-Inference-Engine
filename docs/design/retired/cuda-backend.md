@@ -52,7 +52,7 @@ via the shared fixture.
   chosen to exercise the infrastructure, not to be fast.
 - **Kernel performance.** M2 kernels are naive grid-stride loops. No
   vectorized loads, no occupancy tuning, no benchmarks. The correctness
-  ladder requires naive-but-correct first (CLAUDE.md); optimized variants
+  ladder requires naive-but-correct first; optimized variants
   come with the milestones that need them and must beat a measured baseline.
 - **Stream-ordered allocation (`cudaMallocAsync`).** Considered and
   deferred; rationale in §7.5.
@@ -63,7 +63,7 @@ via the shared fixture.
 
 ## 2. Module layout & layering
 
-Components and files (all paths per ROADMAP tickets):
+Components and files:
 
 | File | Module | Contents | Ticket |
 |---|---|---|---|
@@ -1002,7 +1002,7 @@ separate GPU suite to forget to run. A `gpu` ctest label is added for
 
 ### 10.2 The kernel-testing pattern (answers question 3)
 
-Every GPU kernel test follows the correctness ladder (CLAUDE.md): the CPU
+Every GPU kernel test follows the correctness ladder: the CPU
 reference is the oracle.
 
 ```

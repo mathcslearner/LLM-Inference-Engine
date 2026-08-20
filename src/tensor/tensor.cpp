@@ -24,7 +24,7 @@ namespace {
 constexpr std::size_t kEmptyAlignment = 64;
 
 // Reserved dtypes are representable (name/size-mapped) but not allocatable —
-// or viewable — until the quantization milestones land (ROADMAP.md M13).
+// or viewable — until the quantization milestones land (M13).
 [[nodiscard]] constexpr bool IsReservedDataType(DataType dtype) {
   return dtype == DataType::kInt4 || dtype == DataType::kFP8E4M3;
 }

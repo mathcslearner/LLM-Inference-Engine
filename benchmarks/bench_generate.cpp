@@ -43,8 +43,8 @@
 // tokens/sec for a given model, prompt length, and thread count, and prints a
 // small report plus a run-to-run stability verdict (the ±5% acceptance
 // criterion). Not registered with CTest for its perf numbers — those are run by
-// hand on a quiesced machine and recorded in BASELINES.md (CLAUDE.md: no perf
-// claim without a benchmark delta). A tiny smoke invocation IS registered
+// hand on a quiesced machine and recorded in BASELINES.md (project rule: no
+// perf claim without a benchmark delta). A tiny smoke invocation IS registered
 // (benchmarks/CMakeLists.txt) so CI exercises the harness and both backends.
 //
 // Timing seam: the real greedy `Generate` loop drives the model, and its

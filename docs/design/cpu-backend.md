@@ -296,8 +296,7 @@ The honest pros: OpenMP is mature, its runtime schedulers are excellent,
 in play support it. It is rejected on four grounds:
 
 1. **Reduction ordering is unspecified.** Deterministic, thread-count-
-   invariant reductions are a headline property of this engine (ADR-004
-   consequences; CLAUDE.md determinism rule). `#pragma omp reduction` gives
+   invariant reductions are a headline property of this engine (ADR-004 consequences; the determinism rule). `#pragma omp reduction` gives
    no ordering guarantee, so we would hand-build §3.3's chunk-partial +
    fixed-tree machinery *anyway* — inheriting OpenMP's runtime while using
    none of its reduction support.
@@ -508,7 +507,7 @@ acceptance criteria require it recorded here):
    the null-slot fallback covers the gap.
 6. If the kernel is performance-motivated, add a microbenchmark
    (`benchmarks/kernels/`) and record before/after in
-   `benchmarks/BASELINES.md` — no perf claim without a delta (CLAUDE.md).
+   `benchmarks/BASELINES.md` — no perf claim without a delta.
 7. Never touch global compile flags. If the kernel needs a new ISA feature
    (e.g. AVX-512), that is a §10 revisit, not a flag.
 
@@ -586,7 +585,7 @@ shared anchor:
 
 | Host | Best-ISA pass | Forced-scalar pass | When it runs |
 |---|---|---|---|
-| macOS arm64 (dev machine) | NEON | scalar | every ticket — the mandatory per-ticket validation workflow (CLAUDE.md) |
+| macOS arm64 (dev machine) | NEON | scalar | every ticket — the mandatory per-ticket validation workflow |
 | Linux x86-64 (CI runners) | AVX2 | scalar | every push / PR |
 
 Three properties make the composition sound:
@@ -608,7 +607,7 @@ Three properties make the composition sound:
 ### 6.3 Numerics classes & tolerance taxonomy
 
 Every kernel is assigned a class in its doc comment; every numerical test
-states its tolerance explicitly (CLAUDE.md rule — "within tolerance" with no
+states its tolerance explicitly (project rule — "within tolerance" with no
 number is not a test):
 
 - **Class E — elementwise & conversions** (add, mul, scale, fp16/bf16↔fp32):
@@ -718,7 +717,7 @@ aggregate `ci` gate) is unchanged. M3 adds:
 > *Amendment (2026-08-08, post-M4-T03):* the matrix above originally
 > included a full-sweep clang-tidy job; it outgrew the 15-minute job
 > timeout and was removed. clang-tidy is a local-only check now (scoped
-> per-ticket rules in CLAUDE.md §Build & test), with the accepted gap that
+> per change), with the accepted gap that
 > TUs outside the arm64 dev machine's compile database — the x86-64 cpuid
 > path and the `avx2/` per-ISA TUs — are tidy-checked nowhere; CI's x86-64
 > build jobs still compile them warnings-as-errors.
@@ -773,8 +772,7 @@ suite) is a process failure the job would catch late anyway.
 
 **Revisit triggers (recorded so this is a decision, not drift):** the repo
 going public (arm64 macOS runners become free for public repos) or a paid
-minutes budget. If revived: a single `macos-14`-or-later job, Homebrew LLVM
-per CLAUDE.md, Release only, running the full suite (both ISA passes) —
+minutes budget. If revived: a single `macos-14`-or-later job, Homebrew LLVM, Release only, running the full suite (both ISA passes) —
 mirroring the dev machine, not the Linux matrix.
 
 ---

@@ -1,5 +1,6 @@
-# Modules, listed in dependency-layer order (see the architecture map in
-# CLAUDE.md). Each builds as its own static library target `engine_<module>`
+# Modules, listed in dependency-layer order (see the module dependency map in
+# docs/adr/ADR-002-repository-layout-and-module-boundaries.md). Each builds as
+# its own static library target `engine_<module>`
 # with alias `engine::<module>`.
 add_subdirectory(core)
 add_subdirectory(tensor)

@@ -1,6 +1,6 @@
 # Benchmark baselines
 
-Measured performance records. Rules (CLAUDE.md): every optimization ticket
+Measured performance records. Rule: every optimization ticket
 records before/after numbers here; no performance claim without a benchmark
 delta. Numbers are machine-specific — each entry states its host, toolchain,
 and configuration. Until M12-T01 matures the harness (thread/ISA sweeps,
@@ -68,7 +68,7 @@ throughput bound at this size, not weight-bandwidth bound, once packed.
 
 **BLAS sanity number (Accelerate) — not captured on this machine.** The
 optional `-DENGINE_BENCH_BLAS=ON` context comparison could not be built on the
-dev machine: Homebrew LLVM 20 (the pinned toolchain, CLAUDE.md) rejects the
+dev machine: Homebrew LLVM 20 (the pinned toolchain) rejects the
 CommandLineTools SDK's Accelerate headers with `-Welaborated-enum-base` hard
 errors (the same broken-CLT situation that blocks Apple-clang C++ here). The
 CMake wiring (`ENGINE_BENCH_BLAS`, benchmark-only, never linked into `src/`)
@@ -98,8 +98,8 @@ to a model-like hidden size (RMSNorm/Softmax over `[256, 4096]`; RoPE over
 | RopeApplyF32 | 0.096 | 0.137 | 0.70× |
 
 M6-T03 has no perf target (the design's only hard GEMM target is M6-T02's 5×);
-these numbers exist because the kernels are performance-motivated and CLAUDE.md
-forbids a perf claim without a delta. Reading them:
+these numbers exist because the kernels are performance-motivated and the
+project forbids a perf claim without a delta. Reading them:
 
 - **RMSNorm 2.1× / Softmax 3.1×** are the real wins — both reduce over a row and
   then re-scan it, and the vector max/sum reductions plus vectorized scale/exp
@@ -266,8 +266,7 @@ Parity with llama.cpp is an **M12 goal, not this ticket** — this is a
 same-machine context number only.
 
 **Build:** `ggml-org/llama.cpp` @ `6d05498` (2026-08-19), CPU-only, same Homebrew
-LLVM 20 toolchain as the engine (Apple clang cannot compile C++ on this machine —
-CLAUDE.md). Configured `-DGGML_METAL=OFF -DGGML_ACCELERATE=OFF -DGGML_BLAS=OFF
+LLVM 20 toolchain as the engine (Apple clang cannot compile C++ on this machine). Configured `-DGGML_METAL=OFF -DGGML_ACCELERATE=OFF -DGGML_BLAS=OFF
 -DLLAMA_CURL=OFF -DGGML_NATIVE=ON` (a pure-CPU NEON build, no Metal/Accelerate,
 to compare CPU kernel against CPU kernel), plus `-DCMAKE_CXX_FLAGS=
 -Wno-elaborated-enum-base` to get past LLVM 20 rejecting the CommandLineTools

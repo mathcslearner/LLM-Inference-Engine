@@ -23,7 +23,7 @@
 // tensors. A physical block id names the same slot region in every layer's
 // slabs; a sequence's block table (M8-T03) is layer-independent.
 //
-// "Backed by the M2 caching allocator" (ROADMAP) means the pool's *slabs* come
+// "Backed by the M2 caching allocator" means the pool's *slabs* come
 // from the passed `Allocator` — one allocation per slab at construction. The
 // per-block free list is the KV block allocator itself and never calls upstream
 // on the token hot path (§6.1).

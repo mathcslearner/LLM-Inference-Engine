@@ -72,7 +72,7 @@ Toolchain:
 
 - We own memory safety. Mitigations are structural: warnings-as-errors,
   `CHECK`/`DCHECK` invariants (ADR-003), ASan/UBSan in CI once M1 lands real
-  data structures, and the CPU-reference testing ladder from `CLAUDE.md`.
+  data structures, and the CPU-reference testing ladder.
 - C++20 (not 23) caps the feature set: no `std::expected` (ADR-003 builds
   `StatusOr<T>` instead), no `std::print` (we pin fmt). In exchange, both GCC
   12 and Clang 16 support everything we use today.

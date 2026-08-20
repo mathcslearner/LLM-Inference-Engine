@@ -1,5 +1,5 @@
 // Placeholder translation unit: keeps the engine_metrics archive non-empty
-// until this module gains real sources (see ROADMAP.md).
+// until this module gains real sources on a later milestone.
 namespace engine::metrics {
 
 // NOLINTNEXTLINE(misc-use-internal-linkage): must be external to anchor the TU

@@ -108,8 +108,7 @@ skip it.
   proposing through a draft model, quantized weights inside model loading).
   Forcing those through ADR amendments is deliberate friction: it keeps the
   diagram true instead of aspirational.
-- The diagram in `CLAUDE.md` mirrors this ADR for day-to-day reference; this
-  ADR is the authority if they ever diverge.
+- This ADR is the authoritative statement of the module boundaries.
 
 ## Amendments
 

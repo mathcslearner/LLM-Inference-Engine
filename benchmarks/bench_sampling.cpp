@@ -21,8 +21,8 @@
 // reports median ms per step alongside the equivalent serial reference loop, so
 // the speedup from `parallel_for` across sequences is visible. The acceptance
 // target is advisory: batched sampling for 64 sequences × 128k vocab under
-// 5 ms on the dev machine (recorded in benchmarks/BASELINES.md; CLAUDE.md: no
-// perf claim without a benchmark delta). A tiny smoke run is registered with
+// 5 ms on the dev machine (recorded in benchmarks/BASELINES.md; project rule:
+// no perf claim without a benchmark delta). A tiny smoke run is registered with
 // CTest (benchmarks/CMakeLists.txt) so CI exercises arg parsing and every
 // config; real numbers are taken by hand on a quiesced machine.
 //

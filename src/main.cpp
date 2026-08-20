@@ -34,8 +34,8 @@
 
 // The engine entry point. `engine` prints the version; `engine generate`
 // loads a model and greedily generates text — the M6-T07 real-model driver
-// (design: docs/design/optimized-cpu-execution.md §10 acceptance). M9 replaces
-// this with the real server binary + config system (ROADMAP M10-T08); until
+// (design: docs/design/optimized-cpu-execution.md §10 acceptance). This is
+// later replaced with the real server binary + config system (M10-T08); until
 // then this is the hand-run harness for loading a ~1B checkpoint and printing
 // coherent output on the optimized backend.
 

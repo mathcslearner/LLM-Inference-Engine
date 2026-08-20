@@ -1432,7 +1432,7 @@ invariance of the kernels (§8.5). Per ticket:
 
 Suites touching a kernel or a full forward register `SCALAR_PASS` so the forced-
 scalar pass (`ENGINE_FORCE_ISA=scalar`) covers the shipped bytes on both CI
-(x86-64) and the arm64 dev machine (CLAUDE.md).
+(x86-64) and the arm64 dev machine.
 
 ---
 

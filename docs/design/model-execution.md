@@ -1016,7 +1016,7 @@ kernels validate against them (bit-exact or tolerance per §6.3). M5 suites are
 **not** ISA-dispatched (they call `cpu::` directly, not `kernels::`), so **no
 `SCALAR_PASS` registration** and no per-ISA concern — ordinary portable tests,
 identical on arm64 and x86-64. Every numerical test states its tolerance
-explicitly and records the observed max-abs-diff (CLAUDE.md rule).
+explicitly and records the observed max-abs-diff (project rule).
 
 | Ticket | Tests |
 |---|---|

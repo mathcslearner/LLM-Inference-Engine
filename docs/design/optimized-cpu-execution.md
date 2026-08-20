@@ -948,7 +948,7 @@ determinism requirement ever needs cross-ISA bit-identity (it does not today —
 the merge gate is cross-*thread* bit-identity + cross-ISA tolerance, cpu-backend.md
 §6.2).
 
-**Benchmark obligations (no perf claim without a delta, CLAUDE.md):**
+**Benchmark obligations (no perf claim without a delta):**
 
 - M6-T02: packed GEMM ≥ 5× the M5 naive `cpu::gemm` at 4096³ on the dev machine
   (advisory), in BASELINES.md; a sanity comparison vs Accelerate/BLAS on the same
@@ -1038,4 +1038,4 @@ the merge gate is cross-*thread* bit-identity + cross-ISA tolerance, cpu-backend
 - **A macOS-arm64 CI job** — still deferred (cpu-backend.md §8.3); NEON coverage
   stays the per-ticket dev-machine workflow, and M6's optimized kernels rely on it
   more than any prior milestone, so the per-ticket "full ctest incl. forced-scalar
-  on the dev machine" discipline (CLAUDE.md) is load-bearing for M6.
+  on the dev machine" discipline is load-bearing for M6.

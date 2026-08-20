@@ -581,8 +581,7 @@ fp32 norms in an otherwise-bf16 model, are legal and real).
 
 ### 6.1 Scope: byte-level BPE from `tokenizer.json` — and why
 
-The engine's declared model scope is Llama-3-family and Qwen-2+-family
-(CLAUDE.md). Both ship HF *fast tokenizer* `tokenizer.json` files whose
+The engine's declared model scope is Llama-3-family and Qwen-2+-family. Both ship HF *fast tokenizer* `tokenizer.json` files whose
 model is **byte-level BPE** (GPT-2 lineage: a 256-symbol byte alphabet, so
 any UTF-8 input tokenizes with no unknown-token path). Supporting exactly
 that single format covers the entire target scope with one implementation

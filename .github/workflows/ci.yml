@@ -10,8 +10,8 @@
 #   ci          — aggregate gate. Branch protection requires this one check,
 #                 so the matrix can change without touching repository settings.
 #
-# clang-tidy is a local-only check (scripts/check-tidy.sh; per-ticket scoping
-# rules in CLAUDE.md). The CI job was removed 2026-08-08: the full-tree sweep
+# clang-tidy is a local-only check (scripts/check-tidy.sh; scoped per change).
+# The CI job was removed 2026-08-08: the full-tree sweep
 # outgrew the 15-minute job timeout and was cancelled on every run, gating
 # merges on a check that never finished. Known coverage gap accepted with
 # that removal: TUs outside the arm64 dev machine's compile database (the

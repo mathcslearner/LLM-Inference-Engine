@@ -58,11 +58,10 @@ Rules and scope:
   Kept: the device-agnostic caching pool allocator (the future KV block
   pool), the tensor library, and `Device` with its reserved `kCUDA` value
   — so a future GPU backend is additive, not an API break. History stays
-  in git and in `docs/archive/` / `docs/design/retired/`; living docs
-  (README, CLAUDE.md, ROADMAP.md, active design docs) describe only the
-  CPU-first engine.
-- **The plan is the v2 roadmap** (`ROADMAP.md`; v1 archived at
-  `docs/archive/ROADMAP-v1.md`).
+  in git and in `docs/design/retired/`; living docs (README and the active
+  design docs) describe only the CPU-first engine.
+- **The project follows a v2 CPU-first plan** (the pre-pivot v1 plan is
+  retired).
 
 ### Alternatives considered
 

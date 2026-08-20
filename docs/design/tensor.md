@@ -52,7 +52,7 @@ kernels, sampling — so its ownership and view semantics must be unambiguous.
 
 ## 2. Module layout & layering
 
-Types and files (all paths per ROADMAP tickets):
+Types and files:
 
 | File | Module | Contents | Ticket |
 |---|---|---|---|
