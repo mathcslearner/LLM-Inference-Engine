@@ -950,7 +950,7 @@ behind an existing subsystem):
   claim). design paged-kv-cache.md §6.2/§10.2/§12 + model-execution.md §10;
   format + scoped tidy clean.
 
-- **M9 (continuous batching scheduler & runtime) — in progress**: T01
+- **M9 (continuous batching scheduler & runtime) — complete** (2026-08-19): T01
   `docs/design/scheduler-runtime.md` — the contract M9-T02…T10 (and the
   M10/M11/M12/M15/M16 interactions) build on: the runtime that turns the M5–M8
   single-request `engine::Generate` into a multi-request, continuously-batched
@@ -1236,19 +1236,45 @@ behind an existing subsystem):
   `used==0`); `runtime_engine_test` repeated-preemption + the §10.2/§10.3 checks
   and boundaries; `PreemptionResumesWithIdenticalOutput` now asserts
   `num_preemptions()==1`. design scheduler-runtime.md §6.4 + §10.4 "as built" +
-  §11.2 reassignment; format + scoped tidy clean.
+  §11.2 reassignment; format + scoped tidy clean. T10 cancellation &
+  per-request failure isolation (2026-08-19): the final M9 ticket. Cancellation
+  *mechanics* (boundary-drain → `RetireCancelled` → RAII block return) already
+  landed in T03/T08, so T10 is three changes plus the missing acceptance tests.
+  **`BatchedSampler` per-row status** (the §11.2/§14 planned refinement):
+  `Sample` gained a caller-owned `std::span<core::Status> row_status` output and
+  now **always fills every row** — Ok (with `out[b]` set) or that row's
+  recoverable error (bad history id → InvalidArgument, non-finite row →
+  Internal); the batch-level return covers only front-loaded shape/null
+  validation of the engine-built inputs (`CHECK`ed by the engine), replacing
+  M7-T06's lowest-index-error return so one bad row no longer discards the batch
+  (additive signature; the reference `Sampler` untouched; all four call sites +
+  model-execution.md §15.6 updated). Engine `RunBatchPass` reads `row_status`
+  per row (healthy → deliver from the batched pass bit-for-bit, faulting → only
+  that sequence FAILED); the T08 stopgap `RecoverSampleFailure` **deleted**.
+  **Reactive decode-exhaustion routing** (§10.4 reassignment): a decode-time
+  `ResourceExhausted` in `ExecuteAndDeliver` now returns false rather than
+  failing; `RecoverForwardFailure` preempts the **latest-arrived other running
+  sequence** (§6.2 policy, via a shared new `PreemptSequence` helper) and
+  retries, failing only the **sole-occupant** case — reachable only under a
+  shared/externally-drained pool (the engine's own scheduler is exact), tested
+  via a mock that drains the pool from inside its decode forward. +9 tests
+  (**1354 → 1363 ctest green**): `runtime_engine_test` cancel-after-prefill /
+  cancel-while-preempted / decode-fault-with-healthy-neighbors /
+  shared-pool-exhaustion-preempts-younger / sole-occupant-fails;
+  `runtime_batching_test` Llama/Qwen mid-flight-cancel-isolation (real fixtures,
+  ×2 SCALAR_PASS — survivors bit-identical to standalone `Generate`);
+  `batched_sampler_test` `IsolatesPerRowErrors` (rewritten) + a `row_status`
+  size-mismatch case. design scheduler-runtime.md §11.3 "as built" + §14 (item
+  marked landed) + model-execution.md §15.6; format + scoped tidy clean.
 
-Next up: **M9-T10** (cancellation & per-request failure isolation) — the final M9
-ticket. Cancel promptly frees blocks and closes the channel with `kCancelled`
-(cancel-during-WAITING/-prefill/-decode all reclaim resources, stats-verified);
-a per-request fault fails only that request, never the engine loop. Landing here:
-the **additive `BatchedSampler` per-row status return** (§11.2, §14 — write each
-row's `Status` into `out[b]` and always fill every row, so one bad row no longer
-discards the batch; the engine currently re-derives per-row status in
-`RecoverSampleFailure`), and the **reactive decode-exhaustion → preemption
-routing** deferred from T09 (§10.4 / §11.2 — a shared-pool decode `ResourceExhausted`
-routed to graceful preemption when a younger sequence can be evicted, a failure
-only for the sole-occupant case). Acceptance (§13 M9-T10 / ROADMAP): cancel in
-each state reclaims blocks (`pool.stats()` verified); an injected per-request
-sampler fault leaves every other concurrent request's output unchanged. Conform
-to `docs/design/scheduler-runtime.md` §11. Per ROADMAP M9-T10.
+Next up: **M10-T01** (design doc & ADR: server architecture) — the first ticket
+of Milestone 10 (serving layer / OpenAI-compatible HTTP API). Write
+`docs/design/server.md` and the HTTP-library-selection ADR (evaluate standalone
+Asio + a minimal HTTP layer vs. `cpp-httplib` vs. Drogon — criteria: streaming
+support, thread-model fit vs. the engine thread, dependency weight), the server
+threading model relative to the runtime's engine thread, the OpenAI API schema
+(`/v1/completions`, `/v1/chat/completions`), the SSE streaming design, and the
+backpressure policy (the runtime's unbounded `OutputChannel` gains M10's bounded
+policy). Acceptance (ROADMAP M10-T01): the ADR records the library decision with
+a comparison table; the design doc includes a request-flow diagram from socket
+to engine channel and back. Docs-only. Per ROADMAP M10-T01.

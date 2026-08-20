@@ -1131,10 +1131,11 @@ TEST(OptimizedModelTest, BatchedDecodeFeedsBatchedSampler) {
         .sampler = &samplers[static_cast<std::size_t>(b)], .context = {}});
   }
   std::vector<sampling::SampleResult> out(static_cast<std::size_t>(num));
+  std::vector<engine::core::Status> row_status(static_cast<std::size_t>(num));
   const std::span<const float> logits{batched.data_ptr<float>(),
                                       static_cast<std::size_t>(num * vocab)};
   sampling::BatchedSampler bs;
-  Unwrap0(bs.Sample(logits, vocab, rows, out));
+  Unwrap0(bs.Sample(logits, vocab, rows, out, row_status));
 
   for (std::int64_t b = 0; b < num; ++b) {
     const std::span<const float> row{batched.data_ptr<float>() + (b * vocab),

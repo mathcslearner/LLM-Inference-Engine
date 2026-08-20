@@ -1384,10 +1384,21 @@ logprob counts.
    body invocation), so no per-worker index is needed and `src/parallel/` is
    untouched. `BatchedSampler` owns one `RowScratch` per batch slot and grows it
    on demand, so a steady-state step allocates nothing. Shape validation is
-   front-loaded before the region; per-row recoverable errors (bad history id,
-   non-finite row) are captured into a per-row status slot and the lowest-index
-   one is returned after the region (matching a sequential loop). `rows.empty()`
-   is a no-op success.
+   front-loaded before the region; `rows.empty()` is a no-op success.
+
+**Per-row status (M9-T10 refinement, scheduler-runtime.md §11.2).** `Sample`
+takes a caller-owned `std::span<core::Status> row_status` (size `rows.size()`)
+alongside `out`, and **always writes every row's outcome** — `Ok` (and `out[b]`
+filled) on success, or that row's recoverable error (bad history id → InvalidArgument,
+non-finite row → Internal, empty row → InvalidArgument) otherwise. The batch-level
+`Status` return now covers only front-loaded shape/null validation of the
+engine-built inputs (`vocab <= 0`, `out`/`row_status`/`logits` size mismatches, a
+null sampler), so a non-Ok return is an engine bug, not request data. This
+replaces M7-T06's original "return the lowest-index row error, `out` unspecified
+on any error" contract: one bad row no longer discards the batch, so the M9
+continuous-batching loop can fail only that row's sequence and deliver every
+other row (per-request failure isolation). The change is additive to the
+signature — the reference single-sequence `Sampler::Sample` is untouched.
 
 **Numerics note (why token identity survives the exp change).** Because the
 reference and batched paths call the *same selected* `ExpF32` variant in one

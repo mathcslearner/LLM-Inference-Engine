@@ -18,9 +18,13 @@
 // nothing (design §15.6). All shape validation is front-loaded before the
 // parallel region (parallel_for §3.4: inside a region there is only per-row
 // arithmetic that writes disjoint `out`/scratch/status slots — no throwing, no
-// shared mutation); per-row recoverable errors (bad history id, non-finite
-// row) are captured into `row_status` and the lowest-index one is returned
-// after the region, matching a sequential loop.
+// shared mutation).
+//
+// Per-row failure isolation (M9-T10; design §11.2): each row's recoverable
+// outcome (Ok, or a bad-history-id / non-finite-row error) is written into the
+// caller's `row_status[b]`, always, for every row — the batch is never
+// discarded for one bad row. The batch-level return covers only the
+// front-loaded shape/null validation of the engine-built inputs.
 
 namespace engine::sampling {
 
@@ -29,13 +33,19 @@ BatchedSampler::BatchedSampler(parallel::ThreadPool& pool) : pool_(pool) {}
 core::Status BatchedSampler::Sample(std::span<const float> logits,
                                     std::int64_t vocab,
                                     std::span<const BatchRow> rows,
-                                    std::span<SampleResult> out) {
+                                    std::span<SampleResult> out,
+                                    std::span<core::Status> row_status) {
   if (vocab <= 0) {
     return core::InvalidArgumentError("vocab must be > 0 (got {})", vocab);
   }
   if (out.size() != rows.size()) {
     return core::InvalidArgumentError("out size {} must equal rows size {}",
                                       out.size(), rows.size());
+  }
+  if (row_status.size() != rows.size()) {
+    return core::InvalidArgumentError(
+        "row_status size {} must equal rows size {}", row_status.size(),
+        rows.size());
   }
   const auto batch = static_cast<std::int64_t>(rows.size());
   const auto expected =
@@ -60,9 +70,9 @@ core::Status BatchedSampler::Sample(std::span<const float> logits,
     scratch_.resize(rows.size());
   }
 
-  // One status slot per row, default-Ok; the body writes only slot b for row b.
-  std::vector<core::Status> row_status(rows.size());
-
+  // Each iteration writes exactly its own `row_status[b]` (and `out[b]` on
+  // success) — disjoint slots, so no locking and every slot is fully defined
+  // after the region even if the caller passed a span with stale values.
   parallel::parallel_for(
       pool_, batch, /*grain=*/1, [&](std::int64_t begin, std::int64_t end) {
         for (std::int64_t i = begin; i < end; ++i) {
@@ -77,19 +87,14 @@ core::Status BatchedSampler::Sample(std::span<const float> logits,
               row.sampler->seed(), want_logprobs, scratch_[b]);
           if (result.ok()) {
             out[b] = std::move(result).value();
+            row_status[b] = core::OkStatus();
           } else {
             row_status[b] = std::move(result).status();
           }
         }
       });
 
-  // Return the lowest-index row error (a sequential loop would surface that
-  // one first); `out` for failed rows is unspecified.
-  for (const core::Status& status : row_status) {
-    if (!status.ok()) {
-      return status;
-    }
-  }
+  // Batch-level validation passed; per-row outcomes live in `row_status`.
   return core::OkStatus();
 }
 

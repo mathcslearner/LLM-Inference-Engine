@@ -56,10 +56,15 @@
 //     `[B, V]` logits. Because every op is row-/sequence-local and the batched
 //     GEMM equals the single-row GEMV bit-for-bit (§8.5), a sequence's output
 //     is identical whether it runs alone or batched — the continuous-batching
-//     invariant. `ExecuteAndDeliver` (the single-sequence forward) survives as
-//     the per-request fault fallback (§11.2): on a mid-batch forward or sampler
-//     fault the loop rolls the batch back and re-runs each member alone, so one
-//     bad request fails only itself, never the loop.
+//     invariant. Per-request failure isolation (M9-T10, §11.2): the batched
+//     sampler returns a per-row status, so a bad sampler row (a non-finite
+//     logits row, a bad history id) fails only that row's sequence while every
+//     other row is delivered from the same batched pass. A batched *forward*
+//     fault still rolls the batch back and re-runs each member alone via
+//     `ExecuteAndDeliver`, so one faulting forward fails only itself; a
+//     decode-time `ResourceExhausted` there is routed to graceful preemption of
+//     a younger sequence rather than failure (reachable only under a
+//     shared/externally-drained pool — the engine's own scheduler is exact).
 //
 // Layering (ADR-002): `runtime` is the layer-4 orchestration module; this
 // header names `model::Model` (the forward contract) and
@@ -211,6 +216,11 @@ class Engine {
   void DrainCommands();    // step 1
   void RetireCancelled();  // step 2 (all states)
   [[nodiscard]] scheduler::SchedulerOutput ScheduleStep();  // step 3
+  // Evict a RUNNING sequence: free its cache (RAII returns every block), move
+  // it to PREEMPTED at the head of the waiting queue for re-prefill, and bump
+  // the preemption counter. Shared by step-4's scheduled preemptions and the
+  // reactive decode-exhaustion routing (§10.1 / §11.2).
+  void PreemptSequence(RequestId id);
   // Steps 5/6: run one batched pass (prefill or decode) over `pass_entries_` —
   // assemble → forward → sample → deliver, with the per-request fault
   // fallbacks.
@@ -224,14 +234,21 @@ class Engine {
   // Operates only on the sequence (no engine state), so it is static.
   static void DeliverSampled(Entry& entry, sampling::SampleResult next);
   // A mid-batch forward fault: roll every member back to its pre-forward length
-  // and re-run each as a standalone forward (§11.2).
+  // and re-run each as a standalone forward, routing a decode
+  // `ResourceExhausted` to reactive preemption of a younger sequence (§11.2).
   void RecoverForwardFailure(bool prefill);
-  // A batched-sampler fault: re-sample per row over the same committed logits,
-  // failing only the bad rows (§11.2).
-  void RecoverSampleFailure(std::span<const float> block, std::int64_t vocab);
-  // The single-sequence forward + sample + deliver — the fallback the recovery
-  // paths re-run per member.
-  void ExecuteAndDeliver(Entry& entry, bool prefill);
+  // This member's pre-forward committed cache length (its `pass_pre_len_` slot,
+  // matched by identity in `pass_entries_`).
+  [[nodiscard]] std::int64_t PreForwardLength(const Entry& entry) const;
+  // The latest-arrived RUNNING sequence other than `exclude`, or 0 if none —
+  // the reactive-preemption victim (§6.2 policy).
+  [[nodiscard]] RequestId PickPreemptionVictim(RequestId exclude) const;
+  // The single-sequence forward + sample + deliver — the fallback the forward-
+  // recovery path re-runs per member. Returns `true` if the sequence advanced
+  // (delivered a token or reached a terminal state), `false` only when a decode
+  // append hit `ResourceExhausted` and the caller should attempt reactive
+  // preemption before retrying (§11.2).
+  [[nodiscard]] bool ExecuteAndDeliver(Entry& entry, bool prefill);
   void RetireTerminal();                     // step 7
   static void CloseCancelled(Entry& entry);  // transition + close a live seq
   void Shutdown();                           // post-join teardown
@@ -266,6 +283,7 @@ class Engine {
   std::vector<std::int64_t>
       pass_pre_len_;  // per-member pre-forward cache length
   std::vector<sampling::SampleResult> pass_results_;  // batched-sample output
+  std::vector<core::Status> pass_row_status_;         // per-row sample status
   std::vector<std::int32_t> prefill_tokens_;  // flat prompt++generated staging
   std::vector<std::pair<std::size_t, std::size_t>>
       prefill_ranges_;  // per-member (offset, length) into prefill_tokens_

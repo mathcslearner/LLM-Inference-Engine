@@ -203,10 +203,12 @@ void CheckBitExact(std::size_t batch, std::size_t vocab, unsigned salt,
   }
 
   std::vector<SampleResult> out(batch);
-  const Status status =
-      batched.Sample(block, static_cast<std::int64_t>(vocab), rows, out);
+  std::vector<Status> row_status(batch);
+  const Status status = batched.Sample(block, static_cast<std::int64_t>(vocab),
+                                       rows, out, row_status);
   ASSERT_TRUE(status.ok()) << status.ToString();
   for (std::size_t r = 0; r < batch; ++r) {
+    EXPECT_TRUE(row_status[r].ok()) << row_status[r].ToString();
     ExpectResultEq(out[r], ref[r], "batched-vs-reference");
   }
 }
@@ -250,8 +252,11 @@ TEST(BatchedSamplerTest, BatchCompositionIndependent) {
                        .context = {.prompt_ids = {}, .generated_ids = gen[r]}};
   }
   std::vector<SampleResult> full(batch);
-  ASSERT_TRUE(
-      batched.Sample(block, static_cast<std::int64_t>(vocab), rows, full).ok());
+  std::vector<Status> full_status(batch);
+  ASSERT_TRUE(batched
+                  .Sample(block, static_cast<std::int64_t>(vocab), rows, full,
+                          full_status)
+                  .ok());
 
   // Now sample each row as a batch of one.
   for (std::size_t r = 0; r < batch; ++r) {
@@ -260,9 +265,11 @@ TEST(BatchedSamplerTest, BatchCompositionIndependent) {
         BatchRow{.sampler = &samplers[r],
                  .context = {.prompt_ids = {}, .generated_ids = gen[r]}}};
     std::array<SampleResult, 1> out;
-    ASSERT_TRUE(
-        batched.Sample(row_logits, static_cast<std::int64_t>(vocab), one, out)
-            .ok());
+    std::array<Status, 1> out_status;
+    ASSERT_TRUE(batched
+                    .Sample(row_logits, static_cast<std::int64_t>(vocab), one,
+                            out, out_status)
+                    .ok());
     ExpectResultEq(out[0], full[r], "singleton-vs-batch");
   }
 }
@@ -293,9 +300,11 @@ TEST(BatchedSamplerTest, InvariantAcrossThreadCounts) {
     ThreadPool pool(threads);
     BatchedSampler batched(pool);
     std::vector<SampleResult> out(batch);
-    ASSERT_TRUE(
-        batched.Sample(block, static_cast<std::int64_t>(vocab), rows, out)
-            .ok());
+    std::vector<Status> row_status(batch);
+    ASSERT_TRUE(batched
+                    .Sample(block, static_cast<std::int64_t>(vocab), rows, out,
+                            row_status)
+                    .ok());
     if (baseline.empty()) {
       baseline = out;
     } else {
@@ -314,17 +323,26 @@ TEST(BatchedSamplerTest, RejectsShapeMismatches) {
   std::vector<float> logits(3, 0.0F);
   std::array<BatchRow, 1> rows{BatchRow{.sampler = &s, .context = {}}};
   std::array<SampleResult, 1> out;
+  std::array<Status, 1> row_status;
 
   // vocab <= 0
-  EXPECT_TRUE(IsInvalidArgument(batched.Sample(logits, 0, rows, out)));
+  EXPECT_TRUE(
+      IsInvalidArgument(batched.Sample(logits, 0, rows, out, row_status)));
   // logits size != batch * vocab (1 row * 3 != 4)
-  EXPECT_TRUE(IsInvalidArgument(batched.Sample(logits, 4, rows, out)));
+  EXPECT_TRUE(
+      IsInvalidArgument(batched.Sample(logits, 4, rows, out, row_status)));
   // out size != rows size
   std::array<SampleResult, 2> out2;
-  EXPECT_TRUE(IsInvalidArgument(batched.Sample(logits, 3, rows, out2)));
+  std::array<Status, 2> row_status2;
+  EXPECT_TRUE(
+      IsInvalidArgument(batched.Sample(logits, 3, rows, out2, row_status2)));
+  // row_status size != rows size
+  EXPECT_TRUE(
+      IsInvalidArgument(batched.Sample(logits, 3, rows, out, row_status2)));
   // null sampler
   std::array<BatchRow, 1> bad{BatchRow{.sampler = nullptr, .context = {}}};
-  EXPECT_TRUE(IsInvalidArgument(batched.Sample(logits, 3, bad, out)));
+  EXPECT_TRUE(
+      IsInvalidArgument(batched.Sample(logits, 3, bad, out, row_status)));
 }
 
 TEST(BatchedSamplerTest, EmptyBatchIsOk) {
@@ -332,10 +350,15 @@ TEST(BatchedSamplerTest, EmptyBatchIsOk) {
   const std::span<const float> logits;
   const std::span<const BatchRow> rows;
   const std::span<SampleResult> out;
-  EXPECT_TRUE(batched.Sample(logits, 128, rows, out).ok());
+  const std::span<Status> row_status;
+  EXPECT_TRUE(batched.Sample(logits, 128, rows, out, row_status).ok());
 }
 
-TEST(BatchedSamplerTest, SurfacesPerRowErrors) {
+// Per-row failure isolation (M9-T10, design §11.2): a bad row records its error
+// in `row_status[b]` and leaves `out[b]` untouched, while every *other* row is
+// still sampled normally and the batch-level return stays Ok. The healthy rows'
+// results are bit-identical to sampling them without the bad row present.
+TEST(BatchedSamplerTest, IsolatesPerRowErrors) {
   BatchedSampler batched;
   const std::size_t vocab = 16;
   const std::size_t batch = 8;
@@ -345,27 +368,45 @@ TEST(BatchedSamplerTest, SurfacesPerRowErrors) {
   temp.seed = 1U;
   temp.max_tokens = 4;
   const Sampler s = *Sampler::Create(temp);
-
-  std::vector<float> block(batch * vocab, 0.1F);
-  // Row 5 has a NaN → Internal.
-  block[(5 * vocab) + 2] = std::numeric_limits<float>::quiet_NaN();
-  std::vector<BatchRow> rows(batch, BatchRow{.sampler = &s, .context = {}});
-  std::vector<SampleResult> out(batch);
-  EXPECT_TRUE(IsInternal(
-      batched.Sample(block, static_cast<std::int64_t>(vocab), rows, out)));
-
-  // A bad history id (out of [0, vocab)) → InvalidArgument. Give row 2 a
-  // penalty so ApplyPenalties inspects the history.
+  // A penalized sampler so ApplyPenalties inspects the (bad) history.
   SamplingParams pen = temp;
   pen.repetition_penalty = 1.2F;
   const Sampler sp = *Sampler::Create(pen);
-  std::vector<float> clean(batch * vocab, 0.1F);
+
+  std::vector<float> block(batch * vocab, 0.1F);
+  // Row 5 has a NaN → Internal (a non-finite logits row).
+  block[(5 * vocab) + 2] = std::numeric_limits<float>::quiet_NaN();
+  // Row 2 has a bad history id (>= vocab) → InvalidArgument.
   const std::array<std::int32_t, 1> bad_hist{static_cast<std::int32_t>(vocab)};
-  std::vector<BatchRow> rows2(batch, BatchRow{.sampler = &s, .context = {}});
-  rows2[2] = BatchRow{.sampler = &sp,
-                      .context = {.prompt_ids = bad_hist, .generated_ids = {}}};
-  EXPECT_TRUE(IsInvalidArgument(
-      batched.Sample(clean, static_cast<std::int64_t>(vocab), rows2, out)));
+  std::vector<BatchRow> rows(batch, BatchRow{.sampler = &s, .context = {}});
+  rows[2] = BatchRow{.sampler = &sp,
+                     .context = {.prompt_ids = bad_hist, .generated_ids = {}}};
+
+  std::vector<SampleResult> out(batch);
+  std::vector<Status> row_status(batch);
+  // Batch-level return is Ok: one bad row does not discard the batch.
+  ASSERT_TRUE(batched
+                  .Sample(block, static_cast<std::int64_t>(vocab), rows, out,
+                          row_status)
+                  .ok());
+
+  // The two bad rows carry their errors; every other row is Ok.
+  for (std::size_t r = 0; r < batch; ++r) {
+    if (r == 2) {
+      EXPECT_TRUE(IsInvalidArgument(row_status[r])) << "row " << r;
+    } else if (r == 5) {
+      EXPECT_TRUE(IsInternal(row_status[r])) << "row " << r;
+    } else {
+      EXPECT_TRUE(row_status[r].ok())
+          << "row " << r << ": " << row_status[r].ToString();
+    }
+  }
+
+  // A healthy row (row 0) matches the reference sampler run standalone — the
+  // bad rows perturbed nothing.
+  const std::span<const float> row0(block.data(), vocab);
+  const SampleResult ref = *s.SampleWithLogprobs(row0, SampleContext{});
+  ExpectResultEq(out[0], ref, "healthy-row-unperturbed");
 }
 
 // -------------------------------------------------- allocation-free steady --
@@ -384,14 +425,19 @@ TEST(BatchedSamplerTest, AllocationFreeAfterWarmup) {
   const Sampler s = *Sampler::Create(p);
   std::vector<BatchRow> rows(batch, BatchRow{.sampler = &s, .context = {}});
   std::vector<SampleResult> out(batch);
+  std::vector<Status> row_status(batch);
 
-  ASSERT_TRUE(
-      batched.Sample(block, static_cast<std::int64_t>(vocab), rows, out).ok());
+  ASSERT_TRUE(batched
+                  .Sample(block, static_cast<std::int64_t>(vocab), rows, out,
+                          row_status)
+                  .ok());
   const std::size_t after_first = batched.scratch_bytes();
   EXPECT_GT(after_first, 0U);
   // A second identical-shape step must not grow the scratch.
-  ASSERT_TRUE(
-      batched.Sample(block, static_cast<std::int64_t>(vocab), rows, out).ok());
+  ASSERT_TRUE(batched
+                  .Sample(block, static_cast<std::int64_t>(vocab), rows, out,
+                          row_status)
+                  .ok());
   EXPECT_EQ(batched.scratch_bytes(), after_first);
 }
 

@@ -206,6 +206,61 @@ TEST(RuntimeBatchingTest, QwenTinyPoolPreemptionMatchesSequential) {
   RunPreemptionInvariant(kQwen);
 }
 
+// M9-T10 acceptance (§11.1, §13): cancelling one of several concurrent requests
+// mid-decode reclaims its blocks and closes its channel `kCancelled`, while
+// every surviving request's output stays bit-identical to its standalone
+// `Generate` — the cancel disturbs no neighbor. On the real optimized backend,
+// so the survivors' bit-exactness rests on the KV invariant, not the mock.
+void RunMidFlightCancelIsolation(const std::string& fixture) {
+  std::unique_ptr<Model> model = OptimizedModel(fixture);
+  const std::vector<std::int32_t> eos = model->config().eos_token_ids;
+  BlockPool pool =
+      Unwrap(BlockPool::Create(model->cache_geometry(), 16, 64, nullptr));
+  auto engine = Unwrap(Engine::Create(*model, pool, EngineConfig{}));
+
+  const auto prompts = EightPrompts();
+  constexpr std::int64_t kMaxTokens = 24;
+  std::vector<RequestHandle> handles;
+  handles.reserve(prompts.size());
+  for (const auto& p : prompts) {
+    handles.push_back(
+        Unwrap(engine->Submit(GreedyRequest(p, eos, kMaxTokens))));
+  }
+
+  // Let everyone prefill and decode a few tokens, then cancel two of them
+  // mid-flight (indices 2 and 5).
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_TRUE(engine->Step());
+  }
+  engine->Cancel(handles[2].id());
+  engine->Cancel(handles[5].id());
+  RunToIdle(*engine);
+
+  for (std::size_t i = 0; i < prompts.size(); ++i) {
+    if (i == 2 || i == 5) {
+      EXPECT_EQ(handles[i].await_completion().terminal, SeqState::kCancelled)
+          << fixture << " sequence " << i << " should be cancelled";
+      (void)DrainTokens(handles[i]);  // drain whatever it emitted pre-cancel
+      continue;
+    }
+    const std::vector<std::int32_t> got = DrainTokens(handles[i]);
+    const std::vector<std::int32_t> want =
+        SequentialGreedy(*model, prompts[i], eos, kMaxTokens);
+    EXPECT_EQ(got, want) << fixture << " surviving sequence " << i
+                         << " perturbed by a neighbor's cancel";
+    EXPECT_EQ(handles[i].await_completion().terminal, SeqState::kFinished);
+  }
+  EXPECT_EQ(pool.stats().used, 0);  // cancelled sequences' blocks reclaimed
+}
+
+TEST(RuntimeBatchingTest, LlamaMidFlightCancelIsolation) {
+  RunMidFlightCancelIsolation(kLlama);
+}
+
+TEST(RuntimeBatchingTest, QwenMidFlightCancelIsolation) {
+  RunMidFlightCancelIsolation(kQwen);
+}
+
 // Staggered submission: requests arriving mid-flight join batching without
 // perturbing running sequences (§9.2). Submit four, step several times, then
 // submit four more; every request's output still equals its standalone run.

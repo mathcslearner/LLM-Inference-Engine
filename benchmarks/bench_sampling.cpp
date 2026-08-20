@@ -123,9 +123,11 @@ int Run(const Args& args) {
 
   BatchedSampler batched(DefaultPool());
   std::vector<SampleResult> out(batch);
+  std::vector<Status> row_status(batch);
 
   // Warmup (first call sizes the scratch and the pool).
-  if (const Status st = batched.Sample(block, args.vocab, rows, out);
+  if (const Status st =
+          batched.Sample(block, args.vocab, rows, out, row_status);
       !st.ok()) {
     fmt::print("batched sample failed: {}\n", st.ToString());
     return 1;
@@ -135,7 +137,7 @@ int Run(const Args& args) {
   batched_ms.reserve(static_cast<std::size_t>(args.runs));
   for (int i = 0; i < args.runs; ++i) {
     const auto t0 = std::chrono::steady_clock::now();
-    (void)batched.Sample(block, args.vocab, rows, out);
+    (void)batched.Sample(block, args.vocab, rows, out, row_status);
     const auto t1 = std::chrono::steady_clock::now();
     batched_ms.push_back(
         std::chrono::duration<double, std::milli>(t1 - t0).count());

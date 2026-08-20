@@ -108,6 +108,25 @@ class CannedModel final : public Model {
 
   void set_poison_token(std::int32_t token) { poison_ = token; }
 
+  // Model a shared/externally-drained pool (§11.2): when armed, the next decode
+  // (single-token) forward grabs every currently-free block *before* its own
+  // K/V append, so the append exhausts the pool even though the scheduler's
+  // start-of-step snapshot saw free blocks. Disarms after firing once. The
+  // grabbed blocks are held until `release_drained()`, simulating a persistent
+  // external consumer.
+  void arm_pool_drain(BlockPool* pool) {
+    drain_pool_ = pool;
+    drain_armed_ = true;
+  }
+  void release_drained() {
+    if (drain_pool_ != nullptr) {
+      for (const std::int32_t b : drained_) {
+        drain_pool_->Release(b);
+      }
+    }
+    drained_.clear();
+  }
+
   [[nodiscard]] StatusOr<Tensor> forward(
       const ForwardRequest& request) override {
     // The batched path (cu_seqlens/caches non-empty) is realized exactly like
@@ -135,6 +154,18 @@ class CannedModel final : public Model {
   [[nodiscard]] StatusOr<Tensor> ForwardSingle(
       const ForwardRequest& request) const {
     const auto t = static_cast<std::int64_t>(request.token_ids.size());
+    // Shared-pool drain hook: a single-token (decode) forward grabs all free
+    // blocks before appending, so the append below exhausts the pool (§11.2).
+    if (drain_armed_ && drain_pool_ != nullptr && t == 1) {
+      for (;;) {
+        StatusOr<std::int32_t> b = drain_pool_->Allocate();
+        if (!b.ok()) {
+          break;
+        }
+        drained_.push_back(*b);
+      }
+      drain_armed_ = false;
+    }
     for (int layer = 0; layer < kLayers; ++layer) {
       const Tensor k =
           Unwrap(ops::zeros(Shape{t, kKvHeads, kHeadDim}, DataType::kFloat32));
@@ -207,6 +238,11 @@ class CannedModel final : public Model {
 
   ModelConfig config_;
   std::int32_t poison_ = -1;
+  // Shared-pool drain hook (see arm_pool_drain). Mutable so it can fire from
+  // the const forward path.
+  BlockPool* drain_pool_ = nullptr;
+  mutable bool drain_armed_ = false;
+  mutable std::vector<std::int32_t> drained_;
 };
 
 [[nodiscard]] CacheGeometry TinyGeom() {
@@ -612,6 +648,65 @@ TEST(EngineTest, CancelDuringDecode) {
   EXPECT_EQ(pool.stats().used, 0);  // decode blocks reclaimed
 }
 
+// Cancel a sequence right after prefill (RUNNING, before any decode): its
+// prompt blocks are reclaimed promptly at the next boundary, and a second
+// concurrent request — untouched — keeps its own blocks and completes.
+TEST(EngineTest, CancelAfterPrefillReclaimsPromptBlocks) {
+  CannedModel model;
+  BlockPool pool = MakePool();
+  auto engine = Unwrap(Engine::Create(
+      model, pool, EngineConfig{.max_num_batched_tokens = 4096}));
+  auto victim = Unwrap(engine->Submit(GreedyRequest({1, 2, 3}, 8)));
+  auto other = Unwrap(engine->Submit(GreedyRequest({4, 5, 6}, 8)));
+
+  ASSERT_TRUE(engine->Step());  // prefill both: both RUNNING, both hold a block
+  EXPECT_EQ(engine->num_running(), 2U);
+  const std::int64_t used_after_prefill = pool.stats().used;
+  EXPECT_EQ(used_after_prefill, 2);  // one block each
+
+  engine->Cancel(victim.id());
+  ASSERT_TRUE(engine->Step());  // cancel applied: victim retired, blocks freed
+  EXPECT_EQ(victim.await_completion().terminal, SeqState::kCancelled);
+  EXPECT_EQ(pool.stats().used, 1);  // only `other`'s block remains
+
+  RunToIdle(*engine);
+  // `other` was undisturbed: its output matches a standalone Generate.
+  EXPECT_EQ(DrainTokens(other), ReferenceTokens(model, {4, 5, 6}, 8));
+  EXPECT_EQ(other.await_completion().terminal, SeqState::kFinished);
+  EXPECT_EQ(pool.stats().used, 0);  // no leaks
+}
+
+// Cancel a PREEMPTED sequence (cache already released): the cancel is honored,
+// nothing double-frees, and the surviving sequence completes unchanged (§11.1).
+TEST(EngineTest, CancelWhilePreempted) {
+  CannedModel model;
+  // The 2-block preemption recipe of PreemptionResumesWithIdenticalOutput: two
+  // full-block prompts, the latest-arrived gets preempted on the first decode.
+  BlockPool pool = MakePool(/*num_blocks=*/2);
+  auto engine = Unwrap(Engine::Create(
+      model, pool, EngineConfig{.max_num_batched_tokens = 4096}));
+  const std::vector<std::int32_t> prompt = {1, 2, 3, 4, 5, 6, 7, 8};
+  auto older = Unwrap(engine->Submit(GreedyRequest(prompt, /*max_tokens=*/6)));
+  auto younger =
+      Unwrap(engine->Submit(GreedyRequest(prompt, /*max_tokens=*/6)));
+
+  ASSERT_TRUE(engine->Step());  // prefill both
+  ASSERT_TRUE(engine->Step());  // preempt the younger, decode the older
+  ASSERT_EQ(engine->num_waiting(), 1U);  // younger is PREEMPTED in the queue
+  ASSERT_EQ(engine->num_preemptions(), 1U);
+
+  engine->Cancel(younger.id());
+  RunToIdle(*engine);
+
+  EXPECT_EQ(younger.await_completion().terminal, SeqState::kCancelled);
+  (void)DrainTokens(younger);  // drain whatever it emitted before preemption
+  // The older sequence is unaffected by the cancel of its preempted peer.
+  EXPECT_EQ(DrainTokens(older), ReferenceTokens(model, prompt, 6));
+  EXPECT_EQ(older.await_completion().terminal, SeqState::kFinished);
+  EXPECT_EQ(engine->num_live(), 0U);
+  EXPECT_EQ(pool.stats().used, 0);  // no leaks, no double-free
+}
+
 TEST(EngineTest, CancelAfterFinishIsNoOp) {
   CannedModel model;
   BlockPool pool = MakePool();
@@ -655,6 +750,109 @@ TEST(EngineTest, PerRequestFaultIsolated) {
   EXPECT_EQ(good.await_completion().terminal, SeqState::kFinished);
   EXPECT_EQ(DrainTokens(good), ReferenceTokens(model, {2, 3}, 4));
   EXPECT_EQ(pool.stats().used, 0);
+}
+
+// A sampler fault that fires mid-decode (not at prefill) inside a batch with
+// two healthy neighbors fails only the faulting row — the per-row
+// `BatchedSampler` status path (§11.2). The mock generates p+1, p+2, …; `bad`
+// (prompt ending in 5) generates 6 then 7 and, decoding *from* the poison token
+// 7, faults — so the error lands in a batched decode pass. The healthy
+// neighbors run short enough that they never feed 7 back as input, so they
+// never touch the poison.
+TEST(EngineTest, DecodeFaultIsolatedFromHealthyNeighbors) {
+  CannedModel model;
+  model.set_poison_token(7);
+  BlockPool pool = MakePool();
+  auto engine = Unwrap(Engine::Create(
+      model, pool, EngineConfig{.max_num_batched_tokens = 4096}));
+
+  auto good1 = Unwrap(engine->Submit(GreedyRequest({1, 2}, /*max_tokens=*/4)));
+  auto bad = Unwrap(engine->Submit(GreedyRequest({4, 5}, /*max_tokens=*/6)));
+  auto good2 = Unwrap(engine->Submit(GreedyRequest({0, 1}, /*max_tokens=*/4)));
+  RunToIdle(*engine);
+
+  // `bad` fails when it decodes the poison token; the fault is a decode-pass
+  // per-row sampler error, isolated to `bad`.
+  const FinishInfo bad_info = bad.await_completion();
+  EXPECT_EQ(bad_info.terminal, SeqState::kFailed);
+  EXPECT_FALSE(bad_info.error.ok());
+
+  // Both healthy neighbors produce exactly their standalone trajectories.
+  EXPECT_EQ(good1.await_completion().terminal, SeqState::kFinished);
+  EXPECT_EQ(DrainTokens(good1), ReferenceTokens(model, {1, 2}, 4));
+  EXPECT_EQ(good2.await_completion().terminal, SeqState::kFinished);
+  EXPECT_EQ(DrainTokens(good2), ReferenceTokens(model, {0, 1}, 4));
+  EXPECT_EQ(pool.stats().used, 0);
+}
+
+// --- Reactive decode-exhaustion routing (M9-T10, §11.2) --------------------
+
+// A decode append that exhausts a shared/externally-drained pool is routed to
+// graceful preemption of a younger sequence rather than per-request failure:
+// the older sequence proceeds, the younger is preempted and later resumes with
+// bit-identical output. Without the routing the older sequence would fail.
+TEST(EngineTest, SharedPoolDecodeExhaustionPreemptsYounger) {
+  CannedModel model;
+  // 3 blocks × 8 slots. `older`'s 8-token prompt fills block 0 exactly, so its
+  // first decode (pos 8) needs a new block; `younger`'s 7-token prompt leaves
+  // room for its first decode (pos 7) in the same block, so it needs none. The
+  // scheduler (snapshot: 1 free block) therefore schedules both to decode
+  // without preemption — then the drain hook fires during `older`'s append.
+  BlockPool pool = MakePool(/*num_blocks=*/3);
+  auto engine = Unwrap(Engine::Create(
+      model, pool, EngineConfig{.max_num_batched_tokens = 4096}));
+  const std::vector<std::int32_t> older_prompt = {1, 1, 1, 1, 1, 1, 1, 1};
+  const std::vector<std::int32_t> younger_prompt = {2, 2, 2, 2, 2, 2, 2};
+  auto older = Unwrap(engine->Submit(GreedyRequest(older_prompt, 4)));
+  auto younger = Unwrap(engine->Submit(GreedyRequest(younger_prompt, 4)));
+
+  ASSERT_TRUE(engine->Step());  // prefill both; used = 2, free = 1
+  ASSERT_EQ(engine->num_running(), 2U);
+  ASSERT_EQ(pool.stats().used, 2);
+
+  model.arm_pool_drain(&pool);  // the next decode append will find 0 free
+  ASSERT_TRUE(engine->Step());  // decode: older exhausts → preempt younger
+  // Older advanced; younger was reactively preempted (not failed).
+  EXPECT_GE(engine->num_preemptions(), 1U);
+  EXPECT_EQ(engine->num_running(), 1U);
+  EXPECT_EQ(engine->num_waiting(), 1U);
+
+  model.release_drained();  // the external consumer frees its blocks
+  RunToIdle(*engine);
+
+  // Both complete successfully with standalone-identical output — the older
+  // never failed, the younger resumed.
+  EXPECT_EQ(older.await_completion().terminal, SeqState::kFinished);
+  EXPECT_EQ(DrainTokens(older), ReferenceTokens(model, older_prompt, 4));
+  EXPECT_EQ(younger.await_completion().terminal, SeqState::kFinished);
+  EXPECT_EQ(DrainTokens(younger), ReferenceTokens(model, younger_prompt, 4));
+  EXPECT_EQ(pool.stats().used, 0);  // no leaks
+}
+
+// The sole-occupant case: a decode exhaustion with no younger sequence to
+// preempt genuinely cannot proceed, so that one request fails
+// (ResourceExhausted) while the engine loop survives (§11.2).
+TEST(EngineTest, SoleOccupantDecodeExhaustionFails) {
+  CannedModel model;
+  BlockPool pool = MakePool(/*num_blocks=*/2);
+  auto engine = Unwrap(Engine::Create(
+      model, pool, EngineConfig{.max_num_batched_tokens = 4096}));
+  const std::vector<std::int32_t> prompt = {1, 1, 1, 1, 1, 1, 1, 1};
+  auto only = Unwrap(engine->Submit(GreedyRequest(prompt, /*max_tokens=*/4)));
+
+  ASSERT_TRUE(engine->Step());  // prefill: fills block 0, used = 1, free = 1
+  model.arm_pool_drain(&pool);  // decode append will find 0 free
+  ASSERT_TRUE(
+      engine->Step());  // decode: exhausts, no younger to preempt → fail
+
+  const FinishInfo info = only.await_completion();
+  EXPECT_EQ(info.terminal, SeqState::kFailed);
+  EXPECT_TRUE(IsResourceExhausted(info.error));
+  EXPECT_EQ(engine->num_preemptions(), 0U);  // nothing was preempted
+  EXPECT_EQ(engine->num_live(), 0U);
+
+  model.release_drained();
+  EXPECT_EQ(pool.stats().used, 0);  // no leaks once the drain is released
 }
 
 // --- Continuous-batching invariant (M9-T08) --------------------------------

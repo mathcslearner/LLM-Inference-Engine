@@ -47,18 +47,29 @@ class BatchedSampler {
   explicit BatchedSampler(parallel::ThreadPool& pool = parallel::DefaultPool());
 
   // Sample one token per row. `logits` is the `[batch, vocab]` row-major block
-  // (`rows.size()` rows of `vocab` fp32 each); `out` (size `rows.size()`)
-  // receives one `SampleResult` per row, index-aligned with `rows`. Returns the
-  // first row's error (a bad history id → `InvalidArgument`, a non-finite
-  // logits row → `Internal`, an empty row → `InvalidArgument`), leaving `out`
-  // unspecified; on success every `out[i]` is filled. Shape mismatches
-  // (`logits.size() != rows.size() * vocab`, `out.size() != rows.size()`, a
-  // null `sampler`, `vocab <= 0`) are `InvalidArgument`, checked before any
-  // work. `rows.empty()` is a no-op success.
+  // (`rows.size()` rows of `vocab` fp32 each); `out` and `row_status` (both
+  // size `rows.size()`) receive, index-aligned with `rows`, one `SampleResult`
+  // and one per-row `Status` respectively.
+  //
+  // Per-row failure isolation (M9-T10; design §11.2): every row is always
+  // attempted and `row_status[b]` is always written — `Ok` on success (and
+  // `out[b]` is the sampled result), or that row's error otherwise (a bad
+  // history id → `InvalidArgument`, a non-finite logits row → `Internal`, an
+  // empty row → `InvalidArgument`; `out[b]` is then left untouched). One bad
+  // row never discards the batch, so the engine loop can fail only that row's
+  // sequence and deliver every other row (§11.2).
+  //
+  // The returned `Status` reports *batch-level* validation only, checked before
+  // any work and leaving `out`/`row_status` unspecified: a shape mismatch
+  // (`logits.size() != rows.size() * vocab`, `out.size() != rows.size()`,
+  // `row_status.size() != rows.size()`), a null `sampler`, or `vocab <= 0` —
+  // all `InvalidArgument`. These are engine-built inputs, so a non-Ok return is
+  // an engine bug, not request data. `rows.empty()` is a no-op success.
   [[nodiscard]] core::Status Sample(std::span<const float> logits,
                                     std::int64_t vocab,
                                     std::span<const BatchRow> rows,
-                                    std::span<SampleResult> out);
+                                    std::span<SampleResult> out,
+                                    std::span<core::Status> row_status);
 
   // Total bytes currently held in the per-row scratch (capacity, not size) —
   // the metric the allocation-free-steady-state test watches for stability.

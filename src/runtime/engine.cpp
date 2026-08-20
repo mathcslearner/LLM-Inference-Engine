@@ -277,12 +277,7 @@ bool Engine::Step() {
   //    waiting_ ahead of never-started requests — resume re-prefills
   //    prompt ++ generated (§10.2).
   for (const RequestId id : out.preempt) {
-    Entry& entry = *requests_.at(id);
-    entry.seq->ReleaseCache();
-    entry.seq->Transition(SeqState::kPreempted);
-    std::erase(running_, id);
-    waiting_.push_front(id);
-    ++preemption_count_;
+    PreemptSequence(id);
   }
 
   // 5. Prefill pass over the admitted sequences (design §9.1 step 5). A newly
@@ -421,6 +416,19 @@ scheduler::SchedulerOutput Engine::ScheduleStep() {
   return scheduler::Scheduler{}.Schedule(inputs);
 }
 
+void Engine::PreemptSequence(RequestId id) {
+  // Evict-and-recompute (§10.1): drop the cache (RAII frees every block), keep
+  // the generated ids / sampler / stop state, and requeue at the head of
+  // waiting_ ahead of never-started requests — resume re-prefills
+  // prompt ++ generated (§10.2), bit-identical by the KV invariant.
+  Entry& entry = *requests_.at(id);
+  entry.seq->ReleaseCache();
+  entry.seq->Transition(SeqState::kPreempted);
+  std::erase(running_, id);
+  waiting_.push_front(id);
+  ++preemption_count_;
+}
+
 void Engine::BuildPassInputs(bool prefill) {
   pass_seqs_.clear();
   pass_seqs_.reserve(pass_entries_.size());
@@ -497,11 +505,11 @@ void Engine::RunBatchPass(bool prefill) {
   // per-sequence re-run (§11.2). (The forward appends K/V per sequence inside
   // itself, so a fault can leave one cache mid-append.) For the engine's own
   // pool the scheduler's block accounting is exact (decode demand is charged
-  // before admission), so a decode append never exhausts here; routing a
-  // decode-time `ResourceExhausted` — reachable only when the pool is shared
-  // with an external allocator — to graceful preemption rather than
-  // per-request failure is M9-T10, where it pairs with the per-row
-  // `BatchedSampler` status and the isolation tests (§11.2).
+  // before admission), so a decode append never exhausts here; a decode-time
+  // `ResourceExhausted` — reachable only when the pool is shared with an
+  // external allocator that drains it between the scheduler snapshot and the
+  // append — is routed to graceful preemption of a younger sequence in
+  // `RecoverForwardFailure` rather than per-request failure (§11.2).
   pass_pre_len_.clear();
   for (Entry* e : pass_entries_) {
     pass_pre_len_.push_back(e->seq->cache()->length());
@@ -526,20 +534,30 @@ void Engine::RunBatchPass(bool prefill) {
       logits->data_ptr<float>(), static_cast<std::size_t>(num_seqs * vocab)};
 
   // One batched sample over the whole block — same tokens, bit-for-bit, the
-  // single-sequence sampler would pick (§8.4). On a per-row sampler fault
-  // (e.g. a non-finite logits row) it reports the first bad row and leaves
-  // `out` unspecified; re-sample per row so only the bad rows fail (§11.2).
+  // single-sequence sampler would pick (§8.4). The sampler returns a per-row
+  // status (M9-T10, §11.2): a non-Ok *overall* return means it rejected the
+  // engine-built inputs (a shape/null bug), so CHECK; otherwise each row's
+  // recoverable outcome is in `pass_row_status_`.
   pass_results_.assign(static_cast<std::size_t>(num_seqs),
                        sampling::SampleResult{});
-  const core::Status sampled = batched_sampler_.Sample(
-      block, vocab, assembler_.inputs().sample_rows, pass_results_);
-  if (!sampled.ok()) {
-    RecoverSampleFailure(block, vocab);
-    return;
-  }
+  pass_row_status_.assign(static_cast<std::size_t>(num_seqs), core::OkStatus());
+  const core::Status sampled =
+      batched_sampler_.Sample(block, vocab, assembler_.inputs().sample_rows,
+                              pass_results_, pass_row_status_);
+  CHECK(sampled.ok(), "batched sampler rejected engine-built inputs: {}",
+        sampled.ToString());
 
+  // Deliver healthy rows; fail only the rows whose sampler faulted (a
+  // non-finite logits row, a bad history id). One bad row does not disturb the
+  // others — per-request failure isolation (§11.2).
   for (std::size_t b = 0; b < pass_entries_.size(); ++b) {
-    DeliverSampled(*pass_entries_[b], std::move(pass_results_[b]));
+    Entry& entry = *pass_entries_[b];
+    if (pass_row_status_[b].ok()) {
+      DeliverSampled(entry, std::move(pass_results_[b]));
+    } else {
+      entry.seq->set_error(pass_row_status_[b]);
+      entry.seq->Transition(SeqState::kFailed);
+    }
   }
 }
 
@@ -549,44 +567,76 @@ void Engine::RecoverForwardFailure(bool prefill) {
   // pre-forward length (clearing any partial append state), then re-run each as
   // a standalone single-sequence forward: healthy members deliver
   // bit-identically (§8.5), and only the genuinely faulting member fails
-  // (ADR-003, §11.2). Routing a shared-pool decode-time exhaustion to graceful
-  // preemption rather than per-request failure is M9-T10 (§11.2; a private
-  // pool never exhausts on decode — the scheduler is exact).
-  for (std::size_t b = 0; b < pass_entries_.size(); ++b) {
-    Entry& entry = *pass_entries_[b];
+  // (ADR-003, §11.2).
+  //
+  // A decode-time `ResourceExhausted` (a shared/externally-drained pool) is not
+  // a per-request failure while a younger sequence can be evicted: preempt the
+  // latest-arrived *other* running sequence (§6.2 policy) to free blocks and
+  // retry this member's decode. Only the sole-occupant case — no other running
+  // sequence to preempt — genuinely fails (the front-loaded-vs-mid-generation
+  // distinction of paged §10.2). A preempted victim may sit later in
+  // `pass_entries_`; the state guard skips it (it is no longer kRunning) so it
+  // resumes next step instead of running on a released cache.
+  for (Entry* entry_ptr : pass_entries_) {
+    Entry& entry = *entry_ptr;
+    if (entry.seq->state() != SeqState::kRunning) {
+      continue;  // preempted as a victim earlier this recovery; resumes later.
+    }
+    // Find this member's pre-forward snapshot (pass_entries_ order is stable).
     // `truncate` to a length <= the current committed length always succeeds
-    // and resets the in-progress-forward state; ignore its status.
-    (void)entry.seq->cache()->truncate(pass_pre_len_[b]);
-    ExecuteAndDeliver(entry, prefill);
+    // and resets any in-progress-forward state; ignore its status.
+    (void)entry.seq->cache()->truncate(PreForwardLength(entry));
+    // Re-run; on a decode `ResourceExhausted` (ExecuteAndDeliver returns false)
+    // evict a younger sequence and retry until it fits or none remain.
+    while (!ExecuteAndDeliver(entry, prefill)) {
+      const RequestId victim = PickPreemptionVictim(entry.seq->id());
+      if (victim == 0) {
+        // Sole occupant: the pool genuinely cannot fit this sequence's next
+        // token. Fail only this request (§11.2).
+        entry.seq->set_error(core::ResourceExhaustedError(
+            "decode append could not allocate a block and no younger sequence "
+            "could be preempted to free one"));
+        entry.seq->Transition(SeqState::kFailed);
+        break;
+      }
+      PreemptSequence(victim);
+    }
   }
 }
 
-void Engine::RecoverSampleFailure(std::span<const float> block,
-                                  std::int64_t vocab) {
-  // The forward committed every member's K/V; only sampling faulted for some
-  // row. Re-sample per row over the SAME committed logits (bit-identical: the
-  // batched sampler runs this very pipeline), delivering healthy rows and
-  // failing only the bad ones. (The per-row-status BatchedSampler refinement is
-  // M9-T10; until then the engine re-derives per-row status here.)
+std::int64_t Engine::PreForwardLength(const Entry& entry) const {
   for (std::size_t b = 0; b < pass_entries_.size(); ++b) {
-    Entry& entry = *pass_entries_[b];
-    Sequence& seq = *entry.seq;
-    const std::span<const float> row{
-        block.data() + (b * static_cast<std::size_t>(vocab)),
-        static_cast<std::size_t>(vocab)};
-    auto next = seq.sampler().SampleWithLogprobs(
-        row, sampling::SampleContext{.prompt_ids = seq.request().prompt_ids,
-                                     .generated_ids = seq.generated_ids()});
-    if (!next.ok()) {
-      seq.set_error(next.status());
-      seq.Transition(SeqState::kFailed);
+    if (pass_entries_[b] == &entry) {
+      return pass_pre_len_[b];
+    }
+  }
+  return 0;  // unreachable: entry is always a member of pass_entries_.
+}
+
+RequestId Engine::PickPreemptionVictim(RequestId exclude) const {
+  // The latest-arrived RUNNING sequence other than `exclude` — the §6.2 victim
+  // policy. Finished/failed sequences still linger in running_ until step 7, so
+  // guard on the live kRunning state.
+  RequestId victim = 0;
+  std::uint64_t victim_arrival = 0;
+  for (const RequestId id : running_) {
+    if (id == exclude) {
       continue;
     }
-    DeliverSampled(entry, *std::move(next));
+    const Sequence& seq = *requests_.at(id)->seq;
+    if (seq.state() != SeqState::kRunning) {
+      continue;
+    }
+    const std::uint64_t arrival = seq.request().arrival_index;
+    if (victim == 0 || arrival > victim_arrival) {
+      victim = id;
+      victim_arrival = arrival;
+    }
   }
+  return victim;
 }
 
-void Engine::ExecuteAndDeliver(Entry& entry, bool prefill) {
+bool Engine::ExecuteAndDeliver(Entry& entry, bool prefill) {
   Sequence& seq = *entry.seq;
   kvcache::KvCache& cache = *seq.cache();
 
@@ -624,15 +674,17 @@ void Engine::ExecuteAndDeliver(Entry& entry, bool prefill) {
   };
   auto logits = model_.forward(req);
   if (!logits.ok()) {
-    // A per-request forward fault (bad id, position overflow, or this
-    // sequence's own append exhausting the pool) fails only this sequence, not
-    // the loop (ADR-003; §11.2). For a private pool the scheduler preempts
-    // proactively so a decode append never exhausts here; routing a shared-pool
-    // decode exhaustion to graceful preemption instead of failure is
-    // M9-T10 (§11.2).
+    // A decode append that exhausted the pool is not (yet) a failure: signal
+    // the caller so it can preempt a younger sequence and retry (§11.2). A
+    // failed append writes nothing (M8-T08), so a retry is clean. Prefill
+    // exhaustion, and every other fault (bad id, position overflow), fail this
+    // sequence only, not the loop (ADR-003).
+    if (!prefill && core::IsResourceExhausted(logits.status())) {
+      return false;
+    }
     seq.set_error(logits.status());
     seq.Transition(SeqState::kFailed);
-    return;
+    return true;
   }
 
   auto next = seq.sampler().SampleWithLogprobs(
@@ -642,9 +694,10 @@ void Engine::ExecuteAndDeliver(Entry& entry, bool prefill) {
   if (!next.ok()) {
     seq.set_error(next.status());
     seq.Transition(SeqState::kFailed);
-    return;
+    return true;
   }
   DeliverSampled(entry, *std::move(next));
+  return true;
 }
 
 void Engine::DeliverSampled(Entry& entry, sampling::SampleResult next) {

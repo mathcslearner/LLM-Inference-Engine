@@ -3339,3 +3339,81 @@ existing single-preemption `PreemptionResumesWithIdenticalOutput` now also asser
 `num_preemptions() == 1`. design scheduler-runtime.md §6.4 + §10.4 "as built" +
 §11.2 reassignment note; format + scoped tidy clean (`engine.h` header edit → its
 three includers swept, EXIT=0 no project diagnostics).
+
+### M9-T10 — Cancellation & per-request failure isolation (2026-08-19)
+
+The final M9 ticket. Cancellation *mechanics* (boundary-drain →
+`RetireCancelled` → RAII block return) already landed in M9-T03/T08, and basic
+forward-fault isolation in M9-T08, so T10 is three changes plus the missing
+acceptance tests: the `BatchedSampler` per-row status return, the reactive
+decode-exhaustion → preemption routing (deferred from T09 per §10.4), and the
+cancel-in-every-state / fault-isolation coverage.
+
+**`BatchedSampler` per-row status (the §11.2 / §14 planned interface
+refinement).** `Sample` gained a caller-owned `std::span<core::Status>
+row_status` output (size `rows.size()`) alongside `out`, and now **always writes
+every row's outcome** — `Ok` (with `out[b]` filled) on success, or that row's
+recoverable error (bad history id → InvalidArgument, non-finite row → Internal,
+empty row → InvalidArgument) otherwise. The batch-level `Status` return now
+covers only the front-loaded shape/null validation of the engine-built inputs
+(`vocab <= 0`, `out`/`row_status`/`logits` size mismatches, a null sampler), so
+a non-Ok return is an engine bug (`CHECK`ed by the caller), not request data.
+This replaces M7-T06's "return the lowest-index row error, `out` unspecified on
+any error" contract: one bad row no longer discards the batch. The change is
+additive to the signature (the reference single-sequence `Sampler` is untouched)
+and the parallel-region body simplifies — it writes the caller's `row_status[b]`
+directly and no longer scans for a first error. All four call sites updated
+(`runtime/engine.cpp`, `batched_sampler_test`, `optimized_model_test`,
+`bench_sampling`). model-execution.md §15.6 records the new contract.
+
+**Engine consumes per-row status; `RecoverSampleFailure` deleted.**
+`RunBatchPass` reads `pass_row_status_` (a reused, grown-on-demand vector) per
+row: healthy rows deliver straight from the batched pass (same tokens
+bit-for-bit — the batched sampler runs `detail::SampleRow` itself), a faulting
+row transitions **only its own sequence** to FAILED. The M9-T08 stopgap
+`RecoverSampleFailure` — which re-derived per-row status by re-running the
+reference sampler over the committed logits — is removed entirely; the batched
+sampler now reports it directly.
+
+**Reactive decode-exhaustion routing (§10.4 reassignment).** A decode-time
+`ResourceExhausted` surfaces in `ExecuteAndDeliver` (the forward-fault fallback
+re-run), which now returns `false` for that case rather than failing.
+`RecoverForwardFailure` responds by preempting the **latest-arrived other
+running sequence** (the §6.2 victim policy) via a new shared `PreemptSequence`
+helper (also now used by `Step`'s step-4 scheduled preemptions) to free blocks,
+then retries the exhausting member's decode; only the **sole-occupant** case (no
+other running sequence to evict) fails the request with `ResourceExhausted`. A
+failed append writes nothing (paged §6.2, M8-T08), so the retry is clean; a
+victim sitting later in the recovery batch is skipped by a `kRunning` state
+guard and resumes next step. Prefill exhaustion and every non-exhaustion fault
+still fail only that sequence. `PickPreemptionVictim`/`PreForwardLength` are the
+two new private helpers. This path is unreachable for the engine's own exact
+pool; it is testable deterministically via a mock model that drains the pool
+from inside its own decode forward, modelling a shared/externally-drained pool.
+
+**Tests (+9 registrations, 1354 → 1363 ctest green).** `runtime_engine_test`
+(mock, `runtime` label): `CancelAfterPrefillReclaimsPromptBlocks` (RUNNING-state
+cancel frees the prompt block at the next boundary, a co-resident request keeps
+its own block and completes), `CancelWhilePreempted` (cancel a cache-less
+PREEMPTED sequence, no double-free, the survivor unchanged),
+`DecodeFaultIsolatedFromHealthyNeighbors` (a poison token reached on the second
+decode fails one row of a batched decode pass; two healthy neighbors match their
+standalone `Generate`), `SharedPoolDecodeExhaustionPreemptsYounger` (the drain
+hook forces a decode exhaustion → the younger is reactively preempted, both
+complete with standalone-identical output, `num_preemptions() >= 1`),
+`SoleOccupantDecodeExhaustionFails` (a single request drained to zero free fails
+`ResourceExhausted`, `num_preemptions() == 0`, no leaks once released); the
+existing `PerRequestFaultIsolated` now drives the new per-row path. The
+`CannedModel` mock gained an `arm_pool_drain`/`release_drained` hook (grabs all
+free blocks before a decode append, held until released). `runtime_batching_test`
+(real fixtures, **SCALAR_PASS**): `Llama/Qwen MidFlightCancelIsolation` — cancel
+two of eight concurrent requests mid-flight; every survivor's output is
+bit-identical to its standalone `Generate`, blocks reclaimed (+4: 2 cases ×2 for
+the forced-scalar pass). `batched_sampler_test`: `SurfacesPerRowErrors` rewritten
+as `IsolatesPerRowErrors` (a NaN row and a bad-history row in an 8-row batch each
+record their error while every healthy row samples normally and matches the
+reference; batch-level return stays Ok), and a `row_status` size-mismatch case
+added to `RejectsShapeMismatches`. design scheduler-runtime.md §11.3 "as built" +
+§14 (deferred item marked landed) + model-execution.md §15.6; format + scoped
+tidy clean (`batched_sampler.h`/`engine.h` header edits → full includer sets
+swept, EXIT=0 no project diagnostics). **M9 complete.**

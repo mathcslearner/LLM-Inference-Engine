@@ -1323,6 +1323,46 @@ built itself, an illegal state transition) remains a `CHECK` — those are bugs,
 request data. M9-T10 acceptance: an injected per-request fault leaves every other
 concurrent request's output unchanged.
 
+### 11.3 As built (M9-T10)
+
+The cancellation *mechanics* (boundary-drain → `RetireCancelled` → RAII block
+return) already existed from M9-T03/T08; M9-T10 added the per-row sampler status,
+the reactive decode-exhaustion routing, and the acceptance coverage.
+
+- **`BatchedSampler` per-row status (the §11.2 planned refinement).** `Sample`
+  gained a caller-owned `std::span<core::Status> row_status` output (size
+  `rows.size()`) and now **always fills every row** — `Ok` (with `out[b]` set) or
+  that row's recoverable error. The batch-level return covers only front-loaded
+  shape/null validation of the engine-built inputs, so the engine `CHECK`s it. The
+  engine's `RunBatchPass` reads `row_status` per row: healthy rows deliver from the
+  batched pass, a faulting row transitions only its own sequence to FAILED. The
+  M9-T08 stopgap `RecoverSampleFailure` (which re-derived per-row status by
+  re-running the reference sampler) is **deleted** — the batched sampler now
+  reports it directly. (model-execution.md §15.6 records the interface change.)
+- **Reactive decode-exhaustion routing (§10.4 reassignment).** A decode-time
+  `ResourceExhausted` surfaces in `ExecuteAndDeliver` (the forward-fault fallback
+  path), which now returns `false` for that case instead of failing. Its caller
+  `RecoverForwardFailure` preempts the **latest-arrived other running sequence**
+  (the §6.2 victim policy, via the shared `PreemptSequence` helper) to free blocks
+  and retries; only the **sole-occupant** case — no other running sequence to
+  evict — fails the request with `ResourceExhausted`. A failed append writes
+  nothing (paged §6.2, M8-T08), so the retry is clean; a victim sitting later in
+  the recovery batch is skipped by a `kRunning` state guard (it resumes next step).
+  Prefill exhaustion, and every non-exhaustion fault, still fail only that
+  sequence. This path is unreachable for the engine's own pool (the scheduler is
+  exact); it is exercised deterministically by a mock model that drains the pool
+  from inside its decode forward, modelling a shared/externally-drained pool.
+- **Acceptance (§13).** `runtime_engine_test` (mock): cancel during WAITING /
+  after-prefill (RUNNING) / decode / PREEMPTED each reclaims blocks
+  (`pool.stats().used` verified, with a co-resident request proving whose blocks
+  freed); a decode-pass sampler fault fails only the faulting sequence while two
+  healthy neighbors match their standalone `Generate`; the shared-pool exhaustion
+  preempts the younger (both complete, `num_preemptions() >= 1`) and the
+  sole-occupant case fails with `ResourceExhausted`; no leaks throughout.
+  `runtime_batching_test` (real fixtures, SCALAR_PASS): cancelling two of eight
+  concurrent requests mid-flight leaves every survivor's output bit-identical to
+  its standalone `Generate`, blocks reclaimed.
+
 ---
 
 ## 12. Interactions with later milestones
@@ -1409,7 +1449,8 @@ scalar pass (`ENGINE_FORCE_ISA=scalar`) covers the shipped bytes on both CI
 - **Variable-tokens-per-step (speculative)** — M15-T06 (§6.5, §12).
 - **Priority / fairness beyond FCFS, head-of-line-blocking mitigation** — future;
   v1 is strict FCFS with preempted-at-head (§6.2).
-- **`BatchedSampler` per-row status return** — an M9-T10 additive change to the
-  M7-T06 interface (§11.2), flagged so it is a planned refinement.
+- **`BatchedSampler` per-row status return** — ✅ landed in M9-T10 (§11.3): the
+  additive `row_status` span, always filled per row, replacing the M7-T06
+  lowest-index-error return.
 - **Graceful drain-on-shutdown** — M10's `serve`; the runtime `Stop` is abort-and-
   close (§5.2).

@@ -1173,7 +1173,7 @@ prompt+generated-so-far. Wire scheduler preemption decisions to engine actions.
 **Acceptance criteria:**
 - Test with an artificially tiny block pool: requests all complete correctly despite forced preemptions; preempted-request output identical to unpreempted run (greedy); no block leaks (pool stats zero at end).
 
-### M9-T10 · Cancellation & per-request failure isolation
+### M9-T10 · Cancellation & per-request failure isolation — ✅ DONE (2026-08-19)
 Cancel promptly frees blocks and closes the channel with `cancelled`; a per-request
 error (e.g. sampler edge case) fails that request only, never the engine loop.
 **Depends on:** M9-T09.
