@@ -1172,19 +1172,53 @@ behind an existing subsystem):
   ctest green**. No BASELINES entry (whole-step throughput is M9-T08). design
   scheduler-runtime.md §8.2/§8.4 + paged-kv-cache.md §9.4 +
   optimized-cpu-execution.md §8 + model-execution.md §5.4 "as built"; format +
-  scoped tidy clean (six headers edited → includer sets swept).
+  scoped tidy clean (six headers edited → includer sets swept). T08 engine loop
+  integration (2026-08-19): `Engine::Step()`'s M9-T03/T04 per-sequence
+  placeholder execution (steps 5–6) replaced **in place** by the two batched
+  passes of §9.1 — every request now flows through the batched forward + batched
+  sampler; steps 1–4 (drain/retire-cancelled/schedule/preempt) unchanged. Pure
+  composition of the M9-T05…T07 pieces in `src/runtime/engine.{h,cpp}` (no new
+  `src/` file, no kernel, no ADR edge). `RunBatchPass` (per pass):
+  `BuildPassInputs` → `BatchAssembler::Assemble{Prefill,Decode}` (M9-T05) →
+  `MakeForwardRequest(kLast)` → `model.forward` (M9-T07 batched `[B,V]`) → one
+  `BatchedSampler::Sample` (M7-T06) → per-row `DeliverSampled` (the single-seq
+  `Generate` tail); the engine thread owns one reused `assembler_` +
+  `batched_sampler_` + per-pass scratch (grown-on-demand, allocation-free
+  steady-state decode, §5.2). **B==1 has no fast path** — a single-seq step runs
+  the batched code, so the ~26 existing T03/T04 mock tests now drive the batched
+  loop unchanged; `ExecuteAndDeliver` (single-seq forward) survives **only** as
+  the fault fallback. **Two-tier fault recovery** (T08's §11.2 slice; the
+  `BatchedSampler` per-row-status change is M9-T10): a *forward* fault
+  (`RecoverForwardFailure`) truncates every member back to its snapshotted
+  pre-forward length then re-runs each via `ExecuteAndDeliver` (healthy members
+  bit-identical, only the faulter fails; a decode exhaustion is a per-request
+  failure here, preemption is M9-T09); a *sampler* fault (`RecoverSampleFailure`)
+  re-samples each row over the **same** committed `[B,V]` logits (bit-identical,
+  same `detail::SampleRow`), failing only bad rows — the path
+  `PerRequestFaultIsolated` (NaN-logits request batched with a healthy one)
+  exercises. Deviation: RUNNING-cancel stays top-of-step (not moved to step end
+  as the T03 note sketched) — commands drain only at boundaries so no in-flight
+  batch exists, top-of-step is equivalent (§9.4 as-built). Tests: new
+  `runtime_batching_test.cpp` (`runtime`, **SCALAR_PASS** — first runtime suite
+  in the forced-scalar pass): 8 concurrent greedy == 8 sequential `Generate`
+  token-for-token on tiny-llama + tiny-qwen2 optimized, staggered mid-flight
+  arrivals, recorded throughput **≈0.34×** the 8-sequential wall-clock (< 8×,
+  §9.3), pool `used==0`; `runtime_engine_test.cpp` +2 mock CB cases and a batched
+  `CannedModel` path so its whole 28-case suite runs on the batched loop. **1335
+  → 1345 ctest green.** design scheduler-runtime.md §9.4 "as built"; format +
+  scoped tidy clean.
 
-Next up: **M9-T08** (engine loop integration) — wire the continuous-batching
-loop in `Engine::step` (`src/runtime/engine.cpp`): schedule → assemble (the
-M9-T05 `BatchAssembler`) → forward (prefill pass then decode pass, both via the
-M9-T07 batched `model::forward`) → sample (the M7-T06 `BatchedSampler` over the
-`[B, V]` logits) → append tokens + deliver to per-request channels → retire
-finished sequences. Replace the M9-T03/T04 placeholder per-sequence execution in
-`Step` with the two batched passes (§9.1 pseudocode). Acceptance (§13 M9-T08 /
-ROADMAP): an integration test with **8 concurrent greedy requests producing
-outputs identical to running each sequentially** (the CB invariant — guaranteed
-bit-for-bit by §8.5, already proven at the model level in M9-T07); requests
-arriving mid-flight join batching without disturbing running sequences (staggered
-submission); and a recorded throughput-sanity ratio (8 concurrent complete in
-well under 8× single-request time). Conform to `docs/design/scheduler-runtime.md`
-§9. Per ROADMAP M9-T08.
+Next up: **M9-T09** (preemption & recomputation) — validate preemption under the
+now-batched loop and add the pool-sizing config check. The scheduler/engine
+preemption mechanics already landed in M9-T04 (`scheduler` emits `preempt`;
+`Engine::Step` applies `ReleaseCache` → `kPreempted` → head of `waiting_`, and
+the prefill pass re-prefills `prompt ++ generated` so a resumed sequence's next
+token is bit-identical to an uninterrupted run — the §10.2 resumable seam). T09
+adds: the config-sizing **liveness** guarantee (§10.3 — the pool holds at least
+one `max_model_len` sequence, so the oldest-alone sequence never preempts,
+enforced where the pool is sized, not in the pure policy), and the acceptance
+test (§13 M9-T09 / ROADMAP): an **artificially tiny block pool** forces repeated
+preemptions, all requests still complete correctly, each preempted request's
+greedy output is **identical** to an unpreempted run, and `pool.stats().used == 0`
+at end (no block leaks). Conform to `docs/design/scheduler-runtime.md` §10. Per
+ROADMAP M9-T09.

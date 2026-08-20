@@ -2,11 +2,14 @@
 
 #include "core/check.h"
 #include "core/status.h"
+#include "engine/batch.h"
 #include "engine/stop.h"
 #include "kvcache/block_pool.h"
+#include "kvcache/kv_cache.h"
 #include "model/model.h"
 #include "runtime/channel.h"
 #include "runtime/request.h"
+#include "sampling/batched_sampler.h"
 #include "sampling/logprobs.h"
 #include "sampling/sampler.h"
 #include "scheduler/scheduler.h"
@@ -26,12 +29,13 @@
 #include <variant>
 #include <vector>
 
-// Engine loop & submission queue (M9-T03; design:
+// Engine loop & submission queue (M9-T03/T08; design:
 // docs/design/scheduler-runtime.md §5, §9.1). The single engine thread owns all
 // mutable state (the request map, the block pool, every sequence and its cache,
-// the samplers); client threads only enqueue commands and drain their own
-// channel. `Step()` is the §9.1 loop with the T03 placeholders (FCFS admission,
-// per-sequence execution) the later tickets substitute in place.
+// the samplers, the reused assembler + batched sampler); client threads only
+// enqueue commands and drain their own channel. `Step()` is the full §9.1
+// continuous-batching loop: drain → retire-cancelled → schedule → preempt →
+// batched prefill pass → batched decode pass → retire-terminal.
 
 namespace engine::runtime {
 
@@ -251,26 +255,33 @@ bool Engine::Step() {
   //    admitted sequence samples its first token from this forward and joins
   //    the decode batch next step; a resumed (preempted) sequence re-prefills
   //    its whole progress and samples the next token, bit-identical to an
-  //    uninterrupted run (§10.2, the KV invariant).
+  //    uninterrupted run (§10.2, the KV invariant). Assemble all admitted
+  //    sequences into one ragged forward (§7 prefill pass).
+  pass_entries_.clear();
   for (const auto& p : out.prefill) {
     Entry& entry = *requests_.at(p.id);
     std::erase(waiting_, p.id);
     entry.seq->EnsureCache(&pool_);
     entry.seq->Transition(SeqState::kRunning);
     running_.push_back(p.id);
-    ExecuteAndDeliver(entry, /*prefill=*/true);
+    pass_entries_.push_back(&entry);
   }
+  RunBatchPass(/*prefill=*/true);
 
-  // 6. Decode pass over the scheduler's decode set. Skip any that finished
-  //    during their own prefill earlier this step (a sequence is never both
-  //    admitted and decoded in one step — prefill produces its first token,
-  //    decode advances the already-running set, design §7).
+  // 6. Decode pass over the scheduler's decode set — one batched forward
+  //    advancing every running sequence by one token (§7 decode pass). The set
+  //    was snapshotted before admission, so a freshly admitted sequence is not
+  //    in it (it produced its first token via prefill and decodes next step);
+  //    the state guard also drops any decode-set member that finished/failed
+  //    earlier this step.
+  pass_entries_.clear();
   for (const RequestId id : out.decode) {
     Entry& entry = *requests_.at(id);
     if (entry.seq->state() == SeqState::kRunning) {
-      ExecuteAndDeliver(entry, /*prefill=*/false);
+      pass_entries_.push_back(&entry);
     }
   }
+  RunBatchPass(/*prefill=*/false);
 
   RetireTerminal();  // 7. close + erase finished / failed sequences
   return true;
@@ -302,12 +313,17 @@ void Engine::DrainCommands() {
 }
 
 void Engine::RetireCancelled() {
-  // T03 runs execution per sequence, so there is no in-flight batch at a step
-  // boundary: a cancel requested for a sequence in *any* live state is honored
-  // now (WAITING/PREEMPTED had no forward this step; a RUNNING sequence's last
-  // forward already completed on the previous step). The batched loop (M9-T08)
-  // moves RUNNING-cancel handling to the end of the step, where a cancel that
-  // lands during the forward is applied at the next boundary (§11.1).
+  // Commands are drained only at the top of a step (§5.2), so there is never an
+  // in-flight batch when a cancel is applied: a cancel requested for a sequence
+  // in *any* live state is honored here (WAITING/PREEMPTED had no forward this
+  // step; a RUNNING sequence's last forward completed on the previous step).
+  // A cancel that arrives *during* a batched forward simply lands in the queue
+  // and is applied at the next boundary — the in-flight token is produced but
+  // never delivered (the channel closes kCancelled first), so cancel latency
+  // stays ≤ one step (§11.1). Keeping RUNNING-cancel here (rather than after
+  // the forward, as the M9-T08 plan sketched) is simpler and equivalent given
+  // the boundary-drain, and is recorded as such in the design's §9 as-built
+  // note.
   std::vector<RequestId> retired;
   for (auto& [id, entry] : requests_) {
     if (entry->cancel_requested && !entry->seq->is_terminal()) {
@@ -371,25 +387,177 @@ scheduler::SchedulerOutput Engine::ScheduleStep() {
   return scheduler::Scheduler{}.Schedule(inputs);
 }
 
+void Engine::BuildPassInputs(bool prefill) {
+  pass_seqs_.clear();
+  pass_seqs_.reserve(pass_entries_.size());
+  if (!prefill) {
+    // Decode: each running sequence feeds its single last-sampled token. The
+    // token value lives in `generated_ids().back()` (stable — the assembler
+    // copies it, and no vector is mutated before then); positions come from the
+    // cache length inside the assembler (§8.2).
+    for (Entry* e : pass_entries_) {
+      Sequence& seq = *e->seq;
+      const std::vector<std::int32_t>& gen = seq.generated_ids();
+      pass_seqs_.push_back(::engine::engine::BatchSeqInput{
+          .token_ids = std::span<const std::int32_t>{&gen.back(), 1},
+          .cache = seq.cache(),
+          .sampler = &seq.sampler(),
+          .context = sampling::SampleContext{
+              .prompt_ids = seq.request().prompt_ids, .generated_ids = gen}});
+    }
+    return;
+  }
+
+  // Prefill: each sequence feeds the whole context to (re)materialize — the
+  // prompt for a fresh admission, or prompt ++ generated when resuming a
+  // preempted sequence into a fresh cache (design §10.2; the KV invariant makes
+  // the re-prefilled prefix bit-identical). Concatenations are staged into one
+  // flat buffer reserved to the exact total up front, so its `data()` stays
+  // stable while the spans below point into it.
+  prefill_tokens_.clear();
+  prefill_ranges_.clear();
+  std::size_t total = 0;
+  for (Entry* e : pass_entries_) {
+    total +=
+        e->seq->request().prompt_ids.size() + e->seq->generated_ids().size();
+  }
+  prefill_tokens_.reserve(total);
+  for (Entry* e : pass_entries_) {
+    const std::size_t off = prefill_tokens_.size();
+    const std::vector<std::int32_t>& prompt = e->seq->request().prompt_ids;
+    const std::vector<std::int32_t>& gen = e->seq->generated_ids();
+    prefill_tokens_.insert(prefill_tokens_.end(), prompt.begin(), prompt.end());
+    prefill_tokens_.insert(prefill_tokens_.end(), gen.begin(), gen.end());
+    prefill_ranges_.emplace_back(off, prefill_tokens_.size() - off);
+  }
+  for (std::size_t b = 0; b < pass_entries_.size(); ++b) {
+    Sequence& seq = *pass_entries_[b]->seq;
+    const auto [off, len] = prefill_ranges_[b];
+    pass_seqs_.push_back(::engine::engine::BatchSeqInput{
+        .token_ids =
+            std::span<const std::int32_t>{prefill_tokens_.data() + off, len},
+        .cache = seq.cache(),
+        .sampler = &seq.sampler(),
+        .context =
+            sampling::SampleContext{.prompt_ids = seq.request().prompt_ids,
+                                    .generated_ids = seq.generated_ids()}});
+  }
+}
+
+void Engine::RunBatchPass(bool prefill) {
+  if (pass_entries_.empty()) {
+    return;  // an empty pass is legal (§7) — a step may be prefill-only or
+             // decode-only.
+  }
+  BuildPassInputs(prefill);
+
+  // Assembly is over engine-built inputs (non-null cache/sampler, non-empty
+  // tokens, T==1 for decode), so a failure is an engine bug, not request data.
+  const core::Status assembled = prefill
+                                     ? assembler_.AssemblePrefill(pass_seqs_)
+                                     : assembler_.AssembleDecode(pass_seqs_);
+  CHECK(assembled.ok(), "batch assembly failed: {}", assembled.ToString());
+
+  // Snapshot each cache's committed length before the forward, so a mid-batch
+  // forward fault can roll every member back to a clean state before the
+  // per-sequence re-run (§11.2). (The forward appends K/V per sequence inside
+  // itself, so a fault can leave one cache mid-append.)
+  pass_pre_len_.clear();
+  for (Entry* e : pass_entries_) {
+    pass_pre_len_.push_back(e->seq->cache()->length());
+  }
+
+  auto logits = model_.forward(
+      assembler_.inputs().MakeForwardRequest(model::LogitsMode::kLast));
+  if (!logits.ok()) {
+    RecoverForwardFailure(prefill);
+    return;
+  }
+
+  // kLast batched forward → `[B, V]`, one logits row per sequence, row-major
+  // (model-execution.md §5.2). The shape is a model-contract guarantee, so a
+  // mismatch is an engine/model bug → CHECK.
+  const auto num_seqs = static_cast<std::int64_t>(pass_entries_.size());
+  const std::int64_t vocab = model_.config().vocab_size;
+  CHECK(logits->numel() == num_seqs * vocab,
+        "batched kLast forward returned {} logits, expected {}x{}",
+        logits->numel(), num_seqs, vocab);
+  const std::span<const float> block{
+      logits->data_ptr<float>(), static_cast<std::size_t>(num_seqs * vocab)};
+
+  // One batched sample over the whole block — same tokens, bit-for-bit, the
+  // single-sequence sampler would pick (§8.4). On a per-row sampler fault
+  // (e.g. a non-finite logits row) it reports the first bad row and leaves
+  // `out` unspecified; re-sample per row so only the bad rows fail (§11.2).
+  pass_results_.assign(static_cast<std::size_t>(num_seqs),
+                       sampling::SampleResult{});
+  const core::Status sampled = batched_sampler_.Sample(
+      block, vocab, assembler_.inputs().sample_rows, pass_results_);
+  if (!sampled.ok()) {
+    RecoverSampleFailure(block, vocab);
+    return;
+  }
+
+  for (std::size_t b = 0; b < pass_entries_.size(); ++b) {
+    DeliverSampled(*pass_entries_[b], std::move(pass_results_[b]));
+  }
+}
+
+void Engine::RecoverForwardFailure(bool prefill) {
+  // A batched forward that faulted mid-batch may have committed K/V for earlier
+  // members and left one cache mid-append. Roll every member back to its
+  // pre-forward length (clearing any partial append state), then re-run each as
+  // a standalone single-sequence forward: healthy members deliver
+  // bit-identically (§8.5), and only the genuinely faulting member fails
+  // (ADR-003, §11.2). Routing a decode-time pool exhaustion to preemption
+  // rather than failure is M9-T09.
+  for (std::size_t b = 0; b < pass_entries_.size(); ++b) {
+    Entry& entry = *pass_entries_[b];
+    // `truncate` to a length <= the current committed length always succeeds
+    // and resets the in-progress-forward state; ignore its status.
+    (void)entry.seq->cache()->truncate(pass_pre_len_[b]);
+    ExecuteAndDeliver(entry, prefill);
+  }
+}
+
+void Engine::RecoverSampleFailure(std::span<const float> block,
+                                  std::int64_t vocab) {
+  // The forward committed every member's K/V; only sampling faulted for some
+  // row. Re-sample per row over the SAME committed logits (bit-identical: the
+  // batched sampler runs this very pipeline), delivering healthy rows and
+  // failing only the bad ones. (The per-row-status BatchedSampler refinement is
+  // M9-T10; until then the engine re-derives per-row status here.)
+  for (std::size_t b = 0; b < pass_entries_.size(); ++b) {
+    Entry& entry = *pass_entries_[b];
+    Sequence& seq = *entry.seq;
+    const std::span<const float> row{
+        block.data() + (b * static_cast<std::size_t>(vocab)),
+        static_cast<std::size_t>(vocab)};
+    auto next = seq.sampler().SampleWithLogprobs(
+        row, sampling::SampleContext{.prompt_ids = seq.request().prompt_ids,
+                                     .generated_ids = seq.generated_ids()});
+    if (!next.ok()) {
+      seq.set_error(next.status());
+      seq.Transition(SeqState::kFailed);
+      continue;
+    }
+    DeliverSampled(entry, *std::move(next));
+  }
+}
+
 void Engine::ExecuteAndDeliver(Entry& entry, bool prefill) {
   Sequence& seq = *entry.seq;
   kvcache::KvCache& cache = *seq.cache();
 
-  // Build this step's forward inputs. Prefill runs the whole prompt at absolute
+  // Build this step's single-sequence forward inputs (the fallback path, and
+  // the shape `Generate` builds). Prefill runs the whole context at absolute
   // positions `0..T-1`; decode runs the single last-produced token at the
-  // running cache position (`== num_computed_tokens`). Both request kLast — one
-  // logits row to sample from. This is exactly what `Generate` builds.
+  // running cache position. Both request kLast — one logits row to sample.
   std::vector<std::int32_t> positions;
   std::vector<std::int32_t> prefill_tokens;
   std::span<const std::int32_t> token_ids;
   std::int32_t decode_token = 0;
   if (prefill) {
-    // Prefill covers the whole context to re-materialize: the prompt for a
-    // fresh admission, or prompt ++ generated when resuming a preempted
-    // sequence into a fresh cache (design §10.2). The re-prefilled prefix
-    // reproduces the same K/V bit-for-bit (the KV invariant), so the next
-    // sampled token is identical to an uninterrupted run. A fresh sequence has
-    // empty `generated_ids()`, so this reduces to prefilling the prompt.
     const auto& prompt = seq.request().prompt_ids;
     const auto& generated = seq.generated_ids();
     prefill_tokens.reserve(prompt.size() + generated.size());
@@ -418,14 +586,12 @@ void Engine::ExecuteAndDeliver(Entry& entry, bool prefill) {
     // A per-request forward fault (bad id, position overflow, or this
     // sequence's own append exhausting the pool) fails only this sequence, not
     // the loop (ADR-003; §11.2). Graceful preemption of a decode exhaustion is
-    // M9-T09; in T03 it surfaces as a per-request failure.
+    // M9-T09; here it surfaces as a per-request failure.
     seq.set_error(logits.status());
     seq.Transition(SeqState::kFailed);
     return;
   }
 
-  // Sample before appending: the sampler's penalty history keys on the tokens
-  // generated *so far* (this token excluded), exactly as `Generate` orders it.
   auto next = seq.sampler().SampleWithLogprobs(
       LastRow(*logits),
       sampling::SampleContext{.prompt_ids = seq.request().prompt_ids,
@@ -435,9 +601,16 @@ void Engine::ExecuteAndDeliver(Entry& entry, bool prefill) {
     seq.Transition(SeqState::kFailed);
     return;
   }
-  seq.AppendGenerated(next->token);
+  DeliverSampled(entry, *std::move(next));
+}
 
-  auto step = seq.stop().Observe(next->token, seq.num_generated());
+void Engine::DeliverSampled(Entry& entry, sampling::SampleResult next) {
+  Sequence& seq = *entry.seq;
+  // Append after sampling: the sampler's penalty history keys on the tokens
+  // generated *so far* (this token excluded), exactly as `Generate` orders it.
+  seq.AppendGenerated(next.token);
+
+  auto step = seq.stop().Observe(next.token, seq.num_generated());
   if (!step.ok()) {
     seq.set_error(step.status());
     seq.Transition(SeqState::kFailed);
@@ -452,9 +625,9 @@ void Engine::ExecuteAndDeliver(Entry& entry, bool prefill) {
                    std::move(step->matched_stop));
   }
 
-  OutputItem item{.token_id = next->token,
+  OutputItem item{.token_id = next.token,
                   .text_delta = std::move(delta),
-                  .logprobs = std::move(next->logprobs)};
+                  .logprobs = std::move(next.logprobs)};
   seq.channel()->Push(std::move(item));
 
   if (finished) {

@@ -110,8 +110,31 @@ class CannedModel final : public Model {
 
   [[nodiscard]] StatusOr<Tensor> forward(
       const ForwardRequest& request) override {
+    // The batched path (cu_seqlens/caches non-empty) is realized exactly like
+    // ReferenceModel::ForwardBatched — each member run as a standalone forward
+    // over its subspan and its own cache, per-member logits concatenated into
+    // `[B, V]` (kLast) — so the batched loop's output equals sequential runs.
+    if (!request.caches.empty() || !request.cu_seqlens.empty()) {
+      return ForwardBatched(request);
+    }
+    return ForwardSingle(request);
+  }
+
+  [[nodiscard]] const ModelConfig& config() const override { return config_; }
+  [[nodiscard]] CacheGeometry cache_geometry() const override {
+    return {.num_layers = kLayers,
+            .num_kv_heads = kKvHeads,
+            .head_dim = kHeadDim,
+            .dtype = DataType::kFloat32};
+  }
+
+ private:
+  // One sequence's forward: append (zeroed) K/V layer by layer to its cache,
+  // then a one-hot `[rows, V]` whose argmax is `(last_token + 1) % V` (or an
+  // all-NaN row when the last token is the poison token — the fault path).
+  [[nodiscard]] StatusOr<Tensor> ForwardSingle(
+      const ForwardRequest& request) const {
     const auto t = static_cast<std::int64_t>(request.token_ids.size());
-    // Append this call's K/V, layer by layer, exactly as a real model does.
     for (int layer = 0; layer < kLayers; ++layer) {
       const Tensor k =
           Unwrap(ops::zeros(Shape{t, kKvHeads, kHeadDim}, DataType::kFloat32));
@@ -140,15 +163,48 @@ class CannedModel final : public Model {
     return logits;
   }
 
-  [[nodiscard]] const ModelConfig& config() const override { return config_; }
-  [[nodiscard]] CacheGeometry cache_geometry() const override {
-    return {.num_layers = kLayers,
-            .num_kv_heads = kKvHeads,
-            .head_dim = kHeadDim,
-            .dtype = DataType::kFloat32};
+  // The batched contract: slice the flattened tokens/positions by cu_seqlens,
+  // run each member through `ForwardSingle` over its own cache, and concatenate
+  // the per-member logits into `[out_rows, V]` (out_rows = B for kLast).
+  [[nodiscard]] StatusOr<Tensor> ForwardBatched(
+      const ForwardRequest& request) const {
+    const auto num_seqs = static_cast<std::int64_t>(request.caches.size());
+    const bool last_only = request.logits_mode == LogitsMode::kLast;
+    const std::int64_t t_dim =
+        request.cu_seqlens[static_cast<std::size_t>(num_seqs)];
+    const std::int64_t out_rows = last_only ? num_seqs : t_dim;
+    Tensor logits =
+        Unwrap(ops::zeros(Shape{out_rows, kVocab}, DataType::kFloat32));
+    auto* out = logits.data_ptr<float>();
+    std::int64_t row_cursor = 0;
+    for (std::int64_t b = 0; b < num_seqs; ++b) {
+      const std::int64_t t0 = request.cu_seqlens[static_cast<std::size_t>(b)];
+      const std::int64_t t1 =
+          request.cu_seqlens[static_cast<std::size_t>(b + 1)];
+      const ForwardRequest sub{
+          .token_ids = request.token_ids.subspan(
+              static_cast<std::size_t>(t0), static_cast<std::size_t>(t1 - t0)),
+          .positions = request.positions.subspan(
+              static_cast<std::size_t>(t0), static_cast<std::size_t>(t1 - t0)),
+          .cache = request.caches[static_cast<std::size_t>(b)],
+          .logits_mode = request.logits_mode,
+      };
+      StatusOr<Tensor> member = ForwardSingle(sub);
+      if (!member.ok()) {
+        return member.status();
+      }
+      const std::int64_t member_rows = last_only ? 1 : (t1 - t0);
+      const auto* mbase = member->data_ptr<float>();
+      for (std::int64_t r = 0; r < member_rows; ++r) {
+        for (std::int64_t i = 0; i < kVocab; ++i) {
+          out[((row_cursor + r) * kVocab) + i] = mbase[(r * kVocab) + i];
+        }
+      }
+      row_cursor += member_rows;
+    }
+    return logits;
   }
 
- private:
   ModelConfig config_;
   std::int32_t poison_ = -1;
 };
@@ -515,6 +571,62 @@ TEST(EngineTest, PerRequestFaultIsolated) {
 
   EXPECT_EQ(good.await_completion().terminal, SeqState::kFinished);
   EXPECT_EQ(DrainTokens(good), ReferenceTokens(model, {2, 3}, 4));
+  EXPECT_EQ(pool.stats().used, 0);
+}
+
+// --- Continuous-batching invariant (M9-T08) --------------------------------
+
+// The milestone's headline property (§8.5, §9.2 invariant 3): N concurrent
+// greedy requests produce output identical to running each sequentially. Here
+// the mock's per-member batched forward is bit-identical to its single-sequence
+// forward by construction, so the batched loop's output must equal the
+// standalone `Generate` oracle for every sequence.
+TEST(EngineTest, EightConcurrentGreedyMatchesSequential) {
+  CannedModel model;
+  BlockPool pool = MakePool();
+  auto engine = Unwrap(Engine::Create(model, pool, EngineConfig{}));
+
+  const std::vector<std::vector<std::int32_t>> prompts = {
+      {2}, {3, 4}, {1}, {5, 6, 7}, {2, 2}, {4}, {6}, {1, 3}};
+  std::vector<RequestHandle> handles;
+  handles.reserve(prompts.size());
+  for (const auto& p : prompts) {
+    handles.push_back(
+        Unwrap(engine->Submit(GreedyRequest(p, /*max_tokens=*/16))));
+  }
+  RunToIdle(*engine);
+
+  for (std::size_t i = 0; i < prompts.size(); ++i) {
+    EXPECT_EQ(DrainTokens(handles[i]), ReferenceTokens(model, prompts[i], 16))
+        << "sequence " << i << " diverged from its standalone run";
+    EXPECT_EQ(handles[i].await_completion().terminal, SeqState::kFinished);
+  }
+  EXPECT_EQ(pool.stats().used, 0);  // no leaks
+}
+
+// A request arriving mid-flight joins batching without perturbing the running
+// sequence (§9.2, staggered submission). Advancing A several steps before B is
+// submitted forces a *mixed* step — A decodes while B prefills in the same step
+// — and A's output must be unchanged from a run where B never existed.
+TEST(EngineTest, MidFlightArrivalDoesNotDisturbRunning) {
+  CannedModel model;
+  BlockPool pool = MakePool();
+  auto engine = Unwrap(Engine::Create(model, pool, EngineConfig{}));
+
+  const std::vector<std::int32_t> pa = {2};
+  const std::vector<std::int32_t> pb = {6};
+  auto a = Unwrap(engine->Submit(GreedyRequest(pa, /*max_tokens=*/16)));
+  // Advance A a few steps (prefill + two decodes) before B arrives.
+  EXPECT_TRUE(engine->Step());
+  EXPECT_TRUE(engine->Step());
+  EXPECT_TRUE(engine->Step());
+  auto b = Unwrap(engine->Submit(GreedyRequest(pb, /*max_tokens=*/16)));
+  RunToIdle(*engine);
+
+  EXPECT_EQ(DrainTokens(a), ReferenceTokens(model, pa, 16));
+  EXPECT_EQ(DrainTokens(b), ReferenceTokens(model, pb, 16));
+  EXPECT_EQ(a.await_completion().terminal, SeqState::kFinished);
+  EXPECT_EQ(b.await_completion().terminal, SeqState::kFinished);
   EXPECT_EQ(pool.stats().used, 0);
 }
 

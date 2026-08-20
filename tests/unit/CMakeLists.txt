@@ -281,6 +281,19 @@ engine_add_tests(TREE unit SOURCES
        engine::sampling engine::tensor
   LABELS runtime)
 
+# runtime_batching_test (M9-T08): the continuous-batching loop integration on
+# real fixtures — 8 concurrent greedy requests through the Engine produce output
+# identical to 8 sequential engine::Generate runs (the CB invariant, §8.5), on
+# both tiny-llama (untied) and tiny-qwen2 (tied + biases), plus staggered
+# mid-flight arrivals and a recorded throughput-sanity ratio (§9.3). Full model
+# forwards run inside, so SCALAR_PASS registers it twice (host ISA + forced
+# scalar) — the first runtime suite in the forced-scalar pass. `runtime` label.
+engine_add_tests(TREE unit SOURCES
+  runtime_batching_test.cpp
+  DEPS engine::runtime engine::engine engine::model engine::kvcache
+  LABELS runtime
+  SCALAR_PASS)
+
 # scheduler_test (M9-T04): the pure scheduling policy — table-driven over plain
 # descriptor structs (no engine/model/pool/allocator on the hot path): decode-
 # first (starvation impossible), admission blocked on block availability, token

@@ -3198,3 +3198,78 @@ were removed/rewritten. **No BASELINES entry** (no perf claim; the whole-step
 throughput number is the M9-T08 criterion). Format + scoped tidy clean (six
 headers edited → includer sets swept; the avx2 attention TU reuses the same Ops,
 the known arm64-DB gap, CI-proven).
+
+### M9-T08 — Engine loop integration (2026-08-19)
+
+The continuous-batching loop lands: `Engine::Step()`'s M9-T03/T04 per-sequence
+placeholder execution (steps 5–6) is replaced **in place** by the two batched
+passes of design §9.1, and every request now flows through the batched forward +
+batched sampler. Steps 1–4 (drain commands, retire cancelled, schedule, apply
+preempt) are unchanged; this ticket is pure composition of the M9-T05…T07 pieces
+inside `src/runtime/engine.{h,cpp}` plus tests — no new `src/` file, no kernel,
+no new ADR edge.
+
+**The loop** (`RunBatchPass` + helpers). Step 5 gathers the admitted sequences
+into `pass_entries_` (erase from `waiting_`, `EnsureCache`, → `kRunning`, push
+`running_`), step 6 the still-running decode set; each invokes one `RunBatchPass`:
+
+- `BuildPassInputs` fills one `engine::engine::BatchSeqInput` per member — prompt
+  (fresh) or `prompt ++ generated` (resumed preempted, §10.2) for prefill, the
+  single last-sampled token for decode — staging the prefill concatenations into
+  one flat `prefill_tokens_` buffer reserved to the exact total up front so its
+  `data()` stays stable under the member spans.
+- `BatchAssembler::Assemble{Prefill,Decode}` (M9-T05) → `MakeForwardRequest(kLast)`
+  → `model.forward` (M9-T07 batched, `[B, V]`) → one `BatchedSampler::Sample`
+  (M7-T06) over the whole block → per-row `DeliverSampled` (append → `stop.Observe`
+  → push `OutputItem` → finish transition, the single-sequence `Generate` tail
+  lifted onto the sequence).
+- The engine thread owns one reused `assembler_` + `batched_sampler_` + the
+  per-pass scratch (`pass_entries_`/`pass_seqs_`/`pass_results_`/`prefill_tokens_`/
+  `pass_pre_len_`), grown on demand and kept across steps → allocation-free
+  steady-state decode (§5.2).
+
+**B == 1 has no fast path** — a single-sequence step runs the batched code too, so
+the ~26 existing T03/T04 mock tests now drive the batched loop unchanged (the
+regression guarantee), and `ExecuteAndDeliver` (the single-sequence forward)
+survives **only** as the fault-recovery fallback.
+
+**Two-tier per-request fault recovery** (T08's realization of §11.2; the
+`BatchedSampler` per-row-status refinement itself is M9-T10):
+
+- *Forward fault* (`RecoverForwardFailure`): a batched forward appends K/V per
+  sequence inside itself, so a mid-batch error can leave one cache mid-append.
+  The loop snapshots each member's pre-forward `cache->length()` and, on failure,
+  `truncate`s every member back to it (clearing the in-progress-forward state),
+  then re-runs each through the single-sequence `ExecuteAndDeliver` — healthy
+  members deliver bit-identically (§8.5), only the genuine faulter fails
+  (ADR-003). A decode-time pool exhaustion surfaces here as a per-request failure;
+  routing it to preemption is M9-T09.
+- *Sampler fault* (`RecoverSampleFailure`): the forward committed all K/V, so it
+  must **not** re-run. `BatchedSampler::Sample` reports the first bad row and
+  leaves `out` unspecified, so the loop re-samples each row over the **same**
+  committed `[B, V]` logits via `SampleWithLogprobs` — bit-identical (same
+  `detail::SampleRow`) — delivering healthy rows and failing only the bad ones.
+  This is the path `PerRequestFaultIsolated` (a NaN-logits request batched with a
+  healthy one) now exercises.
+
+**Design deviation recorded (§9.4 as-built).** RUNNING-cancel handling stays at
+the top of the step (`RetireCancelled`), not moved to the step end as the M9-T03
+note anticipated for T08: commands drain only at step boundaries, so there is
+never an in-flight batch when a cancel is applied — top-of-step is simpler and
+equivalent, and cancel latency is still ≤ one step (§11.1).
+
+**Tests.** New `tests/unit/runtime_batching_test.cpp` (the milestone headline,
+`runtime` label, **SCALAR_PASS** — the first runtime suite in the forced-scalar
+pass): 8 concurrent greedy requests through the `Engine` == 8 sequential
+`Generate` runs, token-for-token, on **both** tiny-llama (untied) and tiny-qwen2
+(tied+biases) optimized backends; staggered mid-flight arrivals (a mixed
+prefill+decode step) matching their standalone runs; and a recorded throughput
+ratio — 8 concurrent completed in **≈0.34×** the 8-sequential wall-clock on the
+dev machine (well under the 8× criterion, §9.3), pool `used == 0` at end.
+`runtime_engine_test.cpp` gained the mock-driven `EightConcurrentGreedyMatchesSequential`
+and `MidFlightArrivalDoesNotDisturbRunning` cases, and its `CannedModel` grew a
+batched-forward path (per-member append + `[B, V]` one-hot, mirroring
+`ReferenceModel::ForwardBatched`) so the whole 28-case suite runs on the batched
+loop. **1335 → 1345 ctest green** (+2 mock cases; +4 fixture cases ×2 SCALAR_PASS).
+design scheduler-runtime.md §9.4 "as built" + §5.2 cancel note; format + scoped
+tidy clean (`engine.h` header edit → its three includers swept).

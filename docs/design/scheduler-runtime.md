@@ -538,12 +538,14 @@ class Engine {
 >   (M9-T05…T08) replace the per-sequence execution, preserving that output. The
 >   decode set is snapshotted **before** admission, so a freshly admitted sequence
 >   produces exactly one token this step (its prefill) and decodes from the next.
-> - **Cancellation is handled entirely up front in T03** (`RetireCancelled`, step
->   2 extended to RUNNING as well as WAITING/PREEMPTED): the per-sequence model
->   has no in-flight batch at a step boundary, so a cancel of a sequence in any
->   live state is applied immediately. The batched loop (M9-T08) moves
->   RUNNING-cancel handling to the end of the step, where a cancel that lands
->   during the forward is applied at the next boundary (§11.1).
+> - **Cancellation is handled entirely up front** (`RetireCancelled`, step 2
+>   extended to RUNNING as well as WAITING/PREEMPTED): commands drain only at a
+>   step boundary, so there is no in-flight batch when a cancel is applied, and a
+>   cancel of a sequence in any live state takes effect immediately. This holds
+>   for the batched loop too — M9-T08 **kept** RUNNING-cancel at the top of the
+>   step (not moved to the end as first sketched here): a cancel that lands
+>   *during* a batched forward simply waits in the queue and is applied at the
+>   next boundary (≤ one step, §11.1; §9.4 as-built).
 > - **`Stop` is abort-and-close and idempotent**; `~Engine` calls it. It joins the
 >   thread, then closes every still-open channel `kCancelled` (including undrained
 >   submissions) and drops every `Sequence` (RAII frees blocks). `Submit` after
@@ -1095,6 +1097,67 @@ per-token cost grows sublinearly with batch size until memory-bandwidth-bound. T
 integration test records the ratio; it is a sanity check (the engine batches at
 all), not a tuned number (M12 owns throughput tuning). The number is recorded, not
 asserted against a threshold.
+
+### 9.4 As built (M9-T08)
+
+`src/runtime/engine.{h,cpp}` — `Step()`'s M9-T03/T04 per-sequence placeholder
+execution is replaced in place by the two batched passes; steps 1–4 (drain,
+retire-cancelled, schedule, apply-preempt) are unchanged. Realized choices, all
+deliberate:
+
+- **The batched passes reuse the pre-built pieces verbatim.** Step 5 collects
+  the admitted sequences into `pass_entries_`, step 6 the running set; each calls
+  one `RunBatchPass`, which fills `BatchSeqInput`s → `BatchAssembler::Assemble{
+  Prefill,Decode}` (M9-T05) → `MakeForwardRequest(kLast)` → `model.forward`
+  (M9-T07 batched) → one `BatchedSampler::Sample` over the `[B, V]` block (M7-T06)
+  → per-row `DeliverSampled`. The engine thread owns one reused `assembler_`, one
+  `batched_sampler_`, and the per-pass scratch (`pass_entries_`/`pass_seqs_`/
+  `pass_results_`/`prefill_tokens_`), grown on demand and kept across steps, so a
+  steady-state decode allocates nothing (§5.2).
+- **B == 1 goes through the batched path too** — no single-sequence fast path in
+  the normal loop. Bit-identity to the standalone `Generate` is the M9-T07
+  guarantee (§8.5), so every existing T03/T04 mock test now exercises the batched
+  loop unchanged, and the new fixture suite proves the real-model CB invariant on
+  both backends. `ExecuteAndDeliver` (the single-sequence forward) survives only
+  as the fault-recovery fallback below.
+- **Two-tier per-request fault recovery** (the T08-scope realization of §11.2,
+  which fully lands in M9-T10). A batched forward appends K/V per sequence and
+  samples per row, so a fault must fail only the offending request:
+  - *Forward fault* (`RecoverForwardFailure`): a mid-batch forward error can
+    leave one cache mid-append. The loop snapshots each member's pre-forward
+    `cache->length()`, and on failure `truncate`s every member back to it
+    (clearing the in-progress-forward state) then re-runs each member through the
+    single-sequence `ExecuteAndDeliver`. Healthy members deliver bit-identically;
+    only the genuine faulter fails. A decode-time pool exhaustion surfaces here as
+    a per-request failure — routing it to preemption is M9-T09.
+  - *Sampler fault* (`RecoverSampleFailure`): the forward committed all K/V, so
+    the loop must **not** re-run it. `BatchedSampler::Sample` reports the first bad
+    row and leaves `out` unspecified (the per-row-status refinement is M9-T10, §14),
+    so the loop re-samples each row over the **same** committed `[B, V]` logits via
+    the single-sequence `SampleWithLogprobs` — bit-identical (same
+    `detail::SampleRow`) — delivering healthy rows and failing only the bad ones.
+    This is the path the `PerRequestFaultIsolated` test (a NaN-logits request
+    batched with a healthy one) now exercises.
+  Both recovery paths run only on the error path; the steady state is one batched
+  forward + one batched sample per pass.
+- **RUNNING-cancel stays at the top of the step** (`RetireCancelled`, step 2),
+  not moved to the step end as §5.2's M9-T03 as-built note anticipated for T08.
+  Commands are drained only at step boundaries (§5.2), so there is never an
+  in-flight batch when a cancel is applied; handling it at the top is simpler and
+  equivalent, and a cancel that arrives *during* a forward still lands in the
+  queue and takes effect at the next boundary (≤ one step, §11.1). The in-flight
+  token is produced but never delivered (the channel closes `kCancelled` first).
+- **`runtime_batching_test.cpp`** is the milestone's headline suite (§13,
+  `runtime` label, **SCALAR_PASS** — the first runtime suite in the forced-scalar
+  pass): 8 concurrent greedy requests through the `Engine` == 8 sequential
+  `Generate` runs, token-for-token, on tiny-llama (untied) and tiny-qwen2
+  (tied+biases); staggered mid-flight arrivals matching their standalone runs
+  (the mixed prefill+decode step); and a recorded throughput ratio (§9.3 — 8
+  concurrent completed in ≈0.34× the 8-sequential wall-clock on the dev machine,
+  well under 8×). `runtime_engine_test.cpp` gained the mock-driven CB-invariant
+  and staggered-arrival cases and now drives its whole 28-case suite through the
+  batched loop. No new ADR edge (`runtime → engine`/`sampling` already linked);
+  no `src/` change beyond `engine.{h,cpp}`.
 
 ---
 

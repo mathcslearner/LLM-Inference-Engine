@@ -1,10 +1,13 @@
 #pragma once
 
 #include "core/status.h"
+#include "engine/batch.h"
 #include "kvcache/block_pool.h"
 #include "model/model.h"
 #include "runtime/channel.h"
 #include "runtime/request.h"
+#include "sampling/batched_sampler.h"
+#include "sampling/sampler.h"
 #include "scheduler/scheduler.h"
 
 #include <condition_variable>
@@ -14,8 +17,10 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -27,23 +32,28 @@
 // runs the forward(s), samples one token per sequence, and retires finished /
 // cancelled / failed sequences.
 //
-// What lands in T03: the API, the mutex+condvar submission queue, the loop
-// thread scaffold (`Start`/`Stop`), and a `Step()` whose *shape* is the full
-// §9.1 loop with two labelled placeholders the later tickets substitute in
-// place, not restructure:
+// Loop as of M9-T08: `Step()` is the full §9.1 continuous-batching loop —
+// schedule → assemble → two batched forwards → batched sample → deliver →
+// retire:
 //
-//   * admission is now the `scheduler::Scheduler` decision component (M9-T04):
+//   * admission is the `scheduler::Scheduler` decision component (M9-T04):
 //     `ScheduleStep()` builds the plain descriptor inputs (§6.1) from the
 //     engine-thread state, and `Step()` applies the resulting prefill / decode
 //     / preempt decisions (§6.2). Preemption is evict-and-recompute
 //     (`ReleaseCache` → re-prefill `prompt ++ generated` on re-admission, the
 //     §10.2 resumable seam); the batched loop that validates it under memory
 //     pressure is M9-T09.
-//   * execution runs one `model::forward` **per sequence** over the existing
-//     single-sequence `ForwardRequest` — the body of `engine::Generate`'s
-//     decode loop, lifted onto the `Sequence` — so a request's output equals a
-//     standalone `Generate` run today. The batched prefill/decode passes
-//     (M9-T05…T08) replace the per-sequence execution, preserving that output.
+//   * execution runs at most two batched `model::forward`s per step — one
+//     ragged prefill over the admitted sequences, then one batched decode over
+//     the running set (§7 two passes) — via the M9-T05 `BatchAssembler` and the
+//     M9-T07 batched forward, sampled by one M7-T06 `BatchedSampler` over the
+//     `[B, V]` logits. Because every op is row-/sequence-local and the batched
+//     GEMM equals the single-row GEMV bit-for-bit (§8.5), a sequence's output
+//     is identical whether it runs alone or batched — the continuous-batching
+//     invariant. `ExecuteAndDeliver` (the single-sequence forward) survives as
+//     the per-request fault fallback (§11.2): on a mid-batch forward or sampler
+//     fault the loop rolls the batch back and re-runs each member alone, so one
+//     bad request fails only itself, never the loop.
 //
 // Layering (ADR-002): `runtime` is the layer-4 orchestration module; this
 // header names `model::Model` (the forward contract) and
@@ -187,8 +197,28 @@ class Engine {
   void DrainCommands();    // step 1
   void RetireCancelled();  // step 2 (all states)
   [[nodiscard]] scheduler::SchedulerOutput ScheduleStep();  // step 3
-  void ExecuteAndDeliver(Entry& entry, bool prefill);       // steps 5/6 per seq
-  void RetireTerminal();                                    // step 7
+  // Steps 5/6: run one batched pass (prefill or decode) over `pass_entries_` —
+  // assemble → forward → sample → deliver, with the per-request fault
+  // fallbacks.
+  void RunBatchPass(bool prefill);
+  // Fill `pass_seqs_` (the assembler input) from `pass_entries_`: prompt
+  // (fresh) or prompt ++ generated (resumed) for prefill; the last sampled
+  // token for decode.
+  void BuildPassInputs(bool prefill);
+  // Append a sampled token to a sequence and deliver it: stop-check, push the
+  // OutputItem, and mark finished. Shared by the batched and fallback paths.
+  // Operates only on the sequence (no engine state), so it is static.
+  static void DeliverSampled(Entry& entry, sampling::SampleResult next);
+  // A mid-batch forward fault: roll every member back to its pre-forward length
+  // and re-run each as a standalone forward (§11.2).
+  void RecoverForwardFailure(bool prefill);
+  // A batched-sampler fault: re-sample per row over the same committed logits,
+  // failing only the bad rows (§11.2).
+  void RecoverSampleFailure(std::span<const float> block, std::int64_t vocab);
+  // The single-sequence forward + sample + deliver — the fallback the recovery
+  // paths re-run per member.
+  void ExecuteAndDeliver(Entry& entry, bool prefill);
+  void RetireTerminal();                     // step 7
   static void CloseCancelled(Entry& entry);  // transition + close a live seq
   void Shutdown();                           // post-join teardown
 
@@ -209,6 +239,21 @@ class Engine {
   std::unordered_map<RequestId, std::unique_ptr<Entry>> requests_;
   std::deque<RequestId> waiting_;   // FCFS order (preempted at head, §3.2)
   std::vector<RequestId> running_;  // sequences being decoded
+
+  // Reused batched-execution machinery (§5.2): the engine thread owns one
+  // assembler and one batched sampler, plus the per-pass scratch — all grown on
+  // demand and kept across steps, so a steady-state decode step allocates
+  // nothing (the Workspace/BatchedSampler discipline).
+  ::engine::engine::BatchAssembler assembler_;
+  sampling::BatchedSampler batched_sampler_;
+  std::vector<Entry*> pass_entries_;  // this pass's sequences, row-aligned
+  std::vector<::engine::engine::BatchSeqInput> pass_seqs_;  // assembler input
+  std::vector<std::int64_t>
+      pass_pre_len_;  // per-member pre-forward cache length
+  std::vector<sampling::SampleResult> pass_results_;  // batched-sample output
+  std::vector<std::int32_t> prefill_tokens_;  // flat prompt++generated staging
+  std::vector<std::pair<std::size_t, std::size_t>>
+      prefill_ranges_;  // per-member (offset, length) into prefill_tokens_
 
   std::thread thread_;
 };

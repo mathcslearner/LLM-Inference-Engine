@@ -1154,7 +1154,7 @@ the result.
 **Acceptance criteria:**
 - Tests: batched decode logits match sequential single-sequence decode for each member; batch with heterogeneous cache lengths covered.
 
-### M9-T08 · Engine loop integration
+### M9-T08 · Engine loop integration — ✅ DONE (2026-08-19)
 The continuous-batching loop: engine thread runs `step()` — schedule → assemble →
 forward (prefills then decodes, or combined per design doc) → sample → append tokens →
 deliver to channels → retire finished sequences. Streaming tokens flow to handles as
